@@ -17,7 +17,7 @@ class AppDatabase {
   final String path;
 
   /// 현재 스키마 버전. 올릴 때마다 [_migrations]에 단계를 추가한다.
-  static const int schemaVersion = 1;
+  static const int schemaVersion = 2;
 
   /// 파일 기반 DB를 연다. 경로를 주지 않으면 사용자 데이터 디렉터리를 쓴다.
   factory AppDatabase.open({String? file}) {
@@ -72,7 +72,7 @@ class AppDatabase {
   }
 
   static final List<void Function(Database)> _migrations =
-      <void Function(Database)>[_v1];
+      <void Function(Database)>[_v1, _v2];
 
   /// 트랜잭션 헬퍼. 예외가 나면 롤백한다.
   T transaction<T>(T Function() body) {
@@ -279,4 +279,27 @@ void _v1(Database db) {
       value INTEGER NOT NULL
     );
   ''');
+}
+
+/// v2 — 주문 라인.
+///
+/// v1에서는 주문의 구성 품목이 태스크로만 표현됐다. 소비자 앱이 주문을 넣는
+/// 순간에는 아직 태스크가 없으므로, 주문 자체가 품목·수량을 들고 있어야 한다.
+/// 관제는 이 라인을 읽어 출고 태스크로 전개한다.
+void _v2(Database db) {
+  db.execute('''
+    CREATE TABLE order_lines (
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      seq      INTEGER NOT NULL,
+      sku      TEXT NOT NULL,
+      name     TEXT NOT NULL,
+      qty      INTEGER NOT NULL,
+      lot_id   TEXT,
+      PRIMARY KEY (order_id, seq)
+    );
+  ''');
+  db.execute('CREATE INDEX idx_order_lines_order ON order_lines(order_id)');
+
+  // 관제가 아직 전개하지 않은 주문을 찾기 위한 표시.
+  db.execute("ALTER TABLE orders ADD COLUMN expanded INTEGER NOT NULL DEFAULT 1");
 }

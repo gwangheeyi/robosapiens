@@ -2,9 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:robo_control/core/fleet_engine.dart';
-import 'package:robo_core/data/app_database.dart';
+import 'package:robo_core/robo_core_sqlite.dart';
 import 'package:robo_core/data/repositories.dart';
-import 'package:robo_core/data/sqlite_repositories.dart';
 import 'package:robo_core/models/enums.dart';
 
 FleetEngine _engine({SqliteDataStore? store}) {

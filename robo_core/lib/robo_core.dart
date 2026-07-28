@@ -1,13 +1,12 @@
-/// RoboSapiens 물류 플랫폼 공용 계층.
+/// RoboSapiens 물류 플랫폼 공용 계층 — **플랫폼 중립**.
 ///
-/// 관제센터(robo_control)와 소비자 주문 앱(roboapp)이 같은 도메인 모델과
-/// 저장소 계약을 공유한다. 저장소 구현을 SQLite에서 PostgreSQL·REST로
-/// 바꿔도 이 패키지의 인터페이스는 그대로다.
+/// 도메인 모델과 저장소 *인터페이스*만 담는다. 웹을 포함한 모든 타깃에서
+/// 임포트할 수 있다. SQLite 구현은 `dart:ffi`가 필요하므로
+/// [robo_core_sqlite.dart]로 분리했다.
 library;
 
-export 'data/app_database.dart';
+export 'data/memory_store.dart';
 export 'data/repositories.dart';
-export 'data/sqlite_repositories.dart';
 export 'models/enums.dart';
 export 'models/event.dart';
 export 'models/inventory.dart';

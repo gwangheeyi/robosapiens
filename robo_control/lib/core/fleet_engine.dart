@@ -455,6 +455,7 @@ class FleetEngine extends ChangeNotifier {
     _updateWorkers(dt);
     _spawnDemand(dt);
     _reapLeases();
+    _intakeCustomerOrders(dt);
     _assign();
     for (final r in robots) {
       _stepRobot(r, dt);
@@ -1006,6 +1007,66 @@ class FleetEngine extends ChangeNotifier {
       final removed = taskOrder.removeLast();
       final rt = tasks[removed];
       if (rt != null && rt.isTerminal) tasks.remove(removed);
+    }
+  }
+
+  double _intakeTimer = 0;
+
+  /// 소비자 앱이 접수한 주문을 읽어 출고 태스크로 전개한다.
+  ///
+  /// 소비자 앱은 주문과 라인만 기록하고(`expanded = 0`) 태스크는 만들지
+  /// 않는다. 스케줄러·레이아웃을 아는 쪽은 관제이기 때문이다.
+  void _intakeCustomerOrders(double dt) {
+    _intakeTimer -= dt;
+    if (_intakeTimer > 0) return;
+    _intakeTimer = 3;
+
+    for (final incoming in store.orders.loadUnexpanded()) {
+      final lines = store.orders.loadLines(incoming.id);
+      store.orders.markExpanded(incoming.id);
+
+      // 이미 캐시에 있으면 재사용하고, 없으면 새로 담는다.
+      final order = orders.cast<SalesOrder?>().firstWhere(
+            (o) => o?.id == incoming.id,
+            orElse: () => null,
+          ) ??
+          incoming;
+      if (!orders.contains(order)) {
+        orders.insert(0, order);
+        if (orders.length > 80) orders.removeLast();
+      }
+
+      var created = 0;
+      for (final line in lines) {
+        if (line.qty <= 0) continue;
+        final task = _buildOutboundTask(
+          order,
+          line.sku,
+          line.name,
+          fixedQty: line.qty,
+          preferredLotId: line.lotId,
+        );
+        if (task != null) {
+          order.taskIds.add(task.id);
+          created++;
+        }
+      }
+
+      if (created == 0) {
+        order.state = OrderState.failed;
+        order.closedAt = simNow;
+        _saveOrder(order);
+      }
+
+      _log(
+        created == 0 ? Severity.serious : Severity.info,
+        '주문',
+        'APP',
+        '${order.id} 소비자 앱 주문 접수 (${order.customer}, ${order.urgency.label}) — '
+            '라인 ${lines.length}건 중 $created건 태스크 전개'
+            '${created == 0 ? " · 가용 재고 부족" : ""}.',
+        orderId: order.id,
+      );
     }
   }
 

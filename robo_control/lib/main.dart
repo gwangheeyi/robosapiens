@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'core/fleet_engine.dart';
-import 'package:robo_core/robo_core.dart';
+import 'package:robo_core/robo_core_sqlite.dart';
 import 'ui/app_shell.dart';
 import 'ui/theme.dart';
 

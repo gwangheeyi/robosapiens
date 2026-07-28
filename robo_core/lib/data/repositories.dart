@@ -158,13 +158,44 @@ abstract class InventoryRepository {
   List<StockMove> recentMoves({int limit = 200, String? lotId});
 }
 
+/// 주문 라인 — 주문이 담고 있는 품목·수량.
+class OrderLine {
+  OrderLine({
+    required this.sku,
+    required this.name,
+    required this.qty,
+    this.lotId,
+  });
+
+  final String sku;
+  final String name;
+  final int qty;
+
+  /// 로트를 지정한 경우. 비우면 FEFO 규칙으로 관제가 고른다.
+  final String? lotId;
+}
+
 /// 주문 저장소.
 abstract class OrderRepository {
   List<SalesOrder> loadRecent({int limit = 200});
 
-  void insert(SalesOrder order, {String source = 'auto'});
+  /// [expanded]가 false면 관제가 아직 태스크로 전개하지 않은 주문이다.
+  /// 소비자 앱이 넣는 주문이 여기 해당한다.
+  void insert(
+    SalesOrder order, {
+    String source = 'auto',
+    bool expanded = true,
+    List<OrderLine> lines = const <OrderLine>[],
+  });
 
   void update(SalesOrder order);
+
+  /// 아직 전개되지 않은 주문(소비자 앱 접수분)을 오래된 순으로 돌려준다.
+  List<SalesOrder> loadUnexpanded({int limit = 50});
+
+  List<OrderLine> loadLines(String orderId);
+
+  void markExpanded(String orderId);
 }
 
 /// 태스크 저장소.

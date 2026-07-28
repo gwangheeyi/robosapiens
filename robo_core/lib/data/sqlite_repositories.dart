@@ -470,13 +470,34 @@ class _SqliteOrderRepository implements OrderRepository {
   }
 
   @override
-  void insert(SalesOrder order, {String source = 'auto'}) {
+  void insert(
+    SalesOrder order, {
+    String source = 'auto',
+    bool expanded = true,
+    List<OrderLine> lines = const <OrderLine>[],
+  }) {
+    _db.transaction(() {
+      _insertOrder(order, source, expanded);
+      for (var i = 0; i < lines.length; i++) {
+        final l = lines[i];
+        _c.execute(
+          '''
+          INSERT INTO order_lines (order_id, seq, sku, name, qty, lot_id)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ''',
+          <Object?>[order.id, i, l.sku, l.name, l.qty, l.lotId],
+        );
+      }
+    });
+  }
+
+  void _insertOrder(SalesOrder order, String source, bool expanded) {
     _c.execute(
       '''
       INSERT INTO orders
         (id, customer, urgency, created_at, due_at, line_count, state,
-         done_lines, failed_lines, closed_at, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         done_lines, failed_lines, closed_at, source, expanded)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       <Object?>[
         order.id,
@@ -490,8 +511,44 @@ class _SqliteOrderRepository implements OrderRepository {
         order.failedLines,
         order.closedAt == null ? null : _iso(order.closedAt!),
         source,
+        expanded ? 1 : 0,
       ],
     );
+  }
+
+  @override
+  List<SalesOrder> loadUnexpanded({int limit = 50}) {
+    final rows = _c.select(
+      'SELECT id FROM orders WHERE expanded = 0 ORDER BY created_at LIMIT ?',
+      <Object?>[limit],
+    );
+    if (rows.isEmpty) return <SalesOrder>[];
+    final ids = rows.map((r) => r['id'] as String).toSet();
+    return loadRecent(limit: 500).where((o) => ids.contains(o.id)).toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  }
+
+  @override
+  List<OrderLine> loadLines(String orderId) => _c
+      .select(
+        'SELECT * FROM order_lines WHERE order_id = ? ORDER BY seq',
+        <Object?>[orderId],
+      )
+      .map(
+        (r) => OrderLine(
+          sku: r['sku'] as String,
+          name: r['name'] as String,
+          qty: r['qty'] as int,
+          lotId: r['lot_id'] as String?,
+        ),
+      )
+      .toList();
+
+  @override
+  void markExpanded(String orderId) {
+    _c.execute('UPDATE orders SET expanded = 1 WHERE id = ?', <Object?>[
+      orderId,
+    ]);
   }
 
   @override

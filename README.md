@@ -8,7 +8,7 @@
 |---|---|---|
 | [`robo_core/`](robo_core/) | 공용 도메인 모델 + 저장소 계층 (Repository 인터페이스 · SQLite 구현) | 구현 |
 | [`robo_control/`](robo_control/) | **관제센터** — 로봇 배차·안전·재고·주문 통제 (Flutter desktop) | 구현 |
-| `roboapp/` | 소비자 주문 앱 — 상품 조회·주문·배송 조회 (Flutter mobile) | 예정 |
+| [`roboapp/`](roboapp/) | **소비자 주문 앱** — 3온도 상품 주문 + WebRTC 실시간 화면 (Flutter web·Android) | 구현 |
 
 ```
 소비자 앱 ─┐
@@ -22,9 +22,11 @@ FEFO·긴급도·동선 기반으로 로봇 태스크를 전개합니다.
 ## 시작하기
 
 ```bash
-cd robo_control
-flutter pub get
-flutter run -d linux
+# 관제센터
+cd robo_control && flutter run -d linux
+
+# 소비자 앱
+cd roboapp && flutter run -d chrome
 ```
 
 문서는 [robo_control/README.md](robo_control/README.md),
