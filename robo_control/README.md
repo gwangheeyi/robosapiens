@@ -89,6 +89,7 @@ lib/
 │   ├── layout.dart               평면도 · 통로 그래프 · 최단 경로
 │   ├── coordination.dart         태스크 리스 · 자원 점유 · 상태 비콘
 │   ├── scheduler.dart            우선순위·적합도 스코어링, FEFO 정렬
+│   ├── robot_link.dart           실장비 링크 게이트웨이(TCP 8788 · NDJSON)
 │   └── fleet_engine.dart         운영 루프(환경·수요·배정·주행·배터리·안전·이력)
 └── ui/
     ├── theme.dart                팔레트 · 상태 색상 매핑
@@ -105,11 +106,32 @@ lib/
 주요 테이블: `robots` · `robot_telemetry` · `workers` · `lots` · `stock_moves`(재고 원장) ·
 `orders` · `tasks` · `task_steps` · `events` · `incidents` · `counters`.
 
-앱은 [`DataStore`](lib/data/repositories.dart) 인터페이스에만 의존하므로,
+앱은 [`DataStore`](../robo_core/lib/data/repositories.dart) 인터페이스에만 의존하므로,
 PostgreSQL·REST 구현체를 만들어 갈아끼우면 UI와 제어 로직은 그대로 둘 수 있습니다.
+
+## 실장비 연동
+
+기동 시 로봇 링크 게이트웨이(TCP `8788`, 한 줄 = JSON 한 건)를 함께 엽니다.
+여기에 접속한 로봇은 **위치·방위·배터리를 스스로 보고**하고, 관제는 경로
+웨이포인트·안전 정지·속도 상한·충전만 하달합니다. 배차·FEFO·안전·재고 로직은
+시뮬레이션 로봇과 완전히 동일하게 적용됩니다.
+
+접속이 끊기면 해당 로봇의 태스크를 회수해 대기열로 되돌리고 배차 대상에서
+제외하며, 재접속하면 자동 복귀합니다. 실장비가 붙어 있는 동안 배속은 1×로
+고정됩니다.
+
+구획마다 **적재 스테이션**(`LOAD-A`/`LOAD-C`/`LOAD-F`)이 있고, 여기에 접속한
+로봇팔이 관제 지시를 받아 로봇에 화물을 실어 줍니다. 출고 태스크는 랙 집품 →
+적재 스테이션 → 출고 도크 순으로 진행됩니다.
+
+참고 구현: [`robo_pinky`](../robo_pinky/) — ROS 2 Jazzy + Gazebo Harmonic 위의
+Pinky 3대 + OpenMANIPULATOR-X 3대. 프로토콜 명세와 좌표계는
+[설계 문서](../robo_pinky/docs/PROJECT_SUMMARY.md), 실행 방법은
+[사용 설명서](../robo_pinky/docs/USER_GUIDE.md)에 있습니다.
 
 ## 현재 범위
 
-관제 로직과 운영 정책의 **실행 가능한 명세**입니다. 로봇 거동은 시뮬레이션이며,
-실제 장비 연동(VDA 5050 / ROS 2), 상태 영속화, 안전 인증 부품 적용 등
-현장 배포에 필요한 작업은 [PROJECT_SUMMARY.md §10](docs/PROJECT_SUMMARY.md#10-한계와-향후-과제)에 정리되어 있습니다.
+관제 로직과 운영 정책의 **실행 가능한 명세**입니다. 로봇 거동은 시뮬레이션
+또는 Gazebo 물리 시뮬레이션이며, 표준 프로토콜 정렬(VDA 5050), 로봇 측 지역
+경로 재계획, 안전 인증 부품 적용 등 현장 배포에 필요한 작업은
+[PROJECT_SUMMARY.md §10](docs/PROJECT_SUMMARY.md#10-한계와-향후-과제)에 정리되어 있습니다.

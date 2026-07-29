@@ -13,7 +13,42 @@ import 'package:robo_core/models/warehouse.dart';
 import 'package:robo_core/data/repositories.dart';
 import 'coordination.dart';
 import 'layout.dart';
+import 'robot_link.dart';
 import 'scheduler.dart';
+
+/// 로봇 한 대의 진행 정체 감시 상태.
+class _StallWatch {
+  _StallWatch(this.at);
+
+  /// 마지막으로 유의미하게 움직인 지점.
+  Offset at;
+
+  /// 그 뒤로 제자리에 머문 시간(초).
+  double seconds = 0;
+
+  /// 이번 정체에서 경로 재계획을 이미 시도했는가.
+  bool rerouted = false;
+
+  void reset(Offset pos) {
+    at = pos;
+    seconds = 0;
+    rerouted = false;
+  }
+}
+
+/// 로봇팔에 지시한 적재 작업 한 건.
+class _ArmJob {
+  _ArmJob({required this.armId, required this.stationId});
+
+  final String armId;
+  final String stationId;
+
+  /// 지시 후 경과 시간(초).
+  double waited = 0;
+  bool done = false;
+  bool failed = false;
+  String? reason;
+}
 
 /// 처리량 집계 버킷(5분 단위).
 class ThroughputBucket {
@@ -30,16 +65,29 @@ class ThroughputBucket {
 /// 바뀔 때마다 저장소에 기록하고(write-through), 기동 시에는 저장소에서
 /// 복원한다. 저장소 구현을 PostgreSQL·REST로 바꿔도 이 클래스는 그대로다.
 ///
-/// 로봇 거동(주행·집품)은 아직 이 클래스 안에서 시뮬레이션되며, 실제 장비
-/// 연동 시 해당 부분이 로봇 어댑터로 대체된다.
+/// 로봇 거동(주행·집품)은 기본적으로 이 클래스 안에서 시뮬레이션된다. 다만
+/// [link]로 접속한 로봇(Gazebo의 Pinky 등)은 예외로, **위치·배터리는 실장비의
+/// 보고값을 그대로 쓰고 관제는 경로·정지·속도 상한만 하달한다.** 배차·안전·
+/// 재고 로직은 두 경우 모두 동일하다.
 class FleetEngine extends ChangeNotifier {
-  FleetEngine({required this.store, DateTime? clock}) {
+  FleetEngine({required this.store, DateTime? clock, RobotLinkServer? link})
+    : link = link ?? RobotLinkServer() {
     simNow = clock ?? DateTime(2026, 7, 28, 9, 0);
+    this.link
+      ..onHello = _onLinkHello
+      ..onDropped = _onLinkDropped
+      ..onLog = _onLinkLog
+      ..onArmHello = _onArmHello
+      ..onArmDropped = _onArmDropped
+      ..onArmResult = _onArmResult;
     _bootstrap();
   }
 
   /// 영속 저장소(원장).
   final DataStore store;
+
+  /// 실장비(Gazebo Pinky 포함) 링크 서버.
+  final RobotLinkServer link;
 
   /// 조작 주체 표기. 이력·재고 원장에 남는다.
   String operatorName = '관제';
@@ -50,6 +98,22 @@ class FleetEngine extends ChangeNotifier {
       const Duration(milliseconds: 200),
       (_) => tick(),
     );
+    unawaited(_startLink());
+  }
+
+  Future<void> _startLink() async {
+    final ok = await link.start();
+    _log(
+      ok ? Severity.info : Severity.warning,
+      '운영',
+      'LINK',
+      ok
+          ? '로봇 링크 게이트웨이 개방 — ${link.host}:${link.port}. '
+                '현장 로봇(Gazebo Pinky 포함)의 접속을 대기합니다.'
+          : '로봇 링크 게이트웨이를 열지 못했습니다(${link.lastError}). '
+                '시뮬레이션 로봇만 운영합니다.',
+    );
+    notifyListeners();
   }
 
   static const Duration leaseTtl = Duration(seconds: 20);
@@ -105,6 +169,7 @@ class FleetEngine extends ChangeNotifier {
   @override
   void dispose() {
     _timer?.cancel();
+    unawaited(link.stop());
     super.dispose();
   }
 
@@ -448,9 +513,10 @@ class FleetEngine extends ChangeNotifier {
   @visibleForTesting
   void tick() {
     if (paused) return;
-    final dt = 0.2 * speedMultiplier;
+    final dt = 0.2 * effectiveSpeedMultiplier;
     simNow = simNow.add(Duration(milliseconds: (dt * 1000).round()));
 
+    _pullTelemetry();
     _updateEnvironment(dt);
     _updateWorkers(dt);
     _spawnDemand(dt);
@@ -460,12 +526,434 @@ class FleetEngine extends ChangeNotifier {
     for (final r in robots) {
       _stepRobot(r, dt);
     }
+    _pushLinkCommands();
     _fleetScaling(dt);
     _rollBuckets(dt);
     _broadcast(dt);
 
     notifyListeners();
   }
+
+  // ────────────────────────────────────────────── 실장비 링크(Gazebo Pinky 등)
+
+  /// 실장비가 붙어 있으면 배속을 강제로 1×로 낮춘다.
+  ///
+  /// 현장 로봇은 실시간으로 움직인다. 관제 시계만 4배로 흐르면 로봇이
+  /// 유독 느린 것처럼 보이고 배터리·처리량 지표도 왜곡된다.
+  bool get realTimeLocked => link.linkedCount > 0;
+
+  double get effectiveSpeedMultiplier => realTimeLocked ? 1.0 : speedMultiplier;
+
+  /// 이 로봇이 실장비 링크로 제어되는가(현재 접속 중).
+  bool isLinked(Robot r) => link.isLinked(r.id);
+
+  /// 링크 전용 로봇인데 접속이 끊긴 상태인가.
+  bool isLinkOffline(Robot r) => _linkManaged(r) && !link.isLinked(r.id);
+
+  /// 링크로만 움직이는 기종(자체 시뮬레이션 대상이 아님).
+  static bool _linkManaged(Robot r) => r.model.toUpperCase().startsWith('PINKY');
+
+  /// 경유 웨이포인트 소진 반경(unit). 로봇 쪽 값(1.2)보다 조금 넉넉해야
+  /// 관제가 영원히 도착을 기다리는 일이 없다.
+  static const double _linkReach = 1.3;
+
+  /// 종점 도착 판정 반경(unit = 0.5 m). 랙 슬롯 좌표는 선반 중심선이라
+  /// 로봇이 그 위에 설 수 없다. 현장 로봇도 통로에 정지해 슬롯에 접근한다.
+  static const double _linkGoalReach = 5.0;
+
+  Robot? _robotById(String id) =>
+      robots.cast<Robot?>().firstWhere((r) => r?.id == id, orElse: () => null);
+
+  /// 로봇이 보고한 실제 포즈·배터리를 관제 상태에 반영한다.
+  void _pullTelemetry() {
+    for (final r in robots) {
+      final t = link.telemetryOf(r.id);
+      if (t == null) continue;
+      r.pos = Offset(
+        WarehouseLayout.clampX(t.x),
+        WarehouseLayout.clampY(t.y),
+      );
+      r.heading = t.heading;
+      r.battery = t.battery.clamp(0.0, 100.0);
+      r.speed = t.speed;
+      r.odometer = t.odometer;
+      r.pushTrace(r.pos);
+    }
+  }
+
+  /// 스텝 판정 후 로봇에게 내려보낼 명령을 정리한다.
+  void _pushLinkCommands() {
+    for (final r in robots) {
+      if (!link.isLinked(r.id)) continue;
+      final holding = r.state == RobotState.estop;
+      link.sendHold(
+        r.id,
+        holding,
+        reason: holding ? (r.safetyNote ?? '관제 정지 명령') : null,
+      );
+      link.sendCharge(r.id, r.state == RobotState.charging);
+      link.sendSpeed(r.id, holding ? 0 : _speedOf(r));
+      link.sendPath(
+        r.id,
+        _linkWaypoints(r),
+        label: r.destinationLabel,
+        goalTolerance: _linkGoalReach,
+      );
+    }
+  }
+
+  /// 진행 중인 로봇팔 적재 작업(태스크 ID → 작업 상태).
+  final Map<String, _ArmJob> _armJobs = <String, _ArmJob>{};
+
+  /// 팔이 응답하지 않을 때 자동 진행으로 넘어가는 한계 시간(초).
+  static const double _armTimeout = 45;
+
+  /// 적재 스텝을 진행시켜도 되는지 판단한다.
+  ///
+  /// 이 구획 적재 스테이션에 **실물 로봇팔이 접속해 있고** 로봇도 실장비라면,
+  /// 팔에게 적재를 지시하고 완료 보고를 기다린다. 둘 중 하나라도 시뮬레이션이면
+  /// (팔이 없거나 로봇이 Gazebo에 없으면) 다른 스텝과 똑같이 시간으로 진행한다.
+  ///
+  /// `true`를 돌려주면 호출자가 평소대로 스텝 시간을 누적한다.
+  bool _serveLoadStep(Robot r, WorkTask t, TaskStep step, double dt) {
+    final stationId = step.resourceId;
+    if (stationId == null) return true;
+
+    final armId = link.armAtStation(stationId);
+    if (armId == null || !link.isLinked(r.id)) return true;
+
+    final job = _armJobs[t.id];
+    if (job == null) {
+      _armJobs[t.id] = _ArmJob(armId: armId, stationId: stationId);
+      link.sendLoad(
+        armId,
+        robotId: r.id,
+        taskId: t.id,
+        item: t.sku == null ? t.title : '${t.sku} ${t.qty}개',
+        qty: t.qty,
+        robotPos: r.pos,
+      );
+      _log(
+        Severity.info,
+        '작업',
+        armId,
+        '$stationId 로봇팔에 ${r.id}(${r.name}) 적재 지시 — '
+            '${t.sku ?? t.title} ${t.qty}개.',
+        taskId: t.id,
+      );
+      r.safetyNote = '로봇팔 적재 지시 전달';
+      _drain(r, dt, 0.01);
+      return false;
+    }
+
+    if (job.failed) {
+      _armJobs.remove(t.id);
+      link.sendLoadAbort(job.armId, t.id);
+      _failStep(r, t, '로봇팔 적재 실패 — ${job.reason ?? "사유 미보고"}');
+      return false;
+    }
+
+    if (job.done) {
+      _armJobs.remove(t.id);
+      _log(
+        Severity.info,
+        '작업',
+        job.armId,
+        '${job.stationId} 로봇팔 적재 완료 — ${r.id}(${r.name}) 인수.',
+        taskId: t.id,
+      );
+      step.elapsed = step.duration;
+      _finishStep(r, t, step);
+      return false;
+    }
+
+    job.waited += dt;
+    if (job.waited > _armTimeout) {
+      _armJobs.remove(t.id);
+      link.sendLoadAbort(job.armId, t.id);
+      _log(
+        Severity.warning,
+        '작업',
+        job.armId,
+        '${job.stationId} 로봇팔이 ${_armTimeout.toStringAsFixed(0)}초 내 응답하지 않았습니다. '
+            '수동 적재로 전환합니다.',
+        taskId: t.id,
+      );
+      return true; // 자동 진행으로 넘어간다(교착 방지).
+    }
+
+    r.safetyNote = '${job.stationId} 로봇팔 적재 중';
+    step.elapsed = math.min(job.waited, step.duration * 0.95);
+    _drain(r, dt, 0.01);
+    return false;
+  }
+
+  void _onArmResult(String armId, String taskId, bool ok, String? reason) {
+    final job = _armJobs[taskId];
+    if (job == null || job.armId != armId) return;
+    if (ok) {
+      job.done = true;
+    } else {
+      job.failed = true;
+      job.reason = reason;
+    }
+    notifyListeners();
+  }
+
+  void _onArmHello(ArmHello hello) {
+    _log(
+      Severity.info,
+      '가용성',
+      hello.id,
+      '${hello.id}(${hello.model}) ${hello.stationId} 적재 스테이션 접속. '
+          '${hello.zone?.label ?? "구획 미상"} 구획 출고 화물을 로봇에 적재합니다.',
+    );
+    notifyListeners();
+  }
+
+  void _onArmDropped(String armId) {
+    // 이 팔을 기다리던 작업은 자동 진행으로 풀어 준다.
+    _armJobs.removeWhere((_, job) => job.armId == armId);
+    _log(
+      Severity.warning,
+      '가용성',
+      armId,
+      '$armId 적재 스테이션 링크 단절. 해당 구획 적재는 수동 처리로 전환합니다.',
+    );
+    notifyListeners();
+  }
+
+  /// 실장비에 내려보낼 웨이포인트 열.
+  ///
+  /// 관제 경로의 종점은 랙 슬롯 좌표(선반 중심선)다. 통로 교차점에서 거기로
+  /// 대각선으로 파고들면 실물 로봇은 선반 모서리에 막혀 슬롯 정면에 서지
+  /// 못한다. 그래서 슬롯 바로 앞 통로 지점을 한 점 끼워 넣어 **정면 진입**
+  /// 시킨다. 관제가 들고 있는 [Robot.path]는 그대로 두므로 도착 판정과
+  /// 시뮬레이션 로봇의 거동은 영향을 받지 않는다.
+  List<Offset> _linkWaypoints(Robot r) {
+    if (r.path.isEmpty) return r.path;
+    final goal = r.path.last;
+    final inRack = WarehouseLayout.rackRowY.any(
+      (y) => (goal.dy - y).abs() <= 3.2,
+    );
+    if (!inRack) return r.path;
+
+    // 로봇이 진입하는 쪽 통로를 고른다(랙을 관통하지 않도록).
+    final fromY = r.path.length >= 2 ? r.path[r.path.length - 2].dy : r.pos.dy;
+    var aisleY = WarehouseLayout.corridorY.first;
+    for (final y in WarehouseLayout.corridorY) {
+      if ((y - fromY).abs() < (aisleY - fromY).abs()) aisleY = y;
+    }
+
+    final approach = Offset(goal.dx, aisleY);
+    if ((approach - goal).distance < 1.0) return r.path;
+    return <Offset>[...r.path.take(r.path.length - 1), approach, goal];
+  }
+
+  /// 실장비는 관제가 위치를 적분하지 않는다. 실제로 지나간 웨이포인트만
+  /// 소진해 스텝 완료 판정에 쓴다.
+  void _advanceLinked(Robot r, double dt) {
+    while (r.path.isNotEmpty) {
+      final reach = r.path.length == 1 ? _linkGoalReach : _linkReach;
+      if ((r.path.first - r.pos).distance > reach) break;
+      r.path.removeAt(0);
+    }
+    if (r.state == RobotState.moving && r.speed < 0.05) {
+      final t = link.telemetryOf(r.id);
+      if (t?.note != null) r.safetyNote = t!.note;
+    }
+    _watchStall(r, dt);
+  }
+
+  /// 진행 정체 감시(태스크 ID → 감시 상태).
+  final Map<String, _StallWatch> _stalls = <String, _StallWatch>{};
+
+  /// 경로 재계획까지의 정체 한계(초).
+  static const double _stallReroute = 25;
+
+  /// 태스크 회수까지의 정체 한계(초).
+  static const double _stallRequeue = 55;
+
+  /// 관제는 통로 그래프만 알고 있어서, 현장에만 있는 장애물(적재 스테이션
+  /// 받침대·낙하물 등) 앞에 로봇이 갇히면 스스로 빠져나오지 못한다.
+  ///
+  /// **관제가 이동을 허용했는데도 로봇이 실제로 나아가지 못하면** 먼저 경로를
+  /// 다시 깔아 주고, 그래도 풀리지 않으면 태스크를 회수해 다른 로봇에 넘긴다.
+  void _watchStall(Robot r, double dt) {
+    final watch = _stalls.putIfAbsent(r.id, () => _StallWatch(r.pos));
+
+    // 갈 길이 없거나 관제가 정지시킨 상태면 정체가 아니다.
+    if (r.path.isEmpty || _speedOf(r) < 0.05) {
+      watch.reset(r.pos);
+      return;
+    }
+    if ((r.pos - watch.at).distance > 0.6) {
+      watch.reset(r.pos);
+      return;
+    }
+
+    watch.seconds += dt;
+    if (watch.seconds < _stallReroute) return;
+
+    final t = r.taskId == null ? null : tasks[r.taskId];
+    if (watch.seconds >= _stallRequeue && t != null) {
+      _stalls.remove(r.id);
+      r.path.clear();
+      _requeue(t, '경로 정체 — ${watch.seconds.toStringAsFixed(0)}초간 진행 없음');
+      _log(
+        Severity.serious,
+        '작업',
+        r.id,
+        '${r.name}이(가) (${r.pos.dx.toStringAsFixed(1)}, '
+            '${r.pos.dy.toStringAsFixed(1)}) 지점에서 '
+            '${watch.seconds.toStringAsFixed(0)}초간 진행하지 못했습니다. '
+            '${t.id}를 회수해 재할당합니다. '
+            '현장 사유: ${r.safetyNote ?? "미보고"}',
+        taskId: t.id,
+      );
+      return;
+    }
+
+    if (!watch.rerouted) {
+      watch.rerouted = true;
+      final goal = r.path.last;
+      r.path = layout.route(r.pos, goal);
+      _log(
+        Severity.warning,
+        '작업',
+        r.id,
+        '${r.name} 진행 정체 ${watch.seconds.toStringAsFixed(0)}초 — 경로를 다시 계획합니다. '
+            '현장 사유: ${r.safetyNote ?? "미보고"}',
+        taskId: r.taskId,
+      );
+    }
+  }
+
+  /// 로봇이 자기소개를 보냈다. 신규면 플릿에 등록하고, 기존이면 복귀시킨다.
+  void _onLinkHello(RobotHello hello) {
+    final zones = <TempZone>{
+      for (final code in hello.zoneCodes) ...<TempZone>{
+        if (_zoneFromLinkCode(code) case final TempZone z) z,
+      },
+    };
+    if (zones.isEmpty) zones.add(TempZone.ambient);
+
+    final charger = layout.stationById[hello.homeChargerId];
+    final homeId = charger != null && charger.kind == StationKind.charger
+        ? charger.id
+        : layout.stations
+              .firstWhere(
+                (s) => s.kind == StationKind.charger && zones.contains(s.zone),
+                orElse: () => layout.stationById['CHG-1']!,
+              )
+              .id;
+
+    final existing = _robotById(hello.id);
+    if (existing != null) {
+      existing
+        ..reserve = false
+        ..powerSaving = false
+        ..state = RobotState.idle
+        ..activity = null
+        ..safetyNote = null
+        ..pos = Offset(
+          WarehouseLayout.clampX(hello.pos.dx),
+          WarehouseLayout.clampY(hello.pos.dy),
+        )
+        ..heading = hello.heading
+        ..battery = hello.battery.clamp(0.0, 100.0)
+        ..path.clear();
+      store.robots.setReserve(existing.id, false);
+      _log(
+        Severity.info,
+        '가용성',
+        hello.id,
+        '${hello.id}(${existing.name}) 현장 링크 재접속. '
+            '배터리 ${hello.battery.toStringAsFixed(0)}%로 운영에 복귀합니다.',
+      );
+    } else {
+      final robot = Robot(
+        id: hello.id,
+        name: hello.name,
+        model: hello.model,
+        pos: Offset(
+          WarehouseLayout.clampX(hello.pos.dx),
+          WarehouseLayout.clampY(hello.pos.dy),
+        ),
+        homeChargerId: homeId,
+        zoneRating: zones,
+        battery: hello.battery.clamp(0.0, 100.0),
+      );
+      robot.heading = hello.heading;
+      robots.add(robot);
+      _persistRegistration(robot);
+      _log(
+        Severity.info,
+        '가용성',
+        hello.id,
+        '${hello.id}(${hello.name}, ${hello.model}) 현장 링크 접속. '
+            '대응 구획 ${zones.map((z) => z.label).join("·")}, 홈 충전소 $homeId. '
+            '위치·배터리는 실장비 보고값을 사용합니다.',
+      );
+    }
+    beacons = robots.map((r) => RobotStatusBeacon.of(r, simNow)).toList();
+    notifyListeners();
+  }
+
+  /// 링크가 끊겼다. 로봇 상태를 신뢰할 수 없으므로 태스크를 회수한다.
+  void _onLinkDropped(String robotId) {
+    final r = _robotById(robotId);
+    if (r == null) return;
+    final carried = r.taskId;
+    if (carried != null) {
+      final t = tasks[carried];
+      if (t != null) _requeue(t, '현장 링크 단절');
+    }
+    ledger.releaseAllOf(r.id);
+    for (final s in layout.stations) {
+      if (s.occupiedBy == r.id) s.occupiedBy = null;
+    }
+    r
+      ..path.clear()
+      ..speed = 0
+      ..reserve = true
+      ..state = RobotState.standby
+      ..activity = '현장 링크 대기';
+    _log(
+      Severity.serious,
+      '가용성',
+      robotId,
+      '$robotId(${r.name}) 현장 링크 단절. '
+          '${carried == null ? "진행 중 태스크 없음" : "$carried 회수 후 재할당 대기열로 반환"}. '
+          '재접속 전까지 배차 대상에서 제외합니다.',
+      taskId: carried,
+    );
+    notifyListeners();
+  }
+
+  void _onLinkLog(String robotId, String severity, String message) {
+    final r = _robotById(robotId);
+    if (r == null || message.isEmpty) return;
+    _log(
+      switch (severity) {
+        'critical' => Severity.critical,
+        'serious' => Severity.serious,
+        'warning' => Severity.warning,
+        _ => Severity.info,
+      },
+      '작업',
+      robotId,
+      '${r.name}: $message',
+    );
+    notifyListeners();
+  }
+
+  static TempZone? _zoneFromLinkCode(String code) => switch (code.toLowerCase()) {
+    'ambient' || 'a' => TempZone.ambient,
+    'chilled' || 'c' => TempZone.chilled,
+    'frozen' || 'f' => TempZone.frozen,
+    _ => null,
+  };
 
   // ─────────────────────────────────────────────────────── 환경(3온도) 변동
 
@@ -722,6 +1210,7 @@ class FleetEngine extends ChangeNotifier {
 
     final loc = layout.locationById[chosen.locationId]!;
     final dock = layout.nearest(StationKind.outboundDock, loc.pos);
+    final bay = layout.loadingStation(loc.zone);
     // 가용 수량을 넘겨 예약하면 재고가 음수가 되므로 잔량으로 상한을 둔다.
     final qty = math.min(
       fixedQty ?? (1 + _rng.nextInt(4)),
@@ -757,6 +1246,19 @@ class FleetEngine extends ChangeNotifier {
           target: loc.pos,
           duration: 6,
           resourceId: loc.id,
+        ),
+        TaskStep(
+          kind: StepKind.move,
+          label: '${bay.id} 적재 스테이션으로 이동',
+          target: bay.pos,
+          duration: 0,
+        ),
+        TaskStep(
+          kind: StepKind.load,
+          label: '${bay.id} 로봇팔이 $name $qty개 적재',
+          target: bay.pos,
+          duration: 8,
+          resourceId: bay.id,
         ),
         TaskStep(
           kind: StepKind.move,
@@ -1176,6 +1678,19 @@ class FleetEngine extends ChangeNotifier {
   void _stepRobot(Robot r, double dt) {
     r.safetyNote = null;
 
+    // 링크 전용 기종은 접속이 살아 있을 때만 운영에 넣는다. 관제가 임의로
+    // 위치를 지어내면 실제 장비와 어긋나기 때문이다.
+    if (isLinkOffline(r)) {
+      r
+        ..reserve = true
+        ..state = RobotState.standby
+        ..activity = '현장 링크 대기'
+        ..speed = 0
+        ..path.clear();
+      r.idleSeconds += dt;
+      return;
+    }
+
     if (r.reserve) {
       r.state = RobotState.standby;
       r.idleSeconds += dt;
@@ -1210,7 +1725,10 @@ class FleetEngine extends ChangeNotifier {
 
     switch (r.state) {
       case RobotState.charging:
-        r.battery = math.min(100, r.battery + 0.55 * dt);
+        // 실장비는 충전 명령을 받아 스스로 회복하고 배터리를 보고한다.
+        if (!link.isLinked(r.id)) {
+          r.battery = math.min(100, r.battery + 0.55 * dt);
+        }
         r.activity = '충전 중 (${r.battery.toStringAsFixed(0)}%)';
         if (r.battery >= 95) {
           final chg = layout.stationById[r.homeChargerId];
@@ -1360,6 +1878,7 @@ class FleetEngine extends ChangeNotifier {
         StepKind.pick => RobotState.picking,
         StepKind.place => RobotState.placing,
         StepKind.handover => RobotState.handover,
+        StepKind.load => RobotState.loading,
         StepKind.scan => RobotState.picking,
         _ => RobotState.idle,
       };
@@ -1375,6 +1894,11 @@ class FleetEngine extends ChangeNotifier {
           _nearestWorkerDistance(r.pos) > 6.0) {
         r.safetyNote = '작업자 대기 중(인계 보류)';
         _drain(r, dt, 0.01);
+        return;
+      }
+
+      // 적재 스텝은 실물 로봇팔이 붙어 있으면 팔의 완료 보고를 기다린다.
+      if (step.kind == StepKind.load && !_serveLoadStep(r, t, step, dt)) {
         return;
       }
 
@@ -1685,6 +2209,10 @@ class FleetEngine extends ChangeNotifier {
   // ────────────────────────────────────────────────────────────── 주행/배터리
 
   void _advance(Robot r, double dt) {
+    if (link.isLinked(r.id)) {
+      _advanceLinked(r, dt);
+      return;
+    }
     var budget = _speedOf(r) * dt;
     if (budget <= 0) {
       r.speed = 0;
@@ -1742,6 +2270,8 @@ class FleetEngine extends ChangeNotifier {
   }
 
   void _drain(Robot r, double dt, double rate) {
+    // 실장비는 자기 배터리를 스스로 계산해 보고한다.
+    if (link.isLinked(r.id)) return;
     final zone = layout.zoneAt(r.pos);
     final cold = switch (zone) {
       TempZone.frozen => 1.35,
@@ -1832,9 +2362,10 @@ class FleetEngine extends ChangeNotifier {
   /// 배터리 저하 로봇을 대체할 예비기를 단계적으로 투입한다.
   void _requestBackfill(Robot low) {
     if (_deployCooldown > 0) return;
-    final reserveBot = robots
-        .cast<Robot?>()
-        .firstWhere((r) => r!.reserve, orElse: () => null);
+    final reserveBot = robots.cast<Robot?>().firstWhere(
+      (r) => r!.reserve && !isLinkOffline(r),
+      orElse: () => null,
+    );
     if (reserveBot == null) return;
     reserveBot.reserve = false;
     reserveBot.state = RobotState.idle;
@@ -1860,9 +2391,10 @@ class FleetEngine extends ChangeNotifier {
         .length;
 
     if (pending >= 5 && active < robots.length) {
-      final reserveBot = robots
-          .cast<Robot?>()
-          .firstWhere((r) => r!.reserve, orElse: () => null);
+      final reserveBot = robots.cast<Robot?>().firstWhere(
+        (r) => r!.reserve && !isLinkOffline(r),
+        orElse: () => null,
+      );
       if (reserveBot != null) {
         reserveBot.reserve = false;
         reserveBot.state = RobotState.idle;

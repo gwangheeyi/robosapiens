@@ -139,6 +139,30 @@ class WarehouseLayout {
         pos: const Offset(95, 38),
         zone: TempZone.frozen,
       ),
+      // 적재 스테이션 — 구획마다 하나. 로봇팔이 여기서 로봇에 화물을 싣는다.
+      //
+      // 좌표는 아무 데나 잡을 수 없다. 팔 받침대는 실물 장애물이므로
+      // **세로 통로에서도, 랙 열 진입선(랙 로케이션의 x)에서도 떨어진**
+      // 빈 자리여야 한다. 아래 x는 이웃한 랙 열 두 개의 정중앙이면서
+      // 세로 통로에서 3 unit 이상 떨어진 지점이다.
+      Station(
+        id: 'LOAD-A',
+        kind: StationKind.loading,
+        pos: const Offset(40.3, 38),
+        zone: TempZone.ambient,
+      ),
+      Station(
+        id: 'LOAD-C',
+        kind: StationKind.loading,
+        pos: const Offset(68.3, 38),
+        zone: TempZone.chilled,
+      ),
+      Station(
+        id: 'LOAD-F',
+        kind: StationKind.loading,
+        pos: const Offset(101.9, 38),
+        zone: TempZone.frozen,
+      ),
       Station(
         id: 'STB-1',
         kind: StationKind.standby,
@@ -279,6 +303,15 @@ class WarehouseLayout {
 
   List<StorageLocation> locationsIn(TempZone zone) =>
       locations.where((l) => l.zone == zone).toList();
+
+  /// 구획별 적재 스테이션(로봇팔이 설치된 자리).
+  ///
+  /// 로봇은 랙에서 집품한 화물을 이 자리에서 팔에게 실어 받은 뒤 도크로 간다.
+  /// 구획마다 정확히 하나씩 있다.
+  Station loadingStation(TempZone zone) => stations.firstWhere(
+    (s) => s.kind == StationKind.loading && s.zone == zone,
+    orElse: () => stationById['LOAD-A']!,
+  );
 
   static double manhattanish(Offset a, Offset b) =>
       (a.dx - b.dx).abs() + (a.dy - b.dy).abs();

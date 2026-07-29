@@ -24,6 +24,7 @@ enum RobotState {
   picking('집품', true),
   placing('하역', true),
   handover('작업자 인계', true),
+  loading('적재 대기', true),
   yielding('보행자 양보', true),
   blocked('자원 대기', true),
   returning('충전소 복귀', false),

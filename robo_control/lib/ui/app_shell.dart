@@ -269,6 +269,41 @@ class _Sidebar extends StatelessWidget {
                       fontSize: 11,
                     ),
                   ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '현장 링크',
+                    style: TextStyle(color: AppColors.muted, fontSize: 10),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: <Widget>[
+                      Icon(
+                        engine.link.linkedCount > 0
+                            ? Icons.cell_tower
+                            : Icons.wifi_tethering_off,
+                        size: 12,
+                        color: engine.link.linkedCount > 0
+                            ? AppColors.good
+                            : AppColors.muted,
+                      ),
+                      const SizedBox(width: 5),
+                      Expanded(
+                        child: Text(
+                          engine.link.linkedCount > 0
+                              ? '실장비 ${engine.link.linkedCount}대 접속'
+                              : engine.link.listening
+                              ? '게이트웨이 대기 :${engine.link.port}'
+                              : '게이트웨이 닫힘',
+                          style: TextStyle(
+                            color: engine.link.linkedCount > 0
+                                ? AppColors.textSecondary
+                                : AppColors.muted,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -369,40 +404,59 @@ class _SpeedControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const speeds = <double>[1, 2, 4, 8];
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.page,
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: AppColors.border),
-      ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          for (final s in speeds)
-            InkWell(
-              onTap: () => engine.setSpeed(s),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                decoration: BoxDecoration(
-                  color: engine.speedMultiplier == s
-                      ? AppColors.series1.withValues(alpha: 0.2)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: Text(
-                  '${s.toStringAsFixed(0)}×',
-                  style: TextStyle(
-                    color: engine.speedMultiplier == s
-                        ? AppColors.textPrimary
-                        : AppColors.muted,
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
+    final locked = engine.realTimeLocked;
+    final current = engine.effectiveSpeedMultiplier;
+
+    return Tooltip(
+      message: locked
+          ? '현장 로봇 ${engine.link.linkedCount}대 연동 중 — 실장비는 실시간으로 '
+                '움직이므로 배속을 1×로 고정합니다.'
+          : '시뮬레이션 배속',
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppColors.page,
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(
+            color: locked ? AppColors.warning.withValues(alpha: 0.6) : AppColors.border,
+          ),
+        ),
+        padding: const EdgeInsets.all(2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            if (locked)
+              const Padding(
+                padding: EdgeInsets.only(left: 5, right: 2),
+                child: Icon(Icons.lock_clock, size: 13, color: AppColors.warning),
+              ),
+            for (final s in speeds)
+              InkWell(
+                onTap: locked ? null : () => engine.setSpeed(s),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: current == s
+                        ? AppColors.series1.withValues(alpha: 0.2)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Text(
+                    '${s.toStringAsFixed(0)}×',
+                    style: TextStyle(
+                      color: current == s
+                          ? AppColors.textPrimary
+                          : AppColors.muted,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }

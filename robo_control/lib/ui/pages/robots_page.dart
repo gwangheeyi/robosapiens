@@ -121,13 +121,39 @@ class _BeaconTable extends StatelessWidget {
                       children: <Widget>[
                         SizedBox(
                           width: 84,
-                          child: Text(
-                            '${b.robotId} ${robot.name}',
-                            style: const TextStyle(
-                              color: AppColors.textPrimary,
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                            ),
+                          child: Row(
+                            children: <Widget>[
+                              if (engine.isLinked(robot) ||
+                                  engine.isLinkOffline(robot)) ...<Widget>[
+                                Tooltip(
+                                  message: engine.isLinked(robot)
+                                      ? '현장 장비 링크 연결됨 — 위치·배터리는 실장비 보고값'
+                                      : '현장 장비 링크 대기 중 — 배차 제외',
+                                  child: Icon(
+                                    engine.isLinked(robot)
+                                        ? Icons.cell_tower
+                                        : Icons.wifi_tethering_off,
+                                    size: 11,
+                                    color: engine.isLinked(robot)
+                                        ? AppColors.good
+                                        : AppColors.muted,
+                                  ),
+                                ),
+                                const SizedBox(width: 3),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  '${b.robotId} ${robot.name}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         SizedBox(

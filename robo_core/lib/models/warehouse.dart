@@ -23,6 +23,9 @@ enum StationKind {
   outboundDock('출고 도크'),
   charger('충전소'),
   workstation('작업 스테이션'),
+
+  /// 구획별 적재 스테이션. 로봇팔이 로봇에 화물을 실어 주는 자리다.
+  loading('적재 스테이션'),
   standby('대기 구역'),
   assembly('비상 집결지');
 

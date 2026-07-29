@@ -74,7 +74,8 @@ class AppColors {
     RobotState.moving ||
     RobotState.picking ||
     RobotState.placing ||
-    RobotState.handover => series1,
+    RobotState.handover ||
+    RobotState.loading => series1,
     RobotState.charging || RobotState.returning => series7,
     RobotState.powerSaving => warning,
     RobotState.blocked || RobotState.yielding => serious,
@@ -88,6 +89,7 @@ class AppColors {
     RobotState.picking => Icons.download_outlined,
     RobotState.placing => Icons.upload_outlined,
     RobotState.handover => Icons.volunteer_activism_outlined,
+    RobotState.loading => Icons.precision_manufacturing_outlined,
     RobotState.charging => Icons.bolt_outlined,
     RobotState.returning => Icons.u_turn_left_outlined,
     RobotState.powerSaving => Icons.energy_savings_leaf_outlined,

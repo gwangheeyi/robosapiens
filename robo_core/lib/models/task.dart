@@ -10,6 +10,9 @@ enum StepKind {
   place('하역'),
   scan('검수'),
   handover('인계'),
+
+  /// 구획 적재 스테이션의 로봇팔이 로봇에 화물을 실어 주는 스텝.
+  load('적재'),
   wait('대기');
 
   const StepKind(this.label);

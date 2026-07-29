@@ -236,6 +236,7 @@ class _MapPainter extends CustomPainter {
         StationKind.outboundDock => AppColors.series2,
         StationKind.charger => AppColors.series7,
         StationKind.workstation => AppColors.series5,
+        StationKind.loading => AppColors.series4,
         StationKind.standby => AppColors.muted,
         StationKind.assembly => AppColors.good,
       };
