@@ -4,13 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+if [[ -z "${RMW_IMPLEMENTATION:-}" ]]; then
+  if [[ -f /opt/ros/jazzy/lib/librmw_fastrtps_cpp.so ]]; then
+    RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  elif [[ -f /opt/ros/jazzy/lib/librmw_cyclonedds_cpp.so ]]; then
+    RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  else
+    echo "No supported ROS 2 RMW implementation was found." >&2
+    exit 1
+  fi
+fi
+export ROS_DOMAIN_ID RMW_IMPLEMENTATION
+if [[ "$RMW_IMPLEMENTATION" == "rmw_fastrtps_cpp" ]]; then
+  FASTDDS_BUILTIN_TRANSPORTS="${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}"
+  export FASTDDS_BUILTIN_TRANSPORTS
+fi
 
 docker run --detach --rm \
   --name robosapiens-rmf-api \
   --network host \
+  --ipc host \
   -e "ROS_DOMAIN_ID=$ROS_DOMAIN_ID" \
   -e "RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION" \
+  -e "FASTDDS_BUILTIN_TRANSPORTS=${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}" \
   -e "RMF_SERVER_USE_SIM_TIME=true" \
   ghcr.io/open-rmf/rmf-web/api-server:jazzy
 

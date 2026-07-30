@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'controller.dart';
 import 'map_view.dart';
@@ -437,6 +438,7 @@ class _MapPanel extends StatelessWidget {
                               ? Icons.map_outlined
                               : Icons.link_off,
                           text: controller.error ?? 'building map 대기 중',
+                          copyable: controller.error != null,
                         )
                       : RmfMapView(controller: controller),
                 ),
@@ -649,9 +651,14 @@ class _PanelTitle extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.icon, required this.text});
+  const _EmptyState({
+    required this.icon,
+    required this.text,
+    this.copyable = false,
+  });
   final IconData icon;
   final String text;
+  final bool copyable;
 
   @override
   Widget build(BuildContext context) {
@@ -663,11 +670,29 @@ class _EmptyState extends StatelessWidget {
           children: [
             Icon(icon, color: _muted, size: 24),
             const SizedBox(height: 9),
-            Text(
+            SelectableText(
               text,
               textAlign: TextAlign.center,
               style: const TextStyle(color: _muted),
             ),
+            if (copyable) ...[
+              const SizedBox(height: 10),
+              IconButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: text));
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('오류 메시지를 복사했습니다.'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+                tooltip: '오류 메시지 복사',
+                icon: const Icon(Icons.copy_outlined, size: 17),
+                color: _muted,
+              ),
+            ],
           ],
         ),
       ),

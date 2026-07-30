@@ -4,6 +4,9 @@ This integration runs the stock Open-RMF office simulation, connects its
 dispatcher and `tinyRobot` fleet adapter to the official `rmf-web` API server,
 and renders that API in a dedicated Flutter desktop console.
 
+한국어 실행 순서는
+[`docs/OPENRMF_APP_RUN_GUIDE.md`](docs/OPENRMF_APP_RUN_GUIDE.md)를 참고합니다.
+
 ```text
 rmf_demos_gz office
         |
@@ -67,4 +70,4 @@ flutter run -d linux \
 | `RMF_API_URL` | `http://127.0.0.1:8000` |
 | `RMF_SERVER_URI` | `ws://127.0.0.1:8000/_internal` |
 | `ROS_DOMAIN_ID` | `0` |
-| `RMW_IMPLEMENTATION` | `rmw_cyclonedds_cpp` |
+| `RMW_IMPLEMENTATION` | 설치된 Fast DDS/CycloneDDS 구현 자동 선택 |

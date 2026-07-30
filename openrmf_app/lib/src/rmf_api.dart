@@ -27,6 +27,22 @@ class RmfApi {
   Future<RmfBuildingMap> getBuildingMap() async =>
       RmfBuildingMap.fromJson(await _getObject('/building_map'));
 
+  Future<void> checkConnection() async {
+    final uri = baseUri.resolve('/time');
+    try {
+      final response = await _client
+          .get(uri)
+          .timeout(const Duration(seconds: 5));
+      _check(response, uri);
+    } on RmfApiException {
+      rethrow;
+    } catch (exception) {
+      throw RmfApiException(
+        'rmf-web API에 연결할 수 없습니다: ${baseUri.host}:${baseUri.port}',
+      );
+    }
+  }
+
   Future<List<RmfRobot>> getRobots() async =>
       RmfRobot.fromFleetList(await _getList('/fleets'));
 
@@ -63,9 +79,16 @@ class RmfApi {
 
   Future<Map<String, dynamic>> _getObject(String path) async {
     final uri = baseUri.resolve(path);
-    final response = await _client
-        .get(uri, headers: _headers)
-        .timeout(const Duration(seconds: 5));
+    late final http.Response response;
+    try {
+      response = await _client
+          .get(uri, headers: _headers)
+          .timeout(const Duration(seconds: 5));
+    } catch (exception) {
+      throw RmfApiException(
+        'rmf-web API에 연결할 수 없습니다: ${baseUri.host}:${baseUri.port}',
+      );
+    }
     _check(response, uri);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map) throw RmfApiException('$path 응답 형식이 올바르지 않습니다.');
@@ -74,9 +97,16 @@ class RmfApi {
 
   Future<List<dynamic>> _getList(String path) async {
     final uri = baseUri.resolve(path);
-    final response = await _client
-        .get(uri, headers: _headers)
-        .timeout(const Duration(seconds: 5));
+    late final http.Response response;
+    try {
+      response = await _client
+          .get(uri, headers: _headers)
+          .timeout(const Duration(seconds: 5));
+    } catch (exception) {
+      throw RmfApiException(
+        'rmf-web API에 연결할 수 없습니다: ${baseUri.host}:${baseUri.port}',
+      );
+    }
     _check(response, uri);
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! List) throw RmfApiException('$path 응답 형식이 올바르지 않습니다.');
@@ -85,6 +115,14 @@ class RmfApi {
 
   void _check(http.Response response, Uri uri) {
     if (response.statusCode >= 200 && response.statusCode < 300) return;
+    if (response.statusCode == 401) {
+      throw const RmfApiException('rmf-web 인증에 실패했습니다. RMF_API_TOKEN을 확인하세요.');
+    }
+    if (response.statusCode == 404 && uri.path == '/building_map') {
+      throw const RmfApiException(
+        'API는 연결됐지만 building map이 없습니다. office launch를 먼저 실행하세요.',
+      );
+    }
     throw RmfApiException('${uri.path} 요청 실패 (${response.statusCode})');
   }
 

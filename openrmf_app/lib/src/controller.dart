@@ -44,6 +44,7 @@ class RmfController extends ChangeNotifier {
     if (_refreshing) return;
     _refreshing = true;
     try {
+      await _api.checkConnection();
       final results = await Future.wait([
         _api.getBuildingMap(),
         _api.getRobots(),
