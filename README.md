@@ -10,6 +10,8 @@
 | [`robo_control/`](robo_control/) | **관제센터** — 로봇 배차·안전·재고·주문 통제 (Flutter desktop) | 구현 |
 | [`roboapp/`](roboapp/) | **소비자 주문 앱** — 3온도 상품 주문 + WebRTC 실시간 화면 (Flutter web·Android) | 구현 |
 | [`robo_pinky/`](robo_pinky/) | **로봇 시뮬레이터** — Gazebo 안의 Pinky 3대와 구획별 적재 로봇팔(OMX) 3대를 관제에 실장비로 연결 (ROS 2 Jazzy · Gazebo Harmonic) | 구현 |
+| [`openrmf_app/`](openrmf_app/) | **Open-RMF Office 관제 앱** — rmf-web API의 지도·로봇·태스크를 표시하는 Flutter desktop | 구현 |
+| [`openrmf/`](openrmf/) | **Open-RMF 실행 구성** — office 데모와 rmf-web API, Flutter 앱 연결 | 구현 |
 
 ```
 소비자 앱 ─┐                                     ┌─ 시뮬레이션 로봇 (RS-xx)
