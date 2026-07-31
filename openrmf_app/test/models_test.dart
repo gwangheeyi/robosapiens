@@ -25,6 +25,7 @@ void main() {
     expect(robots.single.level, 'L1');
     expect(robots.single.battery, 0.73);
     expect(robots.single.isWorking, isTrue);
+    expect(robots.single.lockedMutexGroups, isEmpty);
   });
 
   test('parses root-wrapped task category', () {
@@ -38,5 +39,30 @@ void main() {
     expect(task.id, 'task-1');
     expect(task.category, 'delivery');
     expect(task.robot, 'tinyRobot2');
+  });
+
+  test('recognizes canceled task status variants', () {
+    for (final status in ['canceled', 'cancelled', 'killed']) {
+      final task = RmfTask.fromJson({
+        'booking': {'id': 'task-$status'},
+        'category': 'patrol',
+        'status': status,
+      });
+      expect(task.isCanceled, isTrue);
+    }
+  });
+
+  test('parses Jazzy door mode wrapper', () {
+    final door = RmfDoor.fromJson(
+      {'name': 'main_door'},
+      {
+        'door_name': 'main_door',
+        'current_mode': {'value': 2},
+      },
+    );
+
+    expect(door.name, 'main_door');
+    expect(door.mode, 2);
+    expect(door.stateLabel, '열림');
   });
 }

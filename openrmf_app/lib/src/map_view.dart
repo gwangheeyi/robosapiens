@@ -31,6 +31,7 @@ class RmfMapView extends StatelessWidget {
                 painter: _GraphOnlyPainter(
                   level: level,
                   robots: controller.visibleRobots.toList(),
+                  trajectories: controller.trajectories,
                   selectedRobot: controller.selectedRobot,
                 ),
               ),
@@ -62,6 +63,7 @@ class RmfMapView extends StatelessWidget {
                   painter: _MapOverlayPainter(
                     level: level,
                     robots: controller.visibleRobots.toList(),
+                    trajectories: controller.trajectories,
                     selectedRobot: controller.selectedRobot,
                     imagePixels: imageSize,
                     destination: destination,
@@ -80,6 +82,7 @@ class _MapOverlayPainter extends CustomPainter {
   const _MapOverlayPainter({
     required this.level,
     required this.robots,
+    required this.trajectories,
     required this.selectedRobot,
     required this.imagePixels,
     required this.destination,
@@ -87,6 +90,7 @@ class _MapOverlayPainter extends CustomPainter {
 
   final RmfLevel level;
   final List<RmfRobot> robots;
+  final List<RmfTrajectory> trajectories;
   final String? selectedRobot;
   final Size imagePixels;
   final Rect destination;
@@ -116,24 +120,43 @@ class _MapOverlayPainter extends CustomPainter {
       final to = level.vertices[edge.to];
       canvas.drawLine(_point(from.x, from.y), _point(to.x, to.y), lane);
     }
+    for (final trajectory in trajectories.where(
+      (trajectory) => trajectory.level == level.name,
+    )) {
+      if (trajectory.points.length < 2) continue;
+      final path = Path();
+      final first = trajectory.points.first;
+      path.moveTo(_point(first.$1, first.$2).dx, _point(first.$1, first.$2).dy);
+      for (final point in trajectory.points.skip(1)) {
+        final mapped = _point(point.$1, point.$2);
+        path.lineTo(mapped.dx, mapped.dy);
+      }
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = trajectory.conflict ? Colors.redAccent : _amber
+          ..strokeWidth = trajectory.conflict ? 3 : 2
+          ..style = PaintingStyle.stroke,
+      );
+    }
     for (final robot in robots) {
       final center = _point(robot.x, robot.y);
       final selected = robot.name == selectedRobot;
       if (selected) {
         canvas.drawCircle(
           center,
-          14,
-          Paint()..color = _cyan.withValues(alpha: 0.16),
+          19,
+          Paint()..color = _cyan.withValues(alpha: 0.22),
         );
       }
       canvas.save();
       canvas.translate(center.dx, center.dy);
       canvas.rotate(-robot.yaw);
       final marker = Path()
-        ..moveTo(9, 0)
-        ..lineTo(-6, -6)
+        ..moveTo(13, 0)
+        ..lineTo(-8, -8)
         ..lineTo(-3, 0)
-        ..lineTo(-6, 6)
+        ..lineTo(-8, 8)
         ..close();
       canvas.drawPath(
         marker,
@@ -174,11 +197,13 @@ class _GraphOnlyPainter extends CustomPainter {
   const _GraphOnlyPainter({
     required this.level,
     required this.robots,
+    required this.trajectories,
     required this.selectedRobot,
   });
 
   final RmfLevel level;
   final List<RmfRobot> robots;
+  final List<RmfTrajectory> trajectories;
   final String? selectedRobot;
 
   @override
@@ -210,6 +235,25 @@ class _GraphOnlyPainter extends CustomPainter {
       final a = level.vertices[edge.from];
       final b = level.vertices[edge.to];
       canvas.drawLine(point(a.x, a.y), point(b.x, b.y), lane);
+    }
+    for (final trajectory in trajectories.where(
+      (trajectory) => trajectory.level == level.name,
+    )) {
+      if (trajectory.points.length < 2) continue;
+      final path = Path();
+      final first = trajectory.points.first;
+      path.moveTo(point(first.$1, first.$2).dx, point(first.$1, first.$2).dy);
+      for (final knot in trajectory.points.skip(1)) {
+        final mapped = point(knot.$1, knot.$2);
+        path.lineTo(mapped.dx, mapped.dy);
+      }
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = trajectory.conflict ? Colors.redAccent : _amber
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke,
+      );
     }
     for (final robot in robots) {
       canvas.drawCircle(

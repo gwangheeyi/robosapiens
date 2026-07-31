@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'controller.dart';
+import 'backend_bootstrap.dart';
 import 'map_view.dart';
 import 'models.dart';
+import 'operations_view.dart';
 
 const _bg = Color(0xff101417);
 const _surface = Color(0xff181d21);
@@ -16,9 +18,17 @@ const _amber = Color(0xffffb454);
 const _red = Color(0xffff6b6b);
 
 class OpenRmfApp extends StatefulWidget {
-  const OpenRmfApp({super.key, required this.apiUrl, required this.apiToken});
+  const OpenRmfApp({
+    super.key,
+    required this.apiUrl,
+    required this.apiToken,
+    required this.trajectoryUrl,
+    this.backend,
+  });
   final String apiUrl;
   final String apiToken;
+  final String trajectoryUrl;
+  final BackendSupervisor? backend;
 
   @override
   State<OpenRmfApp> createState() => _OpenRmfAppState();
@@ -28,6 +38,8 @@ class _OpenRmfAppState extends State<OpenRmfApp> {
   late final RmfController controller = RmfController(
     apiUrl: widget.apiUrl,
     apiToken: widget.apiToken,
+    trajectoryUrl: widget.trajectoryUrl,
+    backend: widget.backend,
   );
 
   @override
@@ -77,47 +89,87 @@ class _Console extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _TopBar(controller: controller),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  if (constraints.maxWidth < 900) {
-                    return Column(
-                      children: [
-                        Expanded(
-                          flex: 3,
-                          child: _MapPanel(controller: controller),
-                        ),
-                        SizedBox(
-                          height: 280,
-                          child: _OperationsPanel(controller: controller),
-                        ),
-                      ],
-                    );
-                  }
-                  return Row(
-                    children: [
-                      SizedBox(
-                        width: 250,
-                        child: _RobotPanel(controller: controller),
-                      ),
-                      Expanded(child: _MapPanel(controller: controller)),
-                      SizedBox(
-                        width: 340,
-                        child: _OperationsPanel(controller: controller),
-                      ),
-                    ],
-                  );
-                },
+    return DefaultTabController(
+      length: 5,
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              _TopBar(controller: controller),
+              Container(
+                color: _surface,
+                child: const TabBar(
+                  isScrollable: true,
+                  tabAlignment: TabAlignment.start,
+                  tabs: [
+                    Tab(icon: Icon(Icons.map_outlined), text: '지도'),
+                    Tab(icon: Icon(Icons.route_outlined), text: '태스크'),
+                    Tab(icon: Icon(Icons.smart_toy_outlined), text: '로봇'),
+                    Tab(icon: Icon(Icons.apartment_outlined), text: '설비'),
+                    Tab(icon: Icon(Icons.notifications_outlined), text: '알림'),
+                  ],
+                ),
               ),
-            ),
-          ],
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    _Overview(controller: controller),
+                    TasksView(controller: controller),
+                    RobotsView(controller: controller),
+                    InfrastructureView(controller: controller),
+                    AlertsView(controller: controller),
+                  ],
+                ),
+              ),
+              if (controller.notice != null)
+                MaterialBanner(
+                  content: Text(controller.notice!),
+                  actions: [
+                    TextButton(
+                      onPressed: controller.clearNotice,
+                      child: const Text('닫기'),
+                    ),
+                  ],
+                ),
+              AppLogPanel(controller: controller),
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _Overview extends StatelessWidget {
+  const _Overview({required this.controller});
+  final RmfController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 900) {
+          return Column(
+            children: [
+              Expanded(flex: 3, child: _MapPanel(controller: controller)),
+              SizedBox(
+                height: 280,
+                child: _OperationsPanel(controller: controller),
+              ),
+            ],
+          );
+        }
+        return Row(
+          children: [
+            SizedBox(width: 250, child: _RobotPanel(controller: controller)),
+            Expanded(child: _MapPanel(controller: controller)),
+            SizedBox(
+              width: 340,
+              child: _OperationsPanel(controller: controller),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -397,6 +449,15 @@ class _MapPanel extends StatelessWidget {
                   controller.building?.name.toUpperCase() ?? 'OFFICE MAP',
                   style: const TextStyle(
                     fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '${controller.visibleRobots.length} ROBOTS',
+                  style: TextStyle(
+                    color: controller.visibleRobots.isEmpty ? _red : _cyan,
+                    fontSize: 10,
                     fontWeight: FontWeight.w700,
                   ),
                 ),

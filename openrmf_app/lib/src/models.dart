@@ -60,6 +60,14 @@ class RmfLevel {
   final List<RmfGraphVertex> vertices;
   final List<RmfGraphEdge> edges;
 
+  List<String> get waypointNames =>
+      vertices
+          .map((vertex) => vertex.name)
+          .where((name) => name.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+
   factory RmfLevel.fromJson(Map<String, dynamic> json) {
     final images = _maps(json['images']);
     final graphs = _maps(json['nav_graphs']);
@@ -110,6 +118,8 @@ class RmfRobot {
     required this.battery,
     required this.taskId,
     required this.issueCount,
+    required this.lockedMutexGroups,
+    required this.requestingMutexGroups,
   });
 
   final String fleet;
@@ -122,6 +132,8 @@ class RmfRobot {
   final double battery;
   final String? taskId;
   final int issueCount;
+  final List<String> lockedMutexGroups;
+  final List<String> requestingMutexGroups;
 
   bool get isWorking => status == 'working';
 
@@ -138,6 +150,9 @@ class RmfRobot {
         final location = state['location'] is Map
             ? Map<String, dynamic>.from(state['location'] as Map)
             : const <String, dynamic>{};
+        final mutex = state['mutex_groups'] is Map
+            ? Map<String, dynamic>.from(state['mutex_groups'] as Map)
+            : const <String, dynamic>{};
         result.add(
           RmfRobot(
             fleet: fleetName,
@@ -152,12 +167,30 @@ class RmfRobot {
             issueCount: state['issues'] is List
                 ? (state['issues'] as List).length
                 : 0,
+            lockedMutexGroups: _textList(mutex['locked']),
+            requestingMutexGroups: _textList(mutex['requesting']),
           ),
         );
       }
     }
     return result;
   }
+}
+
+class RmfTrajectory {
+  const RmfTrajectory({
+    required this.fleet,
+    required this.robot,
+    required this.level,
+    required this.points,
+    required this.conflict,
+  });
+
+  final String fleet;
+  final String robot;
+  final String level;
+  final List<(double, double)> points;
+  final bool conflict;
 }
 
 class RmfTask {
@@ -168,6 +201,10 @@ class RmfTask {
     required this.fleet,
     required this.robot,
     required this.requestedAt,
+    required this.startedAt,
+    required this.finishedAt,
+    required this.requester,
+    required this.detail,
   });
 
   final String id;
@@ -176,6 +213,16 @@ class RmfTask {
   final String? fleet;
   final String? robot;
   final DateTime? requestedAt;
+  final DateTime? startedAt;
+  final DateTime? finishedAt;
+  final String? requester;
+  final Map<String, dynamic> detail;
+
+  bool get isActive =>
+      const {'queued', 'pending', 'underway', 'active'}.contains(status);
+
+  bool get isCanceled =>
+      const {'canceled', 'cancelled', 'killed'}.contains(status.toLowerCase());
 
   factory RmfTask.fromJson(Map<String, dynamic> json) {
     final booking = json['booking'] is Map
@@ -194,16 +241,170 @@ class RmfTask {
       requestedAt: millis == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(millis.toInt()),
+      startedAt: _dateFromMillis(json['unix_millis_start_time']),
+      finishedAt: _dateFromMillis(json['unix_millis_finish_time']),
+      requester: _nullableText(booking['requester']),
+      detail: Map<String, dynamic>.from(json),
     );
   }
+}
+
+class RmfDoor {
+  const RmfDoor({required this.name, required this.mode, required this.detail});
+
+  final String name;
+  final int mode;
+  final Map<String, dynamic> detail;
+
+  String get stateLabel => switch (mode) {
+    0 => '닫힘',
+    1 => '이동 중',
+    2 => '열림',
+    _ => '알 수 없음',
+  };
+
+  factory RmfDoor.fromJson(
+    Map<String, dynamic> descriptor,
+    Map<String, dynamic>? state,
+  ) {
+    final data = state ?? descriptor;
+    return RmfDoor(
+      name:
+          _nullableText(data['door_name']) ??
+          _nullableText(descriptor['name']) ??
+          '-',
+      mode: _integer(data['current_mode'], fallback: -1),
+      detail: Map<String, dynamic>.from(data),
+    );
+  }
+}
+
+class RmfLift {
+  const RmfLift({
+    required this.name,
+    required this.currentFloor,
+    required this.destinationFloor,
+    required this.availableFloors,
+    required this.doorState,
+    required this.motionState,
+    required this.currentMode,
+    required this.sessionId,
+    required this.detail,
+  });
+
+  final String name;
+  final String currentFloor;
+  final String destinationFloor;
+  final List<String> availableFloors;
+  final int doorState;
+  final int motionState;
+  final int currentMode;
+  final String sessionId;
+  final Map<String, dynamic> detail;
+
+  factory RmfLift.fromJson(
+    Map<String, dynamic> descriptor,
+    Map<String, dynamic>? state,
+  ) {
+    final data = state ?? descriptor;
+    return RmfLift(
+      name:
+          _nullableText(data['lift_name']) ??
+          _nullableText(descriptor['name']) ??
+          '-',
+      currentFloor: _nullableText(data['current_floor']) ?? '-',
+      destinationFloor: _nullableText(data['destination_floor']) ?? '',
+      availableFloors: data['available_floors'] is List
+          ? (data['available_floors'] as List).map((e) => '$e').toList()
+          : const [],
+      doorState: _integer(data['door_state'], fallback: -1),
+      motionState: _integer(data['motion_state'], fallback: -1),
+      currentMode: _integer(data['current_mode'], fallback: -1),
+      sessionId: _nullableText(data['session_id']) ?? '',
+      detail: Map<String, dynamic>.from(data),
+    );
+  }
+}
+
+class RmfWorkcell {
+  const RmfWorkcell({
+    required this.id,
+    required this.kind,
+    required this.mode,
+    required this.queue,
+    required this.detail,
+  });
+
+  final String id;
+  final String kind;
+  final int mode;
+  final int queue;
+  final Map<String, dynamic> detail;
+
+  factory RmfWorkcell.fromJson(String kind, Map<String, dynamic> data) =>
+      RmfWorkcell(
+        id: _nullableText(data['guid']) ?? _nullableText(data['id']) ?? '-',
+        kind: kind,
+        mode: _integer(data['mode'], fallback: -1),
+        queue: data['request_guid_queue'] is List
+            ? (data['request_guid_queue'] as List).length
+            : 0,
+        detail: Map<String, dynamic>.from(data),
+      );
+}
+
+class RmfAlert {
+  const RmfAlert({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.message,
+    required this.tier,
+    required this.responses,
+    required this.taskId,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String title;
+  final String subtitle;
+  final String message;
+  final String tier;
+  final List<String> responses;
+  final String? taskId;
+  final DateTime? createdAt;
+
+  factory RmfAlert.fromJson(Map<String, dynamic> json) => RmfAlert(
+    id: _nullableText(json['id']) ?? '-',
+    title: _nullableText(json['title']) ?? 'RMF 알림',
+    subtitle: _nullableText(json['subtitle']) ?? '',
+    message: _nullableText(json['message']) ?? '',
+    tier: _nullableText(json['tier']) ?? 'info',
+    responses: json['responses_available'] is List
+        ? (json['responses_available'] as List).map((e) => '$e').toList()
+        : const [],
+    taskId: _nullableText(json['task_id']),
+    createdAt: _dateFromMillis(json['unix_millis_alert_time']),
+  );
 }
 
 double _number(Object? value, {double fallback = 0}) =>
     value is num && value.isFinite ? value.toDouble() : fallback;
 
+int _integer(Object? value, {int fallback = 0}) {
+  if (value is num && value.isFinite) return value.toInt();
+  if (value is Map) {
+    return _integer(value['value'] ?? value['root'], fallback: fallback);
+  }
+  return fallback;
+}
+
 List<Map<String, dynamic>> _maps(Object? value) => value is List
     ? value.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
     : const [];
+
+List<String> _textList(Object? value) =>
+    value is List ? value.map((e) => '$e').toList() : const [];
 
 String? _nullableText(Object? value) {
   final text = value?.toString().trim() ?? '';
@@ -215,6 +416,9 @@ String? _rootText(Object? value) {
   if (value is Map) return _nullableText(value['root']);
   return null;
 }
+
+DateTime? _dateFromMillis(Object? value) =>
+    value is num ? DateTime.fromMillisecondsSinceEpoch(value.toInt()) : null;
 
 double normalizeAngle(double angle) {
   var result = angle;

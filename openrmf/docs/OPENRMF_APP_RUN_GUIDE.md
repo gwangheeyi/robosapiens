@@ -66,8 +66,171 @@ cd /home/gyi/robosapiens
 7. building map이 API에 등록될 때까지 대기
 8. Flutter 의존성 확인 후 Linux 앱 실행
 
+Gazebo 화면 없이 실행하려면 다음과 같이 지정합니다.
+
+```bash
+RMF_HEADLESS=true ./openrmf/scripts/run_office_flutter.sh
+```
+
 정상적으로 연결되면 Flutter 상단에 `API ONLINE`이 표시되고 office 지도 위에
 `tinyRobot1`, `tinyRobot2`가 나타납니다.
+
+Flutter 앱의 상단 탭에서 다음 기능을 사용할 수 있습니다.
+
+- `지도`: 다층 지도, 로봇 위치와 RMF 예상 궤적
+- `태스크`: patrol/delivery/clean/custom compose 요청, 취소, 로그, 반복 예약
+- `로봇`: fleet 필터, 배터리와 이슈, 운행 제외/복귀, mutex group 수동 해제
+- `설비`: 도어 개폐, 리프트 호출, dispenser/ingestor 상태
+- `알림`: 응답 대기 중인 RMF 알림 확인 및 응답
+
+궤적 서버를 별도로 운영하는 경우
+`RMF_TRAJECTORY_SERVER_URL=ws://호스트:8006`으로 지정합니다. 서버가 없으면
+지도와 나머지 관제 기능은 그대로 작동하고 궤적만 표시되지 않습니다.
+
+### 웹 대시보드 실행
+
+Open-RMF 자체 웹 대시보드를 사용하려면 다음 스크립트를 실행합니다.
+
+```bash
+cd /home/gyi/robosapiens
+./openrmf/scripts/run_office_web.sh
+```
+
+웹 대시보드 주소는 `http://localhost:3000`입니다. 자동 브라우저 실행을
+비활성화하려면 `RMF_OPEN_BROWSER=false`를 지정합니다.
+
+웹 전용 스크립트는 stable Jazzy API와 office 백엔드를 준비하고, 공식 rmf-web
+0.3.0 소스 커밋을 고정한 자체 dashboard 이미지를 실행합니다. 첫 실행에만
+`openrmf/docker/rmf-web-dashboard/Dockerfile`을 이용한 이미지 빌드가
+수행됩니다. 깨진 nightly dashboard와 Flutter Web은 사용하지 않습니다.
+
+### 다른 컴퓨터에서 웹 대시보드 실행
+
+저장소를 다른 컴퓨터로 복제한 뒤 해당 컴퓨터에서도 같은 스크립트를
+실행하면 됩니다. 저장소의 절대 경로와 사용자 이름은 달라도 됩니다.
+스크립트가 자신의 위치를 기준으로 필요한 파일을 찾습니다.
+
+```bash
+git clone <이 저장소 주소> ~/robosapiens
+cd ~/robosapiens
+./openrmf/scripts/run_office_web.sh
+```
+
+필수 조건은 Ubuntu 24.04, ROS 2 Jazzy, 빌드된 Open-RMF workspace와 Docker
+접근 권한입니다. Open-RMF workspace가 `~/rmf_ws`가 아닌 곳에 있다면 실행할
+때 위치를 전달합니다.
+
+```bash
+RMF_WS=/home/myuser/custom_rmf_ws \
+  ./openrmf/scripts/run_office_web.sh
+```
+
+집 컴퓨터에서는 처음 한 번 대시보드 소스를 내려받아 Docker 이미지를
+빌드합니다. 따라서 첫 실행에는 인터넷 연결이 필요하고 시간이 걸릴 수
+있습니다. 이후에는 로컬의 `robosapiens-rmf-dashboard:0.3.0` 이미지를
+재사용합니다. 정상 빌드 여부는 다음 명령으로 확인합니다.
+
+```bash
+docker image inspect robosapiens-rmf-dashboard:0.3.0
+```
+
+자동으로 브라우저를 열 수 없는 환경에서는 다음과 같이 실행한 후 Chrome이나
+Firefox에서 직접 `http://localhost:3000`을 엽니다.
+
+```bash
+RMF_OPEN_BROWSER=false ./openrmf/scripts/run_office_web.sh
+```
+
+Gazebo 창이 필요 없으면 자원 사용량을 줄이도록 headless 모드를 사용합니다.
+
+```bash
+RMF_HEADLESS=true ./openrmf/scripts/run_office_web.sh
+```
+
+### 웹 대시보드 빈 화면 원인과 해결 내용
+
+확인된 빈 화면은 Open-RMF 백엔드나 Flutter 문제가 아니었습니다. 당시 사용한
+`ghcr.io/open-rmf/rmf-web/demo-dashboard:jazzy-nightly` 이미지 안의
+JavaScript 번들에서 React Router의 `useRoutes`가 Router 문맥 밖에서
+실행되었습니다. 브라우저 콘솔에는 minify된 React Router invariant 오류가
+발생했고 React가 최초 화면을 그리지 못해 페이지 전체가 비어 보였습니다.
+
+추가로 다음 두 가지 때문에 컨테이너 환경 변수만 바꾸는 방법으로는 해결되지
+않았습니다.
+
+1. nightly 이미지는 날짜에 따라 내용이 바뀌므로 동일 태그라도 다른 컴퓨터나
+   다른 날짜에 다른 결과가 생길 수 있습니다.
+2. 해당 demo dashboard 번들은 API와 trajectory 주소
+   `http://localhost:8000`, `ws://localhost:8006`을 빌드 시점에 포함하며,
+   실행 시 `RMF_SERVER_URL` 같은 환경 변수를 넣어도 정적 JavaScript가
+   변경되지 않습니다.
+
+그래서 `run_office_web.sh`는 nightly 이미지를 직접 실행하지 않습니다.
+[`openrmf/docker/rmf-web-dashboard/Dockerfile`](../docker/rmf-web-dashboard/Dockerfile)이
+공식 `rmf-web` 0.3.0에 해당하는 커밋
+`7aa265337936a5bd9a920b3fa2360a43244a015c`을 내려받고, pnpm `9.15.9`와
+Node.js 20으로 dashboard를 빌드한 뒤 nginx 이미지로 제공합니다. 커밋과
+빌드 도구를 고정했기 때문에 집 컴퓨터에서도 현재 컴퓨터와 같은 프런트엔드를
+만들 수 있습니다.
+
+수정 후 실제 전체 office 시뮬레이션으로 다음 항목을 확인했습니다.
+
+- 상단 `MAP`, `ROBOTS`, `TASKS`, `CUSTOM` 메뉴 표시
+- L1 building map 표시
+- `tinyRobot1`, `tinyRobot2` 상태 및 지도 표식 수신
+- rmf-web API `http://127.0.0.1:8000` 연결
+- trajectory WebSocket `ws://127.0.0.1:8006` 연결
+
+### 집 컴퓨터에서 다시 빈 화면이 나타날 때
+
+먼저 API, dashboard HTML, 컨테이너 상태를 각각 확인합니다.
+
+```bash
+curl --fail http://127.0.0.1:8000/time
+curl --fail http://127.0.0.1:3000
+docker ps --filter name=robosapiens-rmf
+docker logs robosapiens-rmf-api
+docker logs robosapiens-rmf-dashboard
+```
+
+- `8000/time`만 실패하면 rmf-web API 또는 Docker/ROS 설정 문제입니다.
+- `3000`만 실패하면 dashboard 컨테이너나 포트 3000 문제입니다.
+- 둘 다 응답하지만 화면이 비면 브라우저 개발자 도구의 `Console`과
+  `Network` 탭을 확인하고 강력 새로고침(`Ctrl+Shift+R`)합니다.
+- 지도 영역만 비고 상단 메뉴는 보이면 WebGL 하드웨어 가속이 꺼졌는지
+  확인합니다. Open-RMF 지도는 WebGL을 사용하므로 브라우저 설정에서
+  하드웨어 가속을 활성화하고 브라우저를 다시 시작합니다.
+
+포트 사용 여부는 다음과 같이 확인합니다.
+
+```bash
+ss -ltnp | grep -E ':(3000|8000|8006)\b'
+```
+
+이 저장소의 이전 실행이 남아 있으면 먼저 정리한 후 다시 실행합니다.
+
+```bash
+./openrmf/scripts/stop_office.sh
+docker stop robosapiens-rmf-dashboard 2>/dev/null || true
+docker rm robosapiens-rmf-dashboard 2>/dev/null || true
+./openrmf/scripts/run_office_web.sh
+```
+
+로컬 dashboard 이미지가 손상되었거나 Dockerfile 변경분을 반영해야 할 때만
+이미지를 다시 빌드합니다. 이 작업은 dashboard 이미지만 삭제하며 RMF
+workspace나 사용자 데이터는 삭제하지 않습니다.
+
+```bash
+docker image rm robosapiens-rmf-dashboard:0.3.0
+docker build \
+  --tag robosapiens-rmf-dashboard:0.3.0 \
+  ./openrmf/docker/rmf-web-dashboard
+```
+
+빌드가 소스 다운로드 단계에서 실패하면 인터넷/DNS/프록시가 GitHub와 pnpm
+설치 서버에 접근할 수 있는지 확인합니다. `permission denied while trying to
+connect to the Docker daemon socket` 오류는 Docker 그룹 권한 문제이므로 이
+문서 1장의 Docker 설정을 적용한 뒤 로그아웃하고 다시 로그인합니다.
 
 ## 3. 수동 실행
 
@@ -123,6 +286,35 @@ flutter run -d linux \
   --dart-define=RMF_API_URL=http://127.0.0.1:8000
 ```
 
+Flutter 앱은 시작할 때 `/time`으로 백엔드를 확인합니다. 백엔드가 꺼져 있으면
+기본적으로 `openrmf` API와 office 시뮬레이션을 자동 실행하고 building map이
+준비된 후 관제 화면을 엽니다. 따라서 개발 중에는 터미널 1과 2를 생략하고
+Flutter 앱만 직접 실행해도 됩니다. 앱이 시작한 백엔드는 앱 종료 시 함께
+종료됩니다. 앱에서 자동 실행할 때는 기본적으로 headless 백그라운드 모드가
+적용되어 Gazebo와 RViz 창을 열지 않습니다.
+
+Gazebo 및 RViz 화면이 필요한 경우에만 다음과 같이 실행합니다.
+
+```bash
+RMF_HEADLESS=false flutter run -d linux
+```
+
+비정상 종료 후 기존 office launch 또는 그 자식인 fleet manager/fleet adapter만
+남고 API가 사라진 상태라면 앱이 남은 프로세스를 먼저 종료한 뒤 새 백엔드를
+시작합니다. 이를 통해 fleet manager의
+`127.0.0.1:22011 address already in use` 중복 실행 오류를 방지합니다.
+
+외부에서 관리하는 백엔드만 사용하려면 자동 시작을 끕니다.
+
+```bash
+flutter run -d linux \
+  --dart-define=RMF_AUTO_START=false \
+  --dart-define=RMF_API_URL=http://192.168.0.20:8000
+```
+
+빌드 결과물을 저장소 밖으로 옮긴 경우 실행 스크립트를 찾을 수 있도록
+`RMF_ROOT=/home/gyi/robosapiens`를 지정합니다.
+
 로컬 개발 환경에서는 rmf-web 공식 개발용 관리자 토큰이 기본 적용됩니다.
 인증 서버를 사용하는 환경에서는 발급받은 토큰을 지정합니다.
 
@@ -161,6 +353,38 @@ ros2 run rmf_demos_tasks dispatch_patrol \
 
 자동 실행 중에는 Flutter 터미널에서 `q`를 누르거나 `Ctrl+C`를 입력합니다.
 통합 스크립트가 자신이 실행한 ROS 프로세스와 API 컨테이너를 함께 종료합니다.
+
+앱이나 터미널이 비정상 종료되어 백그라운드 프로세스가 남았거나, 실행 중인
+Open-RMF를 수동으로 모두 종료하려면 다음 스크립트를 사용합니다.
+
+```bash
+cd /home/gyi/robosapiens
+./openrmf/scripts/stop_office.sh
+```
+
+스크립트는 다음 순서로 종료합니다.
+
+1. `openrmf_app`이 시작한 backend supervisor
+2. 이 저장소의 `office_web.launch.xml` ROS 2 launch
+3. 비정상 종료로 남은 office fleet manager, fleet adapter 및 Gazebo 프로세스
+4. `robosapiens-rmf-api` Docker 컨테이너
+
+다른 ROS 2 프로젝트의 프로세스와 다른 Docker 컨테이너는 종료하지 않습니다.
+종료 대기 시간의 기본값은 15초이며 필요한 경우 변경할 수 있습니다.
+
+```bash
+RMF_STOP_WAIT_SECONDS=30 ./openrmf/scripts/stop_office.sh
+```
+
+종료 상태는 다음과 같이 확인합니다.
+
+```bash
+curl --max-time 2 http://127.0.0.1:8000/time
+docker ps --filter name=robosapiens-rmf-api
+ps -ef | grep office_web.launch.xml
+```
+
+`curl`은 연결 실패하고, Docker 및 launch 프로세스 목록은 비어 있어야 합니다.
 
 수동 실행한 경우 다음 순서로 종료합니다.
 
