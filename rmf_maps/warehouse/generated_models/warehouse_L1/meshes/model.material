@@ -1,0 +1,26 @@
+material floor_1_Diffuse
+{
+	technique
+	{
+		pass
+		{
+			texture_unit
+			{
+				texture blue_linoleum.png
+			}
+		}
+	}
+}
+material floor_1_Diffuse
+{
+	technique
+	{
+		pass
+		{
+			texture_unit
+			{
+				texture blue_linoleum.png
+			}
+		}
+	}
+}
