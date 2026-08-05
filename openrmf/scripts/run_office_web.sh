@@ -19,6 +19,42 @@ MAP_WAIT_SECONDS="${RMF_MAP_WAIT_SECONDS:-90}"
 HEADLESS="${RMF_HEADLESS:-false}"
 OPEN_BROWSER="${RMF_OPEN_BROWSER:-true}"
 
+configure_gazebo_rendering() {
+  local vendor_file
+  local has_drm_gpu=0
+  local has_nvidia_gpu=0
+
+  for vendor_file in /sys/class/drm/card*/device/vendor; do
+    [[ -r "$vendor_file" ]] || continue
+    has_drm_gpu=1
+    if [[ "$(<"$vendor_file")" == "0x10de" ]]; then
+      has_nvidia_gpu=1
+      break
+    fi
+  done
+
+  if [[ "$has_nvidia_gpu" == "1" ]]; then
+    # Ogre2 selects the NVIDIA DRM device directly. Forcing Mesa software
+    # rendering at the same time can crash the Gazebo GUI during startup.
+    unset LIBGL_ALWAYS_SOFTWARE
+    unset MESA_LOADER_DRIVER_OVERRIDE
+    echo "Gazebo rendering: NVIDIA GPU detected; using hardware rendering."
+    if ! command -v nvidia-smi >/dev/null 2>&1 ||
+       ! nvidia-smi -L >/dev/null 2>&1; then
+      echo "Warning: NVIDIA GPU exists, but nvidia-smi cannot access its driver." >&2
+      echo "Gazebo will start without software-rendering overrides." >&2
+    fi
+  elif [[ "$has_drm_gpu" == "1" ]]; then
+    unset LIBGL_ALWAYS_SOFTWARE
+    unset MESA_LOADER_DRIVER_OVERRIDE
+    echo "Gazebo rendering: non-NVIDIA GPU detected; using hardware rendering."
+  else
+    export LIBGL_ALWAYS_SOFTWARE=1
+    unset MESA_LOADER_DRIVER_OVERRIDE
+    echo "Gazebo rendering: no DRM GPU detected; using software rendering."
+  fi
+}
+
 if [[ ! "$API_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    [[ ! "$DASHBOARD_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    [[ ! "$MAP_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
@@ -184,6 +220,8 @@ if ! command -v ros2 >/dev/null 2>&1; then
   echo "ros2 was not found after sourcing the ROS and Open-RMF workspaces." >&2
   exit 1
 fi
+
+configure_gazebo_rendering
 
 echo "Starting Open-RMF office simulation"
 ros2 launch "$ROOT_DIR/openrmf/launch/office_web.launch.xml" \

@@ -81,6 +81,46 @@ class UploadedDrawing {
       : '${(size / 1024 / 1024).toStringAsFixed(1)} MB';
 }
 
+class _EditorSnapshot {
+  const _EditorSnapshot({
+    required this.drawing,
+    required this.stage,
+    required this.measurement,
+    required this.wallMask,
+    required this.floorMask,
+    required this.previousWallMask,
+    required this.wallsDetected,
+    required this.floorGenerated,
+    required this.manualWalls,
+    required this.wallVertexOverrides,
+    required this.frozenAutoWalls,
+    required this.recommendedLanes,
+    required this.laneDirections,
+    required this.laneWaypoints,
+    required this.waypointTypes,
+    required this.waypointNames,
+    required this.activeLaneEndpoint,
+  });
+
+  final UploadedDrawing? drawing;
+  final MapStage stage;
+  final _MapMeasurement? measurement;
+  final _WallMask? wallMask;
+  final _WallMask? floorMask;
+  final _WallMask? previousWallMask;
+  final bool wallsDetected;
+  final bool floorGenerated;
+  final List<(Offset, Offset)> manualWalls;
+  final Map<Offset, Offset> wallVertexOverrides;
+  final List<(Offset, Offset)> frozenAutoWalls;
+  final List<(Offset, Offset)> recommendedLanes;
+  final Map<(Offset, Offset), String> laneDirections;
+  final List<Offset> laneWaypoints;
+  final Map<Offset, String> waypointTypes;
+  final Map<Offset, String> waypointNames;
+  final Offset? activeLaneEndpoint;
+}
+
 class ControlDashboard extends StatefulWidget {
   const ControlDashboard({super.key});
 
@@ -115,10 +155,92 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final Map<Offset, Offset> _wallVertexOverrides = {};
   List<(Offset, Offset)> _frozenAutoWalls = [];
   List<(Offset, Offset)> _recommendedLanes = [];
+  final Map<(Offset, Offset), String> _laneDirections = {};
   final List<Offset> _laneWaypoints = [];
+  final Map<Offset, String> _waypointTypes = {};
+  final Map<Offset, String> _waypointNames = {};
+  Offset? _activeLaneEndpoint;
   bool _isWaypointMode = false;
   int _vertexLabelRevision = 0;
   bool _showVertexLabels = true;
+  final List<_EditorSnapshot> _undoHistory = [];
+
+  _EditorSnapshot _captureSnapshot() => _EditorSnapshot(
+    drawing: _drawing,
+    stage: _stage,
+    measurement: _measurement,
+    wallMask: _wallMask,
+    floorMask: _floorMask,
+    previousWallMask: _previousWallMask,
+    wallsDetected: _wallsDetected,
+    floorGenerated: _floorGenerated,
+    manualWalls: [..._manualWalls],
+    wallVertexOverrides: {..._wallVertexOverrides},
+    frozenAutoWalls: [..._frozenAutoWalls],
+    recommendedLanes: [..._recommendedLanes],
+    laneDirections: {..._laneDirections},
+    laneWaypoints: [..._laneWaypoints],
+    waypointTypes: {..._waypointTypes},
+    waypointNames: {..._waypointNames},
+    activeLaneEndpoint: _activeLaneEndpoint,
+  );
+
+  void _recordUndo() {
+    _undoHistory.add(_captureSnapshot());
+    if (_undoHistory.length > 10) _undoHistory.removeAt(0);
+  }
+
+  void _undo() {
+    if (_undoHistory.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('되돌릴 작업이 없습니다.')));
+      return;
+    }
+    final snapshot = _undoHistory.removeLast();
+    setState(() {
+      _drawing = snapshot.drawing;
+      _stage = snapshot.stage;
+      _measurement = snapshot.measurement;
+      _wallMask = snapshot.wallMask;
+      _floorMask = snapshot.floorMask;
+      _previousWallMask = snapshot.previousWallMask;
+      _wallsDetected = snapshot.wallsDetected;
+      _floorGenerated = snapshot.floorGenerated;
+      _manualWalls
+        ..clear()
+        ..addAll(snapshot.manualWalls);
+      _wallVertexOverrides
+        ..clear()
+        ..addAll(snapshot.wallVertexOverrides);
+      _frozenAutoWalls = [...snapshot.frozenAutoWalls];
+      _recommendedLanes = [...snapshot.recommendedLanes];
+      _laneDirections
+        ..clear()
+        ..addAll(snapshot.laneDirections);
+      _laneWaypoints
+        ..clear()
+        ..addAll(snapshot.laneWaypoints);
+      _waypointTypes
+        ..clear()
+        ..addAll(snapshot.waypointTypes);
+      _waypointNames
+        ..clear()
+        ..addAll(snapshot.waypointNames);
+      _activeLaneEndpoint = snapshot.activeLaneEndpoint;
+      _isWaypointMode = false;
+      _isMeasurementMode = false;
+      _isWallEraseMode = false;
+      _isWallConnectMode = false;
+      _isWallEndpointEditMode = false;
+      _pendingWallVertex = null;
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('이전 작업으로 되돌렸습니다. (${_undoHistory.length}단계 남음)')),
+    );
+  }
 
   Future<void> _pickDrawing() async {
     if (_isPicking) return;
@@ -144,6 +266,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       if (!mounted) return;
       _fitMapToScreen();
+      _recordUndo();
       setState(() {
         _drawing = UploadedDrawing(
           name: file.name,
@@ -172,7 +295,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _wallVertexOverrides.clear();
         _frozenAutoWalls = [];
         _recommendedLanes = [];
+        _laneDirections.clear();
         _laneWaypoints.clear();
+        _waypointTypes.clear();
+        _waypointNames.clear();
+        _activeLaneEndpoint = null;
         _isWaypointMode = false;
       });
       ScaffoldMessenger.of(
@@ -189,6 +316,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   void _removeDrawing() {
+    if (_drawing == null) return;
+    _recordUndo();
     _fitMapToScreen();
     setState(() {
       _drawing = null;
@@ -211,7 +340,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _wallVertexOverrides.clear();
       _frozenAutoWalls = [];
       _recommendedLanes = [];
+      _laneDirections.clear();
       _laneWaypoints.clear();
+      _waypointTypes.clear();
+      _waypointNames.clear();
+      _activeLaneEndpoint = null;
       _isWaypointMode = false;
     });
   }
@@ -254,6 +387,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     setState(() {
       _isWaypointMode = !_isWaypointMode;
+      if (!_isWaypointMode) _activeLaneEndpoint = null;
       _isWallEraseMode = false;
       _isMeasurementMode = false;
       _isWallConnectMode = false;
@@ -270,16 +404,436 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
-  void _addLaneWaypoint(Offset point) {
+  void _finishCurrentLane() {
+    if (!_isWaypointMode || _activeLaneEndpoint == null) return;
+    setState(() => _activeLaneEndpoint = null);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('현재 레인을 종료했습니다. 새 시작점을 선택하세요.')),
+    );
+  }
+
+  Offset? _firstCrossedWaypoint(Offset start, Offset end, double tolerance) {
+    final lane = end - start;
+    final lengthSquared = lane.distanceSquared;
+    if (lengthSquared <= .01) return null;
+    Offset? crossed;
+    var firstT = 1.0;
+    for (final waypoint in _laneWaypoints) {
+      if ((waypoint - start).distance <= tolerance) continue;
+      final relative = waypoint - start;
+      final t = (relative.dx * lane.dx + relative.dy * lane.dy) / lengthSquared;
+      if (t <= .02 || t >= .98 || t >= firstT) continue;
+      final nearest = start + lane * t;
+      if ((waypoint - nearest).distance <= tolerance) {
+        crossed = waypoint;
+        firstT = t;
+      }
+    }
+    return crossed;
+  }
+
+  Future<String?> _chooseWaypointAction(Offset waypoint) => showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(
+        (_waypointNames[waypoint] ?? '').trim().isEmpty
+            ? 'Waypoint 선택'
+            : _waypointNames[waypoint]!,
+      ),
+      content: Text(
+        '카테고리: ${_waypointTypes[waypoint] ?? '일반'}\n'
+        '이 Waypoint에서 수행할 작업을 선택하세요.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('취소'),
+        ),
+        TextButton.icon(
+          onPressed: () => Navigator.pop(dialogContext, 'delete'),
+          icon: const Icon(Icons.delete_outline),
+          label: const Text('Waypoint 삭제'),
+          style: TextButton.styleFrom(foregroundColor: const Color(0xFFDC2626)),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(dialogContext, 'connect'),
+          icon: const Icon(Icons.route, size: 18),
+          label: const Text('레인 시작점으로 사용'),
+        ),
+      ],
+    ),
+  );
+
+  void _deleteWaypoint(Offset waypoint) {
+    _recordUndo();
+    var removedLane = false;
     setState(() {
-      if (_laneWaypoints.isNotEmpty) {
-        _recommendedLanes.add((_laneWaypoints.last, point));
+      for (var i = _recommendedLanes.length - 1; i >= 0; i--) {
+        final lane = _recommendedLanes[i];
+        if ((lane.$1 - waypoint).distance <= .01 ||
+            (lane.$2 - waypoint).distance <= .01) {
+          _laneDirections.remove(lane);
+          _recommendedLanes.removeAt(i);
+          removedLane = true;
+          break;
+        }
+      }
+      _laneWaypoints.removeWhere((point) => (point - waypoint).distance <= .01);
+      _waypointTypes.remove(waypoint);
+      _waypointNames.remove(waypoint);
+      if (_activeLaneEndpoint != null &&
+          (_activeLaneEndpoint! - waypoint).distance <= .01) {
+        _activeLaneEndpoint = null;
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          removedLane ? 'Waypoint와 마지막 연결 레인을 삭제했습니다.' : 'Waypoint를 삭제했습니다.',
+        ),
+      ),
+    );
+  }
+
+  String _nextWaypointName(String category) {
+    if (category == '일반') return ' ';
+    var maxNumber = 0;
+    final pattern = RegExp('^${RegExp.escape(category)}([0-9]+)\$');
+    for (final entry in _waypointTypes.entries) {
+      if (entry.value != category) continue;
+      final name = _waypointNames[entry.key] ?? '';
+      final match = pattern.firstMatch(name);
+      final number = match == null ? null : int.tryParse(match.group(1)!);
+      if (number != null) maxNumber = math.max(maxNumber, number);
+    }
+    return '$category${maxNumber + 1}';
+  }
+
+  Future<void> _editWaypoint(Offset waypoint) async {
+    final nameController = TextEditingController(
+      text: _waypointNames[waypoint] ?? '',
+    );
+    var selectedType = _waypointTypes[waypoint] == '드롭오프'
+        ? '드랍오프'
+        : _waypointTypes[waypoint] ?? '일반';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Waypoint 수정'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Waypoint 이름',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setDialogState(() {}),
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: selectedType,
+                  decoration: const InputDecoration(
+                    labelText: 'Waypoint 카테고리',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const ['일반', '대기', '충전', '픽업', '드랍오프']
+                      .map(
+                        (type) =>
+                            DropdownMenuItem(value: type, child: Text(type)),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => selectedType = value);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed:
+                  selectedType != '일반' && nameController.text.trim().isEmpty
+                  ? null
+                  : () => Navigator.pop(dialogContext, true),
+              child: const Text('저장'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final name = selectedType == '일반' ? ' ' : nameController.text.trim();
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    nameController.dispose();
+    if (confirmed != true || !mounted || name.isEmpty) return;
+    _recordUndo();
+    setState(() {
+      _waypointNames[waypoint] = name;
+      _waypointTypes[waypoint] = selectedType;
+      _isDeployed = false;
+    });
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Waypoint 정보를 수정했습니다.')));
+  }
+
+  Future<void> _selectLaneForDeletion((Offset, Offset) lane) async {
+    var selectedDirection = _laneDirections[lane] ?? '양방향';
+    final result = await showDialog<(String, String)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.route_outlined, color: Color(0xFF2563EB)),
+          title: const Text('레인 설정'),
+          content: SizedBox(
+            width: 390,
+            child: DropdownButtonFormField<String>(
+              initialValue: selectedDirection,
+              decoration: const InputDecoration(
+                labelText: '이동 방향',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: '정방향',
+                  child: Text('단방향 · 정방향 (시작 → 끝)'),
+                ),
+                DropdownMenuItem(value: '양방향', child: Text('양방향 (시작 ↔ 끝)')),
+                DropdownMenuItem(
+                  value: '역방향',
+                  child: Text('단방향 · 역방향 (끝 → 시작)'),
+                ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  setDialogState(() => selectedDirection = value);
+                }
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            TextButton.icon(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, ('delete', selectedDirection)),
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('레인 삭제'),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFDC2626),
+              ),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, ('save', selectedDirection)),
+              child: const Text('방향 저장'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    final index = _recommendedLanes.indexWhere(
+      (candidate) =>
+          (candidate.$1 - lane.$1).distance <= .01 &&
+          (candidate.$2 - lane.$2).distance <= .01,
+    );
+    if (index < 0) return;
+    _recordUndo();
+    setState(() {
+      if (result.$1 == 'delete') {
+        final removed = _recommendedLanes.removeAt(index);
+        _laneDirections.remove(removed);
+      } else {
+        _laneDirections[_recommendedLanes[index]] = result.$2;
+      }
+      _isDeployed = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.$1 == 'delete' ? '선택한 레인을 삭제했습니다.' : '${result.$2}으로 설정했습니다.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _addLaneWaypoint(Offset point) async {
+    final drawing = _drawing;
+    final snapTolerance =
+        drawing?.pixelWidth != null && drawing?.pixelHeight != null
+        ? math.min(drawing!.pixelWidth!, drawing.pixelHeight!) * .02
+        : 16.0;
+    Offset? snappedWaypoint;
+    var nearestDistance = snapTolerance;
+    for (final waypoint in _laneWaypoints) {
+      final distance = (waypoint - point).distance;
+      if (distance <= nearestDistance) {
+        snappedWaypoint = waypoint;
+        nearestDistance = distance;
+      }
+    }
+    if (snappedWaypoint != null) {
+      final snapped = snappedWaypoint;
+      final action = await _chooseWaypointAction(snapped);
+      if (!mounted || action == null) return;
+      if (action == 'delete') {
+        _deleteWaypoint(snapped);
+        return;
+      }
+      final start = _activeLaneEndpoint;
+      if (start != null && (start - snapped).distance <= .01) return;
+      final crossed = start == null
+          ? null
+          : _firstCrossedWaypoint(start, snapped, snapTolerance);
+      final laneStart = crossed ?? start;
+      _recordUndo();
+      setState(() {
+        if (laneStart != null) {
+          final lane = (laneStart, snapped);
+          _recommendedLanes.add(lane);
+          _laneDirections[lane] = '양방향';
+        }
+        _activeLaneEndpoint = snapped;
+        _stage = MapStage.lanes;
+        _isDeployed = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            crossed != null
+                ? '중간 Waypoint를 통과하여 해당 지점부터 레인을 연결했습니다.'
+                : start == null
+                ? '기존 Waypoint에 스냅했습니다. 새 레인의 시작점입니다.'
+                : '기존 Waypoint에 스냅하여 레인을 연결했습니다.',
+          ),
+        ),
+      );
+      return;
+    }
+    final floorPoint = _floorCoordinate(point);
+    final activeEndpoint = _activeLaneEndpoint;
+    final crossedWaypoint = activeEndpoint == null
+        ? null
+        : _firstCrossedWaypoint(activeEndpoint, point, snapTolerance);
+    var selectedType = '일반';
+    final nameController = TextEditingController(
+      text: _nextWaypointName(selectedType),
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Waypoint 추가'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '좌표  X ${floorPoint.dx.toStringAsFixed(1)}  ·  Y ${floorPoint.dy.toStringAsFixed(1)}',
+                  style: const TextStyle(
+                    color: Color(0xFF475569),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                TextField(
+                  controller: nameController,
+                  readOnly: true,
+                  decoration: InputDecoration(
+                    labelText: '자동 이름',
+                    hintText: selectedType == '일반' ? '(공백)' : null,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: selectedType,
+                  decoration: const InputDecoration(
+                    labelText: 'Waypoint 카테고리',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const ['일반', '대기', '충전', '픽업', '드랍오프']
+                      .map(
+                        (type) =>
+                            DropdownMenuItem(value: type, child: Text(type)),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() {
+                        selectedType = value;
+                        nameController.text = _nextWaypointName(value);
+                      });
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('추가'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final waypointName = selectedType == '일반'
+        ? ' '
+        : nameController.text.trim();
+    nameController.dispose();
+    if (confirmed != true || !mounted) return;
+    _recordUndo();
+    setState(() {
+      final laneStart = crossedWaypoint ?? _activeLaneEndpoint;
+      if (laneStart != null) {
+        final lane = (laneStart, point);
+        _recommendedLanes.add(lane);
+        _laneDirections[lane] = '양방향';
       }
       _laneWaypoints.add(point);
+      _waypointTypes[point] = selectedType;
+      _waypointNames[point] = waypointName;
+      _activeLaneEndpoint = point;
       _stage = MapStage.lanes;
       _isDeployed = false;
       _vertexLabelRevision++;
     });
+    if (crossedWaypoint != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('통과한 Waypoint부터 새 레인을 시작했습니다.')),
+      );
+    }
+  }
+
+  Offset _floorCoordinate(Offset point) {
+    final floorPoints = _floorMask?.points;
+    if (floorPoints == null || floorPoints.isEmpty) return point;
+    final bounds = _pointsBounds(floorPoints);
+    return Offset(point.dx - bounds.left, bounds.bottom - point.dy);
   }
 
   @override
@@ -312,6 +866,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   void _removeMeasurement() {
     if (_measurement == null) return;
+    _recordUndo();
     setState(() {
       _measurement = null;
       _isMeasurementSelected = false;
@@ -431,6 +986,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     await Future<void>.delayed(const Duration(milliseconds: 350));
     controller.dispose();
     if (result == null || !mounted) return;
+    _recordUndo();
     setState(() {
       _measurement = _MapMeasurement(
         start: start,
@@ -461,6 +1017,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ).showSnackBar(const SnackBar(content: Text('선택한 영역에 제거할 벽이 없습니다.')));
       return;
     }
+    _recordUndo();
     setState(() {
       _previousWallMask = mask;
       _wallMask = _WallMask(
@@ -480,6 +1037,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   void _undoWallErase() {
     final previous = _previousWallMask;
     if (previous == null) return;
+    _recordUndo();
     setState(() {
       _wallMask = previous;
       _previousWallMask = null;
@@ -510,6 +1068,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   void _moveWallEndpoint(Offset original, Offset updated) {
+    _recordUndo();
     setState(() {
       Offset? source;
       for (final entry in _wallVertexOverrides.entries) {
@@ -564,6 +1123,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ((wall.$2 - first).distance <= .01 &&
               (wall.$1 - vertex).distance <= .01),
     );
+    if (!alreadyExists) _recordUndo();
     setState(() {
       if (!alreadyExists) _manualWalls.add((first, vertex));
       _pendingWallVertex = null;
@@ -583,6 +1143,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final drawing = _drawing;
     if (drawing == null || _isDetectingWalls) return;
     if (_wallsDetected) {
+      _recordUndo();
       setState(() {
         _wallMask = null;
         _previousWallMask = null;
@@ -645,6 +1206,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       image.dispose();
       codec.dispose();
       if (!mounted) return;
+      _recordUndo();
       setState(() {
         _wallMask = _WallMask(
           width: width,
@@ -722,6 +1284,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       image.dispose();
       codec.dispose();
       if (!mounted) return;
+      _recordUndo();
       setState(() {
         _floorMask = _WallMask(
           width: width,
@@ -771,6 +1334,259 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   String _yamlEscape(String value) =>
       value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
+
+  List<double> _encodeOffset(Offset point) => [point.dx, point.dy];
+
+  Offset _decodeOffset(dynamic value) {
+    final values = value as List<dynamic>;
+    return Offset((values[0] as num).toDouble(), (values[1] as num).toDouble());
+  }
+
+  Map<String, dynamic>? _encodeMask(_WallMask? mask) => mask == null
+      ? null
+      : {
+          'width': mask.width,
+          'height': mask.height,
+          'sampleSize': mask.sampleSize,
+          'points': mask.points.map(_encodeOffset).toList(),
+        };
+
+  _WallMask? _decodeMask(dynamic value) {
+    if (value == null) return null;
+    final data = value as Map<String, dynamic>;
+    return _WallMask(
+      width: data['width'] as int,
+      height: data['height'] as int,
+      sampleSize: (data['sampleSize'] as num).toDouble(),
+      points: (data['points'] as List<dynamic>).map(_decodeOffset).toList(),
+    );
+  }
+
+  List<List<List<double>>> _encodeLines(List<(Offset, Offset)> lines) => [
+    for (final line in lines) [_encodeOffset(line.$1), _encodeOffset(line.$2)],
+  ];
+
+  List<(Offset, Offset)> _decodeLines(dynamic value) => [
+    for (final line in value as List<dynamic>)
+      (_decodeOffset((line as List<dynamic>)[0]), _decodeOffset(line[1])),
+  ];
+
+  Map<String, dynamic> _buildProjectData() {
+    final drawing = _drawing;
+    return {
+      'format': 'robosapiens-map-project',
+      'version': 1,
+      'drawing': drawing == null
+          ? null
+          : {
+              'name': drawing.name,
+              'extension': drawing.extension,
+              'size': drawing.size,
+              'bytes': drawing.bytes == null
+                  ? null
+                  : base64Encode(drawing.bytes!),
+              'pixelWidth': drawing.pixelWidth,
+              'pixelHeight': drawing.pixelHeight,
+            },
+      'stage': _stage.index,
+      'measurement': _measurement == null
+          ? null
+          : {
+              'start': _encodeOffset(_measurement!.start),
+              'end': _encodeOffset(_measurement!.end),
+              'length': _measurement!.length,
+              'unit': _measurement!.unit,
+            },
+      'wallMask': _encodeMask(_wallMask),
+      'floorMask': _encodeMask(_floorMask),
+      'previousWallMask': _encodeMask(_previousWallMask),
+      'wallsDetected': _wallsDetected,
+      'floorGenerated': _floorGenerated,
+      'wallColor': _wallColor.toARGB32(),
+      'floorColor': _floorColor.toARGB32(),
+      'manualWalls': _encodeLines(_manualWalls),
+      'wallVertexOverrides': [
+        for (final entry in _wallVertexOverrides.entries)
+          {'from': _encodeOffset(entry.key), 'to': _encodeOffset(entry.value)},
+      ],
+      'frozenAutoWalls': _encodeLines(_frozenAutoWalls),
+      'recommendedLanes': _encodeLines(_recommendedLanes),
+      'laneDirections': [
+        for (final lane in _recommendedLanes)
+          {
+            'start': _encodeOffset(lane.$1),
+            'end': _encodeOffset(lane.$2),
+            'direction': _laneDirections[lane] ?? '양방향',
+          },
+      ],
+      'waypoints': [
+        for (final point in _laneWaypoints)
+          {
+            'point': _encodeOffset(point),
+            'name': _waypointNames[point] ?? '',
+            'category': _waypointTypes[point] ?? '일반',
+          },
+      ],
+      'activeLaneEndpoint': _activeLaneEndpoint == null
+          ? null
+          : _encodeOffset(_activeLaneEndpoint!),
+    };
+  }
+
+  Future<void> _saveProject() async {
+    if (_drawing == null) return;
+    try {
+      final fileName =
+          '${_mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_')}.rmfproject';
+      final bytes = Uint8List.fromList(
+        utf8.encode(jsonEncode(_buildProjectData())),
+      );
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '맵 작업 프로젝트 저장',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: const ['rmfproject'],
+        bytes: bytes,
+      );
+      if (!mounted || path == null) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('$fileName 작업을 저장했습니다.')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('작업을 저장하지 못했습니다: $error')));
+    }
+  }
+
+  Future<void> _loadProject() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['rmfproject'],
+        withData: true,
+      );
+      if (result == null || result.files.single.bytes == null) return;
+      final data =
+          jsonDecode(utf8.decode(result.files.single.bytes!))
+              as Map<String, dynamic>;
+      if (data['format'] != 'robosapiens-map-project' || data['version'] != 1) {
+        throw const FormatException('지원하지 않는 프로젝트 파일입니다.');
+      }
+      final drawingData = data['drawing'] as Map<String, dynamic>?;
+      final measurementData = data['measurement'] as Map<String, dynamic>?;
+      final waypointData = data['waypoints'] as List<dynamic>;
+      final loadedWaypoints = <Offset>[];
+      final loadedNames = <Offset, String>{};
+      final loadedTypes = <Offset, String>{};
+      for (final item in waypointData) {
+        final waypoint = item as Map<String, dynamic>;
+        final point = _decodeOffset(waypoint['point']);
+        loadedWaypoints.add(point);
+        loadedNames[point] = waypoint['name'] as String? ?? '';
+        final category = waypoint['category'] as String? ?? '일반';
+        loadedTypes[point] = category == '드롭오프' ? '드랍오프' : category;
+      }
+      final loadedOverrides = <Offset, Offset>{};
+      for (final item in data['wallVertexOverrides'] as List<dynamic>) {
+        final entry = item as Map<String, dynamic>;
+        loadedOverrides[_decodeOffset(entry['from'])] = _decodeOffset(
+          entry['to'],
+        );
+      }
+      final loadedLanes = _decodeLines(data['recommendedLanes']);
+      final loadedDirections = <(Offset, Offset), String>{};
+      for (final item
+          in (data['laneDirections'] as List<dynamic>?) ?? const []) {
+        final entry = item as Map<String, dynamic>;
+        loadedDirections[(
+              _decodeOffset(entry['start']),
+              _decodeOffset(entry['end']),
+            )] =
+            entry['direction'] as String? ?? '양방향';
+      }
+      for (final lane in loadedLanes) {
+        loadedDirections.putIfAbsent(lane, () => '양방향');
+      }
+      if (!mounted) return;
+      _recordUndo();
+      _fitMapToScreen();
+      setState(() {
+        _drawing = drawingData == null
+            ? null
+            : UploadedDrawing(
+                name: drawingData['name'] as String,
+                extension: drawingData['extension'] as String,
+                size: drawingData['size'] as int,
+                bytes: drawingData['bytes'] == null
+                    ? null
+                    : base64Decode(drawingData['bytes'] as String),
+                pixelWidth: drawingData['pixelWidth'] as int?,
+                pixelHeight: drawingData['pixelHeight'] as int?,
+              );
+        _stage =
+            MapStage.values[(data['stage'] as int).clamp(
+              0,
+              MapStage.values.length - 1,
+            )];
+        _measurement = measurementData == null
+            ? null
+            : _MapMeasurement(
+                start: _decodeOffset(measurementData['start']),
+                end: _decodeOffset(measurementData['end']),
+                length: (measurementData['length'] as num).toDouble(),
+                unit: measurementData['unit'] as String,
+              );
+        _wallMask = _decodeMask(data['wallMask']);
+        _floorMask = _decodeMask(data['floorMask']);
+        _previousWallMask = _decodeMask(data['previousWallMask']);
+        _wallsDetected = data['wallsDetected'] as bool;
+        _floorGenerated = data['floorGenerated'] as bool;
+        _wallColor = Color(data['wallColor'] as int);
+        _floorColor = Color(data['floorColor'] as int);
+        _manualWalls
+          ..clear()
+          ..addAll(_decodeLines(data['manualWalls']));
+        _wallVertexOverrides
+          ..clear()
+          ..addAll(loadedOverrides);
+        _frozenAutoWalls = _decodeLines(data['frozenAutoWalls']);
+        _recommendedLanes = loadedLanes;
+        _laneDirections
+          ..clear()
+          ..addAll(loadedDirections);
+        _laneWaypoints
+          ..clear()
+          ..addAll(loadedWaypoints);
+        _waypointNames
+          ..clear()
+          ..addAll(loadedNames);
+        _waypointTypes
+          ..clear()
+          ..addAll(loadedTypes);
+        _activeLaneEndpoint = data['activeLaneEndpoint'] == null
+            ? null
+            : _decodeOffset(data['activeLaneEndpoint']);
+        _isWaypointMode = false;
+        _isMeasurementMode = false;
+        _isWallEraseMode = false;
+        _isWallConnectMode = false;
+        _isWallEndpointEditMode = false;
+        _pendingWallVertex = null;
+        _isDeployed = false;
+        _vertexLabelRevision++;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${result.files.single.name} 작업을 불러왔습니다.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('작업을 불러오지 못했습니다: $error')));
+    }
+  }
 
   List<Offset> _floorOutline() {
     // A generated Floor must not introduce a second set of vertices beside
@@ -1091,9 +1907,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     for (final wall in _visibleWallSegments()) {
       addWallIndex(vertexIndex(wall.$1), vertexIndex(wall.$2));
     }
-    final laneIndices = <(int, int)>[
+    final laneIndices = <(int, int, String)>[
       for (final lane in _recommendedLanes)
-        (vertexIndex(lane.$1), vertexIndex(lane.$2)),
+        (
+          vertexIndex(lane.$1),
+          vertexIndex(lane.$2),
+          _laneDirections[lane] ?? '양방향',
+        ),
     ];
     final buffer = StringBuffer()
       ..writeln('coordinate_system: reference_image')
@@ -1121,8 +1941,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
       buffer.writeln('      []');
     } else {
       for (final lane in laneIndices) {
+        final reverse = lane.$3 == '역방향';
+        final start = reverse ? lane.$2 : lane.$1;
+        final end = reverse ? lane.$1 : lane.$2;
+        final bidirectional = lane.$3 == '양방향';
         buffer.writeln(
-          '      - [${lane.$1}, ${lane.$2}, {is_bidirectional: [4, true]}]',
+          '      - [$start, $end, {is_bidirectional: [4, $bidirectional]}]',
         );
       }
     }
@@ -1143,13 +1967,28 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } else {
       for (var i = 0; i < vertices.length; i++) {
         final point = vertices[i];
+        final waypointType = _waypointTypes[point];
+        final waypointName = _waypointNames[point];
         final name = measurement != null && i == measurementIndices.first
             ? 'measurement_start'
             : measurement != null && i == measurementIndices.last
             ? 'measurement_end'
+            : waypointName != null
+            ? waypointName
+            : waypointType != null
+            ? 'waypoint_$i'
             : '';
+        final trafficEditorProperty = switch (waypointType) {
+          '충전' => 'is_charger',
+          '대기' => 'is_parking_spot',
+          '일반' => 'is_holding_point',
+          _ => null,
+        };
+        final properties = trafficEditorProperty == null
+            ? ''
+            : ', {$trafficEditorProperty: [4, true]}';
         buffer.writeln(
-          '      - [${point.dx.toStringAsFixed(3)}, ${point.dy.toStringAsFixed(3)}, 0.0, "$name"]',
+          '      - [${point.dx.toStringAsFixed(3)}, ${point.dy.toStringAsFixed(3)}, 0.0, "${_yamlEscape(name)}"$properties]',
         );
       }
     }
@@ -1314,238 +2153,302 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Row(
-        children: [
-          const _NavigationRail(),
-          Expanded(
-            child: Column(
-              children: [
-                const _TopBar(),
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(32, 30, 32, 40),
-                    child: Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 1440),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _PageHeading(
-                              onUpload: _pickDrawing,
-                              exportEnabled: _drawing != null,
-                              onDownload: _downloadBuildingYaml,
-                              onCopy: _copyBuildingYaml,
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyZ, control: true): _undo,
+        const SingleActivator(LogicalKeyboardKey.escape): _finishCurrentLane,
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          body: Row(
+            children: [
+              const _NavigationRail(),
+              Expanded(
+                child: Column(
+                  children: [
+                    const _TopBar(),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(32, 30, 32, 40),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 1767),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _PageHeading(
+                                  onUpload: _pickDrawing,
+                                  exportEnabled: _drawing != null,
+                                  onDownload: _downloadBuildingYaml,
+                                  onCopy: _copyBuildingYaml,
+                                  onSaveProject: _saveProject,
+                                  onLoadProject: _loadProject,
+                                ),
+                                const SizedBox(height: 24),
+                                _StageBar(activeStage: _stage),
+                                const SizedBox(height: 24),
+                                LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    if (constraints.maxWidth < 980) {
+                                      return Column(
+                                        children: [
+                                          _MapWorkspace(
+                                            drawing: _drawing,
+                                            transformController: _mapTransform,
+                                            onZoomIn: () => _zoomMap(1.25),
+                                            onZoomOut: () => _zoomMap(.8),
+                                            onFitScreen: _fitMapToScreen,
+                                            onRenumberVertices:
+                                                _renumberVertices,
+                                            wallMask: _wallMask,
+                                            wallColor: _wallColor,
+                                            floorMask: _floorMask,
+                                            floorColor: _floorColor,
+                                            mapVertices: _showVertexLabels
+                                                ? _visibleMapVertices()
+                                                : const [],
+                                            vertexLabelRevision:
+                                                _vertexLabelRevision,
+                                            optimizedWalls:
+                                                _visibleWallSegments(),
+                                            recommendedLanes: _recommendedLanes,
+                                            laneDirections: _laneDirections,
+                                            laneWaypoints: _laneWaypoints,
+                                            waypointNames: _waypointNames,
+                                            waypointTypes: _waypointTypes,
+                                            activeLaneEndpoint:
+                                                _activeLaneEndpoint,
+                                            waypointMode: _isWaypointMode,
+                                            onAddWaypoint: _addLaneWaypoint,
+                                            onEditWaypoint: _editWaypoint,
+                                            onSelectLane:
+                                                _selectLaneForDeletion,
+                                            isWallConnectMode:
+                                                _isWallConnectMode,
+                                            pendingWallVertex:
+                                                _pendingWallVertex,
+                                            onToggleWallConnect:
+                                                _toggleWallConnectMode,
+                                            onSelectWallVertex:
+                                                _selectWallConnectionVertex,
+                                            isWallEndpointEditMode:
+                                                _isWallEndpointEditMode,
+                                            onToggleWallEndpointEdit:
+                                                _toggleWallEndpointEditMode,
+                                            onMoveWallEndpoint:
+                                                _moveWallEndpoint,
+                                            measurement: _measurement,
+                                            showDrawingInfo: _showDrawingInfo,
+                                            onCloseDrawingInfo: () => setState(
+                                              () => _showDrawingInfo = false,
+                                            ),
+                                            isMeasurementSelected:
+                                                _isMeasurementSelected,
+                                            onSelectMeasurement:
+                                                _selectMeasurement,
+                                            onRemoveMeasurement:
+                                                _removeMeasurement,
+                                            isMeasurementMode:
+                                                _isMeasurementMode,
+                                            onMeasurementSelected:
+                                                _askMeasurement,
+                                            onCloseMeasurementMode: () =>
+                                                setState(
+                                                  () => _isMeasurementMode =
+                                                      false,
+                                                ),
+                                            isWallEraseMode: _isWallEraseMode,
+                                            canUndoWallErase:
+                                                _previousWallMask != null,
+                                            onToggleWallErase: () => setState(
+                                              () => _isWallEraseMode =
+                                                  !_isWallEraseMode,
+                                            ),
+                                            onEraseWalls: _eraseWalls,
+                                            onUndoWallErase: _undoWallErase,
+                                            isPicking: _isPicking,
+                                            onPick: _pickDrawing,
+                                            onRemove: _removeDrawing,
+                                          ),
+                                          const SizedBox(height: 20),
+                                          _SetupPanel(
+                                            drawing: _drawing,
+                                            stage: _stage,
+                                            measurement: _measurement,
+                                            isMeasurementMode:
+                                                _isMeasurementMode,
+                                            onToggleMeasurement:
+                                                _toggleMeasurementMode,
+                                            wallColor: _wallColor,
+                                            floorColor: _floorColor,
+                                            wallsDetected: _wallsDetected,
+                                            floorGenerated: _floorGenerated,
+                                            isDetectingWalls: _isDetectingWalls,
+                                            isGeneratingFloor:
+                                                _isGeneratingFloor,
+                                            onDetectWalls: _detectWalls,
+                                            onGenerateFloor: _generateFloor,
+                                            lanesGenerated:
+                                                _laneWaypoints.isNotEmpty,
+                                            waypointMode: _isWaypointMode,
+                                            onToggleWaypoint:
+                                                _toggleWaypointMode,
+                                            onWallColorChanged: (color) =>
+                                                setState(
+                                                  () => _wallColor = color,
+                                                ),
+                                            onFloorColorChanged: (color) =>
+                                                setState(
+                                                  () => _floorColor = color,
+                                                ),
+                                            isDeployed: _isDeployed,
+                                            onDeploy: _deployMap,
+                                            onStageChanged: (value) =>
+                                                setState(() => _stage = value),
+                                          ),
+                                        ],
+                                      );
+                                    }
+                                    return Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Expanded(
+                                          child: _MapWorkspace(
+                                            drawing: _drawing,
+                                            transformController: _mapTransform,
+                                            onZoomIn: () => _zoomMap(1.25),
+                                            onZoomOut: () => _zoomMap(.8),
+                                            onFitScreen: _fitMapToScreen,
+                                            onRenumberVertices:
+                                                _renumberVertices,
+                                            wallMask: _wallMask,
+                                            wallColor: _wallColor,
+                                            floorMask: _floorMask,
+                                            floorColor: _floorColor,
+                                            mapVertices: _showVertexLabels
+                                                ? _visibleMapVertices()
+                                                : const [],
+                                            vertexLabelRevision:
+                                                _vertexLabelRevision,
+                                            optimizedWalls:
+                                                _visibleWallSegments(),
+                                            recommendedLanes: _recommendedLanes,
+                                            laneDirections: _laneDirections,
+                                            laneWaypoints: _laneWaypoints,
+                                            waypointNames: _waypointNames,
+                                            waypointTypes: _waypointTypes,
+                                            activeLaneEndpoint:
+                                                _activeLaneEndpoint,
+                                            waypointMode: _isWaypointMode,
+                                            onAddWaypoint: _addLaneWaypoint,
+                                            onEditWaypoint: _editWaypoint,
+                                            onSelectLane:
+                                                _selectLaneForDeletion,
+                                            isWallConnectMode:
+                                                _isWallConnectMode,
+                                            pendingWallVertex:
+                                                _pendingWallVertex,
+                                            onToggleWallConnect:
+                                                _toggleWallConnectMode,
+                                            onSelectWallVertex:
+                                                _selectWallConnectionVertex,
+                                            isWallEndpointEditMode:
+                                                _isWallEndpointEditMode,
+                                            onToggleWallEndpointEdit:
+                                                _toggleWallEndpointEditMode,
+                                            onMoveWallEndpoint:
+                                                _moveWallEndpoint,
+                                            measurement: _measurement,
+                                            showDrawingInfo: _showDrawingInfo,
+                                            onCloseDrawingInfo: () => setState(
+                                              () => _showDrawingInfo = false,
+                                            ),
+                                            isMeasurementSelected:
+                                                _isMeasurementSelected,
+                                            onSelectMeasurement:
+                                                _selectMeasurement,
+                                            onRemoveMeasurement:
+                                                _removeMeasurement,
+                                            isMeasurementMode:
+                                                _isMeasurementMode,
+                                            onMeasurementSelected:
+                                                _askMeasurement,
+                                            onCloseMeasurementMode: () =>
+                                                setState(
+                                                  () => _isMeasurementMode =
+                                                      false,
+                                                ),
+                                            isWallEraseMode: _isWallEraseMode,
+                                            canUndoWallErase:
+                                                _previousWallMask != null,
+                                            onToggleWallErase: () => setState(
+                                              () => _isWallEraseMode =
+                                                  !_isWallEraseMode,
+                                            ),
+                                            onEraseWalls: _eraseWalls,
+                                            onUndoWallErase: _undoWallErase,
+                                            isPicking: _isPicking,
+                                            onPick: _pickDrawing,
+                                            onRemove: _removeDrawing,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 20),
+                                        SizedBox(
+                                          width: 330,
+                                          child: _SetupPanel(
+                                            drawing: _drawing,
+                                            stage: _stage,
+                                            measurement: _measurement,
+                                            isMeasurementMode:
+                                                _isMeasurementMode,
+                                            onToggleMeasurement:
+                                                _toggleMeasurementMode,
+                                            wallColor: _wallColor,
+                                            floorColor: _floorColor,
+                                            wallsDetected: _wallsDetected,
+                                            floorGenerated: _floorGenerated,
+                                            isDetectingWalls: _isDetectingWalls,
+                                            isGeneratingFloor:
+                                                _isGeneratingFloor,
+                                            onDetectWalls: _detectWalls,
+                                            onGenerateFloor: _generateFloor,
+                                            lanesGenerated:
+                                                _laneWaypoints.isNotEmpty,
+                                            waypointMode: _isWaypointMode,
+                                            onToggleWaypoint:
+                                                _toggleWaypointMode,
+                                            onWallColorChanged: (color) =>
+                                                setState(
+                                                  () => _wallColor = color,
+                                                ),
+                                            onFloorColorChanged: (color) =>
+                                                setState(
+                                                  () => _floorColor = color,
+                                                ),
+                                            isDeployed: _isDeployed,
+                                            onDeploy: _deployMap,
+                                            onStageChanged: (value) =>
+                                                setState(() => _stage = value),
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 24),
-                            _StageBar(activeStage: _stage),
-                            const SizedBox(height: 24),
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                if (constraints.maxWidth < 980) {
-                                  return Column(
-                                    children: [
-                                      _MapWorkspace(
-                                        drawing: _drawing,
-                                        transformController: _mapTransform,
-                                        onZoomIn: () => _zoomMap(1.25),
-                                        onZoomOut: () => _zoomMap(.8),
-                                        onFitScreen: _fitMapToScreen,
-                                        onRenumberVertices: _renumberVertices,
-                                        wallMask: _wallMask,
-                                        wallColor: _wallColor,
-                                        floorMask: _floorMask,
-                                        floorColor: _floorColor,
-                                        mapVertices: _showVertexLabels
-                                            ? _visibleMapVertices()
-                                            : const [],
-                                        vertexLabelRevision:
-                                            _vertexLabelRevision,
-                                        optimizedWalls: _visibleWallSegments(),
-                                        recommendedLanes: _recommendedLanes,
-                                        laneWaypoints: _laneWaypoints,
-                                        waypointMode: _isWaypointMode,
-                                        onAddWaypoint: _addLaneWaypoint,
-                                        isWallConnectMode: _isWallConnectMode,
-                                        pendingWallVertex: _pendingWallVertex,
-                                        onToggleWallConnect:
-                                            _toggleWallConnectMode,
-                                        onSelectWallVertex:
-                                            _selectWallConnectionVertex,
-                                        isWallEndpointEditMode:
-                                            _isWallEndpointEditMode,
-                                        onToggleWallEndpointEdit:
-                                            _toggleWallEndpointEditMode,
-                                        onMoveWallEndpoint: _moveWallEndpoint,
-                                        measurement: _measurement,
-                                        showDrawingInfo: _showDrawingInfo,
-                                        onCloseDrawingInfo: () => setState(
-                                          () => _showDrawingInfo = false,
-                                        ),
-                                        isMeasurementSelected:
-                                            _isMeasurementSelected,
-                                        onSelectMeasurement: _selectMeasurement,
-                                        onRemoveMeasurement: _removeMeasurement,
-                                        isMeasurementMode: _isMeasurementMode,
-                                        onMeasurementSelected: _askMeasurement,
-                                        onCloseMeasurementMode: () => setState(
-                                          () => _isMeasurementMode = false,
-                                        ),
-                                        isWallEraseMode: _isWallEraseMode,
-                                        canUndoWallErase:
-                                            _previousWallMask != null,
-                                        onToggleWallErase: () => setState(
-                                          () => _isWallEraseMode =
-                                              !_isWallEraseMode,
-                                        ),
-                                        onEraseWalls: _eraseWalls,
-                                        onUndoWallErase: _undoWallErase,
-                                        isPicking: _isPicking,
-                                        onPick: _pickDrawing,
-                                        onRemove: _removeDrawing,
-                                      ),
-                                      const SizedBox(height: 20),
-                                      _SetupPanel(
-                                        drawing: _drawing,
-                                        stage: _stage,
-                                        measurement: _measurement,
-                                        isMeasurementMode: _isMeasurementMode,
-                                        onToggleMeasurement:
-                                            _toggleMeasurementMode,
-                                        wallColor: _wallColor,
-                                        floorColor: _floorColor,
-                                        wallsDetected: _wallsDetected,
-                                        floorGenerated: _floorGenerated,
-                                        isDetectingWalls: _isDetectingWalls,
-                                        isGeneratingFloor: _isGeneratingFloor,
-                                        onDetectWalls: _detectWalls,
-                                        onGenerateFloor: _generateFloor,
-                                        lanesGenerated:
-                                            _laneWaypoints.isNotEmpty,
-                                        waypointMode: _isWaypointMode,
-                                        onToggleWaypoint: _toggleWaypointMode,
-                                        onWallColorChanged: (color) =>
-                                            setState(() => _wallColor = color),
-                                        onFloorColorChanged: (color) =>
-                                            setState(() => _floorColor = color),
-                                        isDeployed: _isDeployed,
-                                        onDeploy: _deployMap,
-                                        onStageChanged: (value) =>
-                                            setState(() => _stage = value),
-                                      ),
-                                    ],
-                                  );
-                                }
-                                return Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Expanded(
-                                      child: _MapWorkspace(
-                                        drawing: _drawing,
-                                        transformController: _mapTransform,
-                                        onZoomIn: () => _zoomMap(1.25),
-                                        onZoomOut: () => _zoomMap(.8),
-                                        onFitScreen: _fitMapToScreen,
-                                        onRenumberVertices: _renumberVertices,
-                                        wallMask: _wallMask,
-                                        wallColor: _wallColor,
-                                        floorMask: _floorMask,
-                                        floorColor: _floorColor,
-                                        mapVertices: _showVertexLabels
-                                            ? _visibleMapVertices()
-                                            : const [],
-                                        vertexLabelRevision:
-                                            _vertexLabelRevision,
-                                        optimizedWalls: _visibleWallSegments(),
-                                        recommendedLanes: _recommendedLanes,
-                                        laneWaypoints: _laneWaypoints,
-                                        waypointMode: _isWaypointMode,
-                                        onAddWaypoint: _addLaneWaypoint,
-                                        isWallConnectMode: _isWallConnectMode,
-                                        pendingWallVertex: _pendingWallVertex,
-                                        onToggleWallConnect:
-                                            _toggleWallConnectMode,
-                                        onSelectWallVertex:
-                                            _selectWallConnectionVertex,
-                                        isWallEndpointEditMode:
-                                            _isWallEndpointEditMode,
-                                        onToggleWallEndpointEdit:
-                                            _toggleWallEndpointEditMode,
-                                        onMoveWallEndpoint: _moveWallEndpoint,
-                                        measurement: _measurement,
-                                        showDrawingInfo: _showDrawingInfo,
-                                        onCloseDrawingInfo: () => setState(
-                                          () => _showDrawingInfo = false,
-                                        ),
-                                        isMeasurementSelected:
-                                            _isMeasurementSelected,
-                                        onSelectMeasurement: _selectMeasurement,
-                                        onRemoveMeasurement: _removeMeasurement,
-                                        isMeasurementMode: _isMeasurementMode,
-                                        onMeasurementSelected: _askMeasurement,
-                                        onCloseMeasurementMode: () => setState(
-                                          () => _isMeasurementMode = false,
-                                        ),
-                                        isWallEraseMode: _isWallEraseMode,
-                                        canUndoWallErase:
-                                            _previousWallMask != null,
-                                        onToggleWallErase: () => setState(
-                                          () => _isWallEraseMode =
-                                              !_isWallEraseMode,
-                                        ),
-                                        onEraseWalls: _eraseWalls,
-                                        onUndoWallErase: _undoWallErase,
-                                        isPicking: _isPicking,
-                                        onPick: _pickDrawing,
-                                        onRemove: _removeDrawing,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 20),
-                                    SizedBox(
-                                      width: 330,
-                                      child: _SetupPanel(
-                                        drawing: _drawing,
-                                        stage: _stage,
-                                        measurement: _measurement,
-                                        isMeasurementMode: _isMeasurementMode,
-                                        onToggleMeasurement:
-                                            _toggleMeasurementMode,
-                                        wallColor: _wallColor,
-                                        floorColor: _floorColor,
-                                        wallsDetected: _wallsDetected,
-                                        floorGenerated: _floorGenerated,
-                                        isDetectingWalls: _isDetectingWalls,
-                                        isGeneratingFloor: _isGeneratingFloor,
-                                        onDetectWalls: _detectWalls,
-                                        onGenerateFloor: _generateFloor,
-                                        lanesGenerated:
-                                            _laneWaypoints.isNotEmpty,
-                                        waypointMode: _isWaypointMode,
-                                        onToggleWaypoint: _toggleWaypointMode,
-                                        onWallColorChanged: (color) =>
-                                            setState(() => _wallColor = color),
-                                        onFloorColorChanged: (color) =>
-                                            setState(() => _floorColor = color),
-                                        isDeployed: _isDeployed,
-                                        onDeploy: _deployMap,
-                                        onStageChanged: (value) =>
-                                            setState(() => _stage = value),
-                                      ),
-                                    ),
-                                  ],
-                                );
-                              },
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1780,11 +2683,15 @@ class _PageHeading extends StatelessWidget {
     required this.exportEnabled,
     required this.onDownload,
     required this.onCopy,
+    required this.onSaveProject,
+    required this.onLoadProject,
   });
   final VoidCallback onUpload;
   final bool exportEnabled;
   final VoidCallback onDownload;
   final VoidCallback onCopy;
+  final VoidCallback onSaveProject;
+  final VoidCallback onLoadProject;
   @override
   Widget build(BuildContext context) => Row(
     children: [
@@ -1801,6 +2708,24 @@ class _PageHeading extends StatelessWidget {
           ],
         ),
       ),
+      OutlinedButton.icon(
+        onPressed: onLoadProject,
+        icon: const Icon(Icons.folder_open_outlined, size: 18),
+        label: const Text('작업 불러오기'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
+      OutlinedButton.icon(
+        onPressed: exportEnabled ? onSaveProject : null,
+        icon: const Icon(Icons.save_outlined, size: 18),
+        label: const Text('작업 저장'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
       PopupMenuButton<_ExportAction>(
         enabled: exportEnabled,
         onSelected: (action) {
@@ -1991,9 +2916,15 @@ class _MapWorkspace extends StatelessWidget {
     required this.vertexLabelRevision,
     required this.optimizedWalls,
     required this.recommendedLanes,
+    required this.laneDirections,
     required this.laneWaypoints,
+    required this.waypointNames,
+    required this.waypointTypes,
+    required this.activeLaneEndpoint,
     required this.waypointMode,
     required this.onAddWaypoint,
+    required this.onEditWaypoint,
+    required this.onSelectLane,
     required this.isWallConnectMode,
     required this.pendingWallVertex,
     required this.onToggleWallConnect,
@@ -2033,9 +2964,15 @@ class _MapWorkspace extends StatelessWidget {
   final int vertexLabelRevision;
   final List<(Offset, Offset)> optimizedWalls;
   final List<(Offset, Offset)> recommendedLanes;
+  final Map<(Offset, Offset), String> laneDirections;
   final List<Offset> laneWaypoints;
+  final Map<Offset, String> waypointNames;
+  final Map<Offset, String> waypointTypes;
+  final Offset? activeLaneEndpoint;
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
+  final ValueChanged<Offset> onEditWaypoint;
+  final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool isWallConnectMode;
   final Offset? pendingWallVertex;
   final VoidCallback onToggleWallConnect;
@@ -2062,7 +2999,7 @@ class _MapWorkspace extends StatelessWidget {
   final VoidCallback onRemove;
   @override
   Widget build(BuildContext context) => Container(
-    height: 610,
+    height: 936,
     clipBehavior: Clip.antiAlias,
     decoration: BoxDecoration(
       color: Colors.white,
@@ -2200,9 +3137,15 @@ class _MapWorkspace extends StatelessWidget {
                   vertexLabelRevision: vertexLabelRevision,
                   optimizedWalls: optimizedWalls,
                   recommendedLanes: recommendedLanes,
+                  laneDirections: laneDirections,
                   laneWaypoints: laneWaypoints,
+                  waypointNames: waypointNames,
+                  waypointTypes: waypointTypes,
+                  activeLaneEndpoint: activeLaneEndpoint,
                   waypointMode: waypointMode,
                   onAddWaypoint: onAddWaypoint,
+                  onEditWaypoint: onEditWaypoint,
+                  onSelectLane: onSelectLane,
                   wallConnectMode: isWallConnectMode,
                   pendingWallVertex: pendingWallVertex,
                   onSelectWallVertex: onSelectWallVertex,
@@ -2334,9 +3277,15 @@ class _DrawingPreview extends StatelessWidget {
     required this.vertexLabelRevision,
     required this.optimizedWalls,
     required this.recommendedLanes,
+    required this.laneDirections,
     required this.laneWaypoints,
+    required this.waypointNames,
+    required this.waypointTypes,
+    required this.activeLaneEndpoint,
     required this.waypointMode,
     required this.onAddWaypoint,
+    required this.onEditWaypoint,
+    required this.onSelectLane,
     required this.wallConnectMode,
     required this.pendingWallVertex,
     required this.onSelectWallVertex,
@@ -2363,9 +3312,15 @@ class _DrawingPreview extends StatelessWidget {
   final int vertexLabelRevision;
   final List<(Offset, Offset)> optimizedWalls;
   final List<(Offset, Offset)> recommendedLanes;
+  final Map<(Offset, Offset), String> laneDirections;
   final List<Offset> laneWaypoints;
+  final Map<Offset, String> waypointNames;
+  final Map<Offset, String> waypointTypes;
+  final Offset? activeLaneEndpoint;
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
+  final ValueChanged<Offset> onEditWaypoint;
+  final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool wallConnectMode;
   final Offset? pendingWallVertex;
   final ValueChanged<Offset> onSelectWallVertex;
@@ -2387,7 +3342,7 @@ class _DrawingPreview extends StatelessWidget {
       Positioned.fill(
         child: Container(
           color: const Color(0xFFF1F5F9),
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 33.6),
           child: drawing.isImage && drawing.bytes != null
               ? InteractiveViewer(
                   transformationController: transformController,
@@ -2419,9 +3374,15 @@ class _DrawingPreview extends StatelessWidget {
                     vertexLabelRevision: vertexLabelRevision,
                     optimizedWalls: optimizedWalls,
                     recommendedLanes: recommendedLanes,
+                    laneDirections: laneDirections,
                     laneWaypoints: laneWaypoints,
+                    waypointNames: waypointNames,
+                    waypointTypes: waypointTypes,
+                    activeLaneEndpoint: activeLaneEndpoint,
                     waypointMode: waypointMode,
                     onAddWaypoint: onAddWaypoint,
+                    onEditWaypoint: onEditWaypoint,
+                    onSelectLane: onSelectLane,
                     wallConnectMode: wallConnectMode,
                     pendingWallVertex: pendingWallVertex,
                     onSelectWallVertex: onSelectWallVertex,
@@ -2509,9 +3470,15 @@ class _WallEditorCanvas extends StatefulWidget {
     required this.vertexLabelRevision,
     required this.optimizedWalls,
     required this.recommendedLanes,
+    required this.laneDirections,
     required this.laneWaypoints,
+    required this.waypointNames,
+    required this.waypointTypes,
+    required this.activeLaneEndpoint,
     required this.waypointMode,
     required this.onAddWaypoint,
+    required this.onEditWaypoint,
+    required this.onSelectLane,
     required this.wallConnectMode,
     required this.pendingWallVertex,
     required this.onSelectWallVertex,
@@ -2537,9 +3504,15 @@ class _WallEditorCanvas extends StatefulWidget {
   final int vertexLabelRevision;
   final List<(Offset, Offset)> optimizedWalls;
   final List<(Offset, Offset)> recommendedLanes;
+  final Map<(Offset, Offset), String> laneDirections;
   final List<Offset> laneWaypoints;
+  final Map<Offset, String> waypointNames;
+  final Map<Offset, String> waypointTypes;
+  final Offset? activeLaneEndpoint;
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
+  final ValueChanged<Offset> onEditWaypoint;
+  final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool wallConnectMode;
   final Offset? pendingWallVertex;
   final ValueChanged<Offset> onSelectWallVertex;
@@ -2564,6 +3537,9 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
   Offset _measurementBadgeOffset = const Offset(12, 12);
   Offset? _movingWallVertex;
   Offset? _movingWallScreenPoint;
+  Offset? _waypointCursor;
+  Offset? _hoveredWaypoint;
+  Offset? _waypointHoverPosition;
   bool _movingWallHorizontally = true;
 
   Rect? get _selection => _start == null || _current == null
@@ -2596,6 +3572,51 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
         .clamp(0.0, 1.0);
     final nearest = points.$1 + line * t;
     if ((position - nearest).distance <= 14) widget.onSelectMeasurement();
+  }
+
+  bool _tryEditWaypoint(Offset position, Size canvasSize) {
+    final nearest = _findWaypointAt(position, canvasSize);
+    if (nearest == null) return false;
+    widget.onEditWaypoint(nearest);
+    return true;
+  }
+
+  Offset? _findWaypointAt(Offset position, Size canvasSize) {
+    Offset? nearest;
+    var nearestDistance = 18.0;
+    for (final waypoint in widget.laneWaypoints) {
+      final distance =
+          (_vertexToScreen(waypoint, canvasSize) - position).distance;
+      if (distance <= nearestDistance) {
+        nearest = waypoint;
+        nearestDistance = distance;
+      }
+    }
+    return nearest;
+  }
+
+  bool _trySelectLane(Offset position, Size canvasSize) {
+    (Offset, Offset)? nearestLane;
+    var nearestDistance = 12.0;
+    for (final lane in widget.recommendedLanes) {
+      final start = _vertexToScreen(lane.$1, canvasSize);
+      final end = _vertexToScreen(lane.$2, canvasSize);
+      final direction = end - start;
+      if (direction.distanceSquared <= .01) continue;
+      final relative = position - start;
+      final t =
+          ((relative.dx * direction.dx + relative.dy * direction.dy) /
+                  direction.distanceSquared)
+              .clamp(0.0, 1.0);
+      final distance = (position - (start + direction * t)).distance;
+      if (distance <= nearestDistance) {
+        nearestLane = lane;
+        nearestDistance = distance;
+      }
+    }
+    if (nearestLane == null) return false;
+    widget.onSelectLane(nearestLane);
+    return true;
   }
 
   void _trySelectWallVertex(Offset position, Size canvasSize) {
@@ -2638,15 +3659,72 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
     );
   }
 
-  void _addWaypointAt(Offset position, Size canvasSize) {
+  Offset? _screenToImage(Offset position, Size canvasSize) {
     final target = _imageTarget(canvasSize);
-    if (!target.contains(position)) return;
-    widget.onAddWaypoint(
-      Offset(
-        (position.dx - target.left) * widget.sourceSize.width / target.width,
-        (position.dy - target.top) * widget.sourceSize.height / target.height,
-      ),
+    if (!target.contains(position)) return null;
+    return Offset(
+      (position.dx - target.left) * widget.sourceSize.width / target.width,
+      (position.dy - target.top) * widget.sourceSize.height / target.height,
     );
+  }
+
+  Rect _floorBounds() {
+    final points = widget.floorMask?.points;
+    if (points == null || points.isEmpty) {
+      return Offset.zero & widget.sourceSize;
+    }
+    var left = points.first.dx;
+    var top = points.first.dy;
+    var right = left;
+    var bottom = top;
+    for (final point in points.skip(1)) {
+      left = math.min(left, point.dx);
+      top = math.min(top, point.dy);
+      right = math.max(right, point.dx);
+      bottom = math.max(bottom, point.dy);
+    }
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  Offset _imageToFloor(Offset point) {
+    final bounds = _floorBounds();
+    return Offset(point.dx - bounds.left, bounds.bottom - point.dy);
+  }
+
+  ({double left, double right, double top, double bottom}) _wallSpan(
+    Offset point,
+  ) {
+    final floor = _floorBounds();
+    var left = floor.left;
+    var right = floor.right;
+    var top = floor.top;
+    var bottom = floor.bottom;
+    for (final wall in widget.optimizedWalls) {
+      final a = wall.$1;
+      final b = wall.$2;
+      final vertical = (a.dx - b.dx).abs() <= 2;
+      final horizontal = (a.dy - b.dy).abs() <= 2;
+      if (vertical &&
+          point.dy >= math.min(a.dy, b.dy) - 2 &&
+          point.dy <= math.max(a.dy, b.dy) + 2) {
+        final x = (a.dx + b.dx) / 2;
+        if (x <= point.dx && x > left) left = x;
+        if (x >= point.dx && x < right) right = x;
+      }
+      if (horizontal &&
+          point.dx >= math.min(a.dx, b.dx) - 2 &&
+          point.dx <= math.max(a.dx, b.dx) + 2) {
+        final y = (a.dy + b.dy) / 2;
+        if (y <= point.dy && y > top) top = y;
+        if (y >= point.dy && y < bottom) bottom = y;
+      }
+    }
+    return (left: left, right: right, top: top, bottom: bottom);
+  }
+
+  void _addWaypointAt(Offset position, Size canvasSize) {
+    final point = _screenToImage(position, canvasSize);
+    if (point != null) widget.onAddWaypoint(point);
   }
 
   void _startEndpointMove(Offset position, Size canvasSize) {
@@ -2819,7 +3897,9 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
               child: CustomPaint(
                 painter: _LanePainter(
                   lanes: widget.recommendedLanes,
+                  directions: widget.laneDirections,
                   waypoints: widget.laneWaypoints,
+                  activeEndpoint: widget.activeLaneEndpoint,
                   sourceSize: widget.sourceSize,
                 ),
               ),
@@ -2838,10 +3918,44 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
           if (widget.waypointMode)
             MouseRegion(
               cursor: SystemMouseCursors.precise,
+              onHover: (event) => setState(() {
+                _waypointCursor =
+                    _screenToImage(event.localPosition, size) == null
+                    ? null
+                    : event.localPosition;
+              }),
+              onExit: (_) => setState(() => _waypointCursor = null),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTapUp: (details) =>
                     _addWaypointAt(details.localPosition, size),
+              ),
+            ),
+          if (widget.waypointMode && _waypointCursor != null)
+            IgnorePointer(
+              child: CustomPaint(
+                painter: _WaypointWallDistancePainter(
+                  point: _screenToImage(_waypointCursor!, size)!,
+                  span: _wallSpan(_screenToImage(_waypointCursor!, size)!),
+                  sourceSize: widget.sourceSize,
+                  waypoints: widget.laneWaypoints,
+                ),
+              ),
+            ),
+          if (widget.waypointMode && _waypointCursor != null)
+            Positioned(
+              left: _waypointCursor!.dx + 250 <= size.width
+                  ? _waypointCursor!.dx + 18
+                  : math.max(0, _waypointCursor!.dx - 242),
+              top: _waypointCursor!.dy + 126 <= size.height
+                  ? _waypointCursor!.dy + 18
+                  : math.max(0, _waypointCursor!.dy - 118),
+              child: IgnorePointer(
+                child: _WaypointCoordinateBadge(
+                  point: _imageToFloor(_screenToImage(_waypointCursor!, size)!),
+                  imagePoint: _screenToImage(_waypointCursor!, size)!,
+                  span: _wallSpan(_screenToImage(_waypointCursor!, size)!),
+                ),
               ),
             ),
           if (widget.wallConnectMode)
@@ -2873,14 +3987,58 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                 ),
               ),
             ),
-          if (widget.measurement != null &&
-              !widget.measurementMode &&
+          if (!widget.measurementMode &&
               !widget.eraseMode &&
-              !widget.waypointMode)
-            GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTapUp: (details) =>
-                  _trySelectMeasurement(details.localPosition, size),
+              !widget.waypointMode &&
+              !widget.wallConnectMode &&
+              !widget.wallEndpointEditMode)
+            MouseRegion(
+              cursor: _hoveredWaypoint == null
+                  ? MouseCursor.defer
+                  : SystemMouseCursors.click,
+              onHover: (event) {
+                final waypoint = _findWaypointAt(event.localPosition, size);
+                if (waypoint != _hoveredWaypoint ||
+                    event.localPosition != _waypointHoverPosition) {
+                  setState(() {
+                    _hoveredWaypoint = waypoint;
+                    _waypointHoverPosition = waypoint == null
+                        ? null
+                        : event.localPosition;
+                  });
+                }
+              },
+              onExit: (_) => setState(() {
+                _hoveredWaypoint = null;
+                _waypointHoverPosition = null;
+              }),
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTapUp: (details) {
+                  if (_tryEditWaypoint(details.localPosition, size)) return;
+                  if (_trySelectLane(details.localPosition, size)) return;
+                  if (widget.measurement != null) {
+                    _trySelectMeasurement(details.localPosition, size);
+                  }
+                },
+              ),
+            ),
+          if (!widget.waypointMode &&
+              _hoveredWaypoint != null &&
+              _waypointHoverPosition != null)
+            Positioned(
+              left: _waypointHoverPosition!.dx + 210 <= size.width
+                  ? _waypointHoverPosition!.dx + 16
+                  : math.max(0, _waypointHoverPosition!.dx - 202),
+              top: _waypointHoverPosition!.dy + 82 <= size.height
+                  ? _waypointHoverPosition!.dy + 16
+                  : math.max(0, _waypointHoverPosition!.dy - 76),
+              child: IgnorePointer(
+                child: _WaypointHoverBadge(
+                  name: widget.waypointNames[_hoveredWaypoint!] ?? '',
+                  category: widget.waypointTypes[_hoveredWaypoint!] ?? '일반',
+                ),
+              ),
             ),
           if ((widget.eraseMode && widget.mask != null) ||
               widget.measurementMode)
@@ -2988,6 +4146,285 @@ class _EraseModeBadge extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _WaypointCoordinateBadge extends StatelessWidget {
+  const _WaypointCoordinateBadge({
+    required this.point,
+    required this.imagePoint,
+    required this.span,
+  });
+
+  final Offset point;
+  final Offset imagePoint;
+  final ({double left, double right, double top, double bottom}) span;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: const Color(0xEFFFFFFF),
+      borderRadius: BorderRadius.circular(7),
+      border: Border.all(color: const Color(0xFFCBD5E1)),
+      boxShadow: const [BoxShadow(color: Color(0x18000000), blurRadius: 8)],
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'X ${point.dx.toStringAsFixed(1)}  ·  Y ${point.dy.toStringAsFixed(1)}',
+            style: const TextStyle(
+              color: Color(0xFF0F172A),
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '← 왼쪽 ${(imagePoint.dx - span.left).toStringAsFixed(1)}   오른쪽 ${(span.right - imagePoint.dx).toStringAsFixed(1)} →',
+            style: const TextStyle(
+              color: Color(0xFF9A3412),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            '↑ 위 ${(imagePoint.dy - span.top).toStringAsFixed(1)}   아래 ${(span.bottom - imagePoint.dy).toStringAsFixed(1)} ↓',
+            style: const TextStyle(
+              color: Color(0xFF9A3412),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _WaypointHoverBadge extends StatelessWidget {
+  const _WaypointHoverBadge({required this.name, required this.category});
+
+  final String name;
+  final String category;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: const Color(0xF7FFFFFF),
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: const Color(0xFFCBD5E1)),
+      boxShadow: const [BoxShadow(color: Color(0x22000000), blurRadius: 10)],
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            name.trim().isEmpty ? '(이름 없음)' : name,
+            style: const TextStyle(
+              color: Color(0xFF0F172A),
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '카테고리 · $category',
+            style: const TextStyle(
+              color: Color(0xFF64748B),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _WaypointWallDistancePainter extends CustomPainter {
+  const _WaypointWallDistancePainter({
+    required this.point,
+    required this.span,
+    required this.sourceSize,
+    required this.waypoints,
+  });
+
+  final Offset point;
+  final ({double left, double right, double top, double bottom}) span;
+  final Size sourceSize;
+  final List<Offset> waypoints;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fitted = applyBoxFit(BoxFit.contain, sourceSize, size).destination;
+    final target = Alignment.center.inscribe(fitted, Offset.zero & size);
+    Offset convert(Offset value) => Offset(
+      target.left + value.dx * target.width / sourceSize.width,
+      target.top + value.dy * target.height / sourceSize.height,
+    );
+
+    final center = convert(point);
+    final left = convert(Offset(span.left, point.dy));
+    final right = convert(Offset(span.right, point.dy));
+    final top = convert(Offset(point.dx, span.top));
+    final bottom = convert(Offset(point.dx, span.bottom));
+    final paint = Paint()
+      ..color = const Color(0xFFEA580C)
+      ..strokeWidth = 1.6
+      ..style = PaintingStyle.stroke;
+
+    void arrow(Offset start, Offset end) {
+      canvas.drawLine(start, end, paint);
+      final direction = (end - start) / (end - start).distance;
+      final normal = Offset(-direction.dy, direction.dx);
+      const head = 7.0;
+      const wing = 4.0;
+      canvas.drawLine(start, start + direction * head + normal * wing, paint);
+      canvas.drawLine(start, start + direction * head - normal * wing, paint);
+      canvas.drawLine(end, end - direction * head + normal * wing, paint);
+      canvas.drawLine(end, end - direction * head - normal * wing, paint);
+    }
+
+    void label(String text, Offset position) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: text,
+          style: const TextStyle(
+            color: Color(0xFF9A3412),
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            backgroundColor: Color(0xEFFFFFFF),
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      painter.paint(
+        canvas,
+        position - Offset(painter.width / 2, painter.height / 2),
+      );
+    }
+
+    final sourceTolerance = 10 * sourceSize.width / target.width;
+    final horizontalCrossings = waypoints
+        .where(
+          (waypoint) =>
+              (waypoint.dy - point.dy).abs() <= sourceTolerance &&
+              waypoint.dx > span.left &&
+              waypoint.dx < span.right,
+        )
+        .toList();
+    final verticalCrossings = waypoints
+        .where(
+          (waypoint) =>
+              (waypoint.dx - point.dx).abs() <= sourceTolerance &&
+              waypoint.dy > span.top &&
+              waypoint.dy < span.bottom,
+        )
+        .toList();
+
+    if (horizontalCrossings.isEmpty) {
+      if ((center - left).distance > 14) {
+        arrow(left, center);
+        label(
+          '좌 ${(point.dx - span.left).toStringAsFixed(1)}',
+          Offset((left.dx + center.dx) / 2, center.dy - 12),
+        );
+      }
+      if ((right - center).distance > 14) {
+        arrow(center, right);
+        label(
+          '우 ${(span.right - point.dx).toStringAsFixed(1)}',
+          Offset((center.dx + right.dx) / 2, center.dy - 12),
+        );
+      }
+    } else {
+      final stops = <double>[
+        span.left,
+        point.dx,
+        ...horizontalCrossings.map((waypoint) => waypoint.dx),
+        span.right,
+      ]..sort();
+      for (var i = 0; i < stops.length - 1; i++) {
+        final start = Offset(stops[i], point.dy);
+        final end = Offset(stops[i + 1], point.dy);
+        final screenStart = convert(start);
+        final screenEnd = convert(end);
+        if ((screenEnd - screenStart).distance <= 14) continue;
+        arrow(screenStart, screenEnd);
+        label(
+          '길이 ${(stops[i + 1] - stops[i]).toStringAsFixed(1)}',
+          Offset((screenStart.dx + screenEnd.dx) / 2, center.dy - 12),
+        );
+      }
+    }
+
+    if (verticalCrossings.isEmpty) {
+      if ((center - top).distance > 14) {
+        arrow(top, center);
+        label(
+          '위 ${(point.dy - span.top).toStringAsFixed(1)}',
+          Offset(center.dx + 30, (top.dy + center.dy) / 2),
+        );
+      }
+      if ((bottom - center).distance > 14) {
+        arrow(center, bottom);
+        label(
+          '아래 ${(span.bottom - point.dy).toStringAsFixed(1)}',
+          Offset(center.dx + 34, (center.dy + bottom.dy) / 2),
+        );
+      }
+    } else {
+      final stops = <double>[
+        span.top,
+        point.dy,
+        ...verticalCrossings.map((waypoint) => waypoint.dy),
+        span.bottom,
+      ]..sort();
+      for (var i = 0; i < stops.length - 1; i++) {
+        final start = Offset(point.dx, stops[i]);
+        final end = Offset(point.dx, stops[i + 1]);
+        final screenStart = convert(start);
+        final screenEnd = convert(end);
+        if ((screenEnd - screenStart).distance <= 14) continue;
+        arrow(screenStart, screenEnd);
+        label(
+          '길이 ${(stops[i + 1] - stops[i]).toStringAsFixed(1)}',
+          Offset(center.dx + 38, (screenStart.dy + screenEnd.dy) / 2),
+        );
+      }
+    }
+    for (final waypoint in {...horizontalCrossings, ...verticalCrossings}) {
+      final screenPoint = convert(waypoint);
+      canvas.drawCircle(
+        screenPoint,
+        5,
+        Paint()..color = const Color(0xFF2563EB),
+      );
+      canvas.drawCircle(
+        screenPoint,
+        7,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+    }
+    canvas.drawCircle(center, 3, Paint()..color = const Color(0xFFEA580C));
+  }
+
+  @override
+  bool shouldRepaint(covariant _WaypointWallDistancePainter oldDelegate) =>
+      oldDelegate.point != point ||
+      oldDelegate.span != span ||
+      oldDelegate.sourceSize != sourceSize ||
+      oldDelegate.waypoints != waypoints;
 }
 
 class _MeasurementModeBadge extends StatelessWidget {
@@ -3127,12 +4564,16 @@ class _MeasurementPainter extends CustomPainter {
 class _LanePainter extends CustomPainter {
   const _LanePainter({
     required this.lanes,
+    required this.directions,
     required this.waypoints,
+    required this.activeEndpoint,
     required this.sourceSize,
   });
 
   final List<(Offset, Offset)> lanes;
+  final Map<(Offset, Offset), String> directions;
   final List<Offset> waypoints;
+  final Offset? activeEndpoint;
   final Size sourceSize;
 
   @override
@@ -3147,17 +4588,14 @@ class _LanePainter extends CustomPainter {
       ..color = const Color(0xFF06B6D4)
       ..strokeWidth = 3
       ..strokeCap = StrokeCap.round;
-    for (final lane in lanes) {
-      final start = convert(lane.$1);
-      final end = convert(lane.$2);
-      canvas.drawLine(start, end, paint);
-      final direction = end - start;
-      if (direction.distance <= 1) continue;
+    void drawArrow(Offset from, Offset to, double fraction) {
+      final direction = to - from;
+      if (direction.distance <= 1) return;
       final unit = direction / direction.distance;
       final normal = Offset(-unit.dy, unit.dx);
       const arrowLength = 9.0;
       const arrowWidth = 5.0;
-      final tip = Offset.lerp(start, end, .62)!;
+      final tip = Offset.lerp(from, to, fraction)!;
       final base = tip - unit * arrowLength;
       final path = Path()
         ..moveTo(tip.dx, tip.dy)
@@ -3172,17 +4610,52 @@ class _LanePainter extends CustomPainter {
         ..close();
       canvas.drawPath(path, paint);
     }
+
+    for (final lane in lanes) {
+      final start = convert(lane.$1);
+      final end = convert(lane.$2);
+      canvas.drawLine(start, end, paint);
+      final laneDirection = directions[lane] ?? '양방향';
+      if (laneDirection == '정방향') {
+        drawArrow(start, end, .62);
+      } else if (laneDirection == '역방향') {
+        drawArrow(end, start, .62);
+      } else {
+        drawArrow(start, end, .38);
+        drawArrow(end, start, .38);
+      }
+    }
     for (var i = 0; i < waypoints.length; i++) {
       final point = convert(waypoints[i]);
-      canvas.drawCircle(point, 6, Paint()..color = const Color(0xFFFFFFFF));
-      canvas.drawCircle(point, 5, paint);
+      canvas.drawCircle(point, 12, Paint()..color = const Color(0xFFFFFFFF));
+      canvas.drawCircle(point, 10, paint);
+    }
+    if (activeEndpoint != null) {
+      final point = convert(activeEndpoint!);
+      canvas.drawCircle(
+        point,
+        17,
+        Paint()
+          ..color = const Color(0xFFF59E0B)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4,
+      );
+      canvas.drawCircle(
+        point,
+        13,
+        Paint()
+          ..color = const Color(0x66FDE68A)
+          ..style = PaintingStyle.fill,
+      );
     }
   }
 
   @override
   bool shouldRepaint(covariant _LanePainter oldDelegate) =>
       oldDelegate.lanes != lanes ||
+      oldDelegate.directions != directions ||
       oldDelegate.waypoints != waypoints ||
+      oldDelegate.activeEndpoint != activeEndpoint ||
       oldDelegate.sourceSize != sourceSize;
 }
 

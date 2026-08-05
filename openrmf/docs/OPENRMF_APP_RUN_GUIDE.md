@@ -147,6 +147,11 @@ Gazebo 창이 필요 없으면 자원 사용량을 줄이도록 headless 모드�
 RMF_HEADLESS=true ./openrmf/scripts/run_office_web.sh
 ```
 
+스크립트는 Gazebo를 시작하기 전에 DRM GPU를 자동으로 확인합니다. NVIDIA 또는
+다른 GPU가 있으면 하드웨어 렌더링을 사용하고, GPU 장치가 없을 때만 Mesa
+소프트웨어 렌더링을 사용합니다. NVIDIA GPU가 있지만 `nvidia-smi`가 드라이버에
+접근하지 못하면 경고를 출력하므로 NVIDIA 드라이버 상태를 확인해야 합니다.
+
 ### 웹 대시보드 빈 화면 원인과 해결 내용
 
 확인된 빈 화면은 Open-RMF 백엔드나 Flutter 문제가 아니었습니다. 당시 사용한
