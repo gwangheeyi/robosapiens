@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -5,6 +6,9 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import 'deployment_service.dart';
+import 'deployed_map_service.dart';
 
 void main() => runApp(const RmfControlApp());
 
@@ -121,6 +125,55 @@ class _EditorSnapshot {
   final Offset? activeLaneEndpoint;
 }
 
+class _LaneRecommendation {
+  const _LaneRecommendation({
+    required this.title,
+    required this.description,
+    required this.start,
+    required this.end,
+  });
+
+  final String title;
+  final String description;
+  final Offset start;
+  final Offset end;
+}
+
+class _MockRobot {
+  _MockRobot({required this.id, required this.position, required this.color});
+
+  final String id;
+  Offset position;
+  final Color color;
+  Offset? previousWaypoint;
+  Offset? targetWaypoint;
+  bool moving = true;
+  double battery = 100;
+  final List<Offset> assignedRoute = [];
+  String? activeTaskId;
+}
+
+enum _MockTaskStatus { queued, active, completed, cancelled, failed }
+
+class _MockTask {
+  _MockTask({
+    required this.id,
+    required this.type,
+    required this.robotId,
+    required this.destination,
+    required this.destinationName,
+  });
+
+  final String id;
+  final String type;
+  final String robotId;
+  final Offset destination;
+  final String destinationName;
+  _MockTaskStatus status = _MockTaskStatus.queued;
+  final DateTime createdAt = DateTime.now();
+  DateTime? completedAt;
+}
+
 class ControlDashboard extends StatefulWidget {
   const ControlDashboard({super.key});
 
@@ -164,6 +217,427 @@ class _ControlDashboardState extends State<ControlDashboard> {
   int _vertexLabelRevision = 0;
   bool _showVertexLabels = true;
   final List<_EditorSnapshot> _undoHistory = [];
+  String? _processingWarning;
+  int _selectedMenu = 1;
+  final List<_MockRobot> _mockRobots = [];
+  final List<_MockTask> _mockTasks = [];
+  Timer? _mockRobotTimer;
+  DeployedMapData? _robotDeployedMap;
+
+  void _showProcessingWarning(String operation, Object error) {
+    if (!mounted) return;
+    final message = [
+      '[$operation] 맵 처리 중 문제가 발생했습니다.',
+      '원인: $error',
+      '도면과 설정값을 확인한 뒤 다시 시도해 주세요.',
+    ].join('\n');
+    setState(() => _processingWarning = message);
+  }
+
+  void _clearProcessingWarning() {
+    if (_processingWarning != null) {
+      setState(() => _processingWarning = null);
+    }
+  }
+
+  List<String> _validateMap() {
+    final warnings = <String>[];
+    if (_measurement == null) {
+      warnings.add('기준 길이(Measurement)가 없어 실제 축척을 계산할 수 없습니다.');
+    }
+    if (_floorOutline().length < 3) {
+      warnings.add('Floor 경계를 구성할 정점이 3개보다 적습니다.');
+    }
+    if (_recommendedLanes.isEmpty) {
+      warnings.add('Lane이 하나도 없습니다.');
+    } else {
+      final zeroLengthLaneCount = _recommendedLanes
+          .where((lane) => (lane.$1 - lane.$2).distance <= .01)
+          .length;
+      if (zeroLengthLaneCount > 0) {
+        warnings.add('시작점과 끝점이 같은 Lane이 $zeroLengthLaneCount개 있습니다.');
+      }
+      final adjacency = <Offset, Set<Offset>>{};
+      for (final lane in _recommendedLanes) {
+        adjacency.putIfAbsent(lane.$1, () => <Offset>{}).add(lane.$2);
+        adjacency.putIfAbsent(lane.$2, () => <Offset>{}).add(lane.$1);
+      }
+      final visited = <Offset>{};
+      final queue = <Offset>[adjacency.keys.first];
+      while (queue.isNotEmpty) {
+        final point = queue.removeLast();
+        if (!visited.add(point)) continue;
+        queue.addAll(
+          adjacency[point]!.where((next) => !visited.contains(next)),
+        );
+      }
+      final disconnected = adjacency.keys.where(
+        (point) => !visited.contains(point),
+      );
+      if (disconnected.isNotEmpty) {
+        final names = disconnected
+            .map((point) => _waypointNames[point])
+            .whereType<String>()
+            .where((name) => name.isNotEmpty)
+            .toList();
+        warnings.add(
+          'Lane 네트워크가 분리되어 접근할 수 없는 Waypoint가 있습니다'
+          '${names.isEmpty ? '' : ': ${names.join(', ')}'}.',
+        );
+      }
+    }
+    final names = _waypointNames.values
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty);
+    final seenNames = <String>{};
+    final duplicateNames = <String>{};
+    for (final name in names) {
+      if (!seenNames.add(name)) duplicateNames.add(name);
+    }
+    if (duplicateNames.isNotEmpty) {
+      warnings.add('중복된 Waypoint 이름이 있습니다: ${duplicateNames.join(', ')}.');
+    }
+    return warnings;
+  }
+
+  Future<void> _showValidationDialog() async {
+    if (_drawing == null) return;
+    final warnings = _validateMap();
+    final report = [
+      'YAML 오류 검증 결과',
+      '파일: $_yamlFileName',
+      '',
+      if (warnings.isEmpty)
+        '검증된 문제점이 없습니다.'
+      else ...[
+        'Warning ${warnings.length}건',
+        for (var i = 0; i < warnings.length; i++) '${i + 1}. ${warnings[i]}',
+      ],
+    ].join('\n');
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: Icon(
+          warnings.isEmpty
+              ? Icons.verified_outlined
+              : Icons.warning_amber_rounded,
+          color: warnings.isEmpty
+              ? const Color(0xFF15803D)
+              : const Color(0xFFD97706),
+          size: 36,
+        ),
+        title: const Text('YAML 오류 검증'),
+        content: SizedBox(
+          width: 560,
+          child: Container(
+            constraints: const BoxConstraints(maxHeight: 420),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: warnings.isEmpty
+                  ? const Color(0xFFF0FDF4)
+                  : const Color(0xFFFFFBEB),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: warnings.isEmpty
+                    ? const Color(0xFF86EFAC)
+                    : const Color(0xFFFCD34D),
+              ),
+            ),
+            child: SingleChildScrollView(child: SelectableText(report)),
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: report));
+              if (!dialogContext.mounted) return;
+              ScaffoldMessenger.of(
+                dialogContext,
+              ).showSnackBar(const SnackBar(content: Text('검증 결과를 복사했습니다.')));
+            },
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            label: const Text('결과 복사'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _waypointLabel(Offset point) {
+    final name = (_waypointNames[point] ?? '').trim();
+    if (name.isNotEmpty) return name;
+    final index = _laneWaypoints.indexOf(point);
+    return index < 0 ? 'Waypoint' : 'Waypoint ${index + 1}';
+  }
+
+  bool _hasLane(Offset start, Offset end) => _recommendedLanes.any(
+    (lane) =>
+        ((lane.$1 - start).distance <= .01 &&
+            (lane.$2 - end).distance <= .01) ||
+        ((lane.$1 - end).distance <= .01 && (lane.$2 - start).distance <= .01),
+  );
+
+  bool _segmentsCross(Offset a, Offset b, Offset c, Offset d) {
+    double side(Offset p, Offset q, Offset r) =>
+        (q.dx - p.dx) * (r.dy - p.dy) - (q.dy - p.dy) * (r.dx - p.dx);
+    final abC = side(a, b, c);
+    final abD = side(a, b, d);
+    final cdA = side(c, d, a);
+    final cdB = side(c, d, b);
+    return abC * abD < 0 && cdA * cdB < 0;
+  }
+
+  bool _crossesWall(Offset start, Offset end) => _visibleWallSegments().any(
+    (wall) => _segmentsCross(start, end, wall.$1, wall.$2),
+  );
+
+  List<_LaneRecommendation> _buildLaneRecommendations() {
+    if (_recommendedLanes.isEmpty) return const [];
+    final adjacency = <Offset, Set<Offset>>{};
+    for (final lane in _recommendedLanes) {
+      adjacency.putIfAbsent(lane.$1, () => <Offset>{}).add(lane.$2);
+      adjacency.putIfAbsent(lane.$2, () => <Offset>{}).add(lane.$1);
+    }
+    final components = <Set<Offset>>[];
+    final unvisited = adjacency.keys.toSet();
+    while (unvisited.isNotEmpty) {
+      final component = <Offset>{};
+      final queue = <Offset>[unvisited.first];
+      while (queue.isNotEmpty) {
+        final point = queue.removeLast();
+        if (!component.add(point)) continue;
+        unvisited.remove(point);
+        queue.addAll(
+          adjacency[point]!.where((next) => !component.contains(next)),
+        );
+      }
+      components.add(component);
+    }
+
+    final recommendations = <_LaneRecommendation>[];
+    components.sort((a, b) => b.length.compareTo(a.length));
+    final mainComponent = components.first;
+    for (final component in components.skip(1)) {
+      Offset? bestStart;
+      Offset? bestEnd;
+      var bestDistance = double.infinity;
+      for (final start in mainComponent) {
+        for (final end in component) {
+          final distance = (start - end).distance;
+          if (distance < bestDistance && !_crossesWall(start, end)) {
+            bestDistance = distance;
+            bestStart = start;
+            bestEnd = end;
+          }
+        }
+      }
+      if (bestStart != null && bestEnd != null) {
+        recommendations.add(
+          _LaneRecommendation(
+            title: '분리된 구역 연결',
+            description:
+                '${_waypointLabel(bestStart)} ↔ ${_waypointLabel(bestEnd)}를 연결하면 접근 불가능한 구역이 해소됩니다.',
+            start: bestStart,
+            end: bestEnd,
+          ),
+        );
+      }
+    }
+
+    for (final entry in adjacency.entries) {
+      if (recommendations.length >= 8) break;
+      if (entry.value.length != 1) continue;
+      final category = _waypointTypes[entry.key] ?? '일반';
+      if (category == '충전' || category == '대기') continue;
+      Offset? nearest;
+      var nearestDistance = double.infinity;
+      for (final candidate in adjacency.keys) {
+        if (candidate == entry.key || entry.value.contains(candidate)) continue;
+        if (_hasLane(entry.key, candidate)) continue;
+        if (_crossesWall(entry.key, candidate)) continue;
+        final distance = (entry.key - candidate).distance;
+        if (distance < nearestDistance) {
+          nearest = candidate;
+          nearestDistance = distance;
+        }
+      }
+      if (nearest == null) continue;
+      final duplicate = recommendations.any(
+        (item) =>
+            (item.start == entry.key && item.end == nearest) ||
+            (item.start == nearest && item.end == entry.key),
+      );
+      if (duplicate) continue;
+      recommendations.add(
+        _LaneRecommendation(
+          title: '막다른 경로에 우회로 추가',
+          description:
+              '${_waypointLabel(entry.key)} ↔ ${_waypointLabel(nearest)}를 연결하면 단일 경로 의존도를 줄일 수 있습니다.',
+          start: entry.key,
+          end: nearest,
+        ),
+      );
+    }
+    return recommendations;
+  }
+
+  Future<void> _showLaneRecommendationsDialog() async {
+    final recommendations = _buildLaneRecommendations();
+    if (!mounted) return;
+    if (recommendations.isEmpty) {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(
+            Icons.route_outlined,
+            color: Color(0xFF15803D),
+            size: 36,
+          ),
+          title: const Text('경로 추천'),
+          content: const Text('현재 Lane 구성에서 바로 적용할 추가 경로를 찾지 못했습니다.'),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    final selected = <int>{};
+    final directions = <int, String>{
+      for (var i = 0; i < recommendations.length; i++) i: '양방향',
+    };
+    final result =
+        await showDialog<({Set<int> selected, Map<int, String> directions})>(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              icon: const Icon(
+                Icons.auto_awesome_outlined,
+                color: Color(0xFF2563EB),
+                size: 36,
+              ),
+              title: const Text('효율적인 경로 추천'),
+              content: SizedBox(
+                width: 650,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('적용할 추천을 선택하고 각 Lane의 이동 방향을 수정할 수 있습니다.'),
+                    const SizedBox(height: 14),
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: recommendations.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final item = recommendations[index];
+                          return CheckboxListTile(
+                            value: selected.contains(index),
+                            onChanged: (checked) => setDialogState(() {
+                              checked == true
+                                  ? selected.add(index)
+                                  : selected.remove(index);
+                            }),
+                            title: Text(item.title),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const SizedBox(height: 4),
+                                Text(item.description),
+                                const SizedBox(height: 8),
+                                DropdownButton<String>(
+                                  value: directions[index],
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: '양방향',
+                                      child: Text('양방향'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: '정방향',
+                                      child: Text('정방향'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: '역방향',
+                                      child: Text('역방향'),
+                                    ),
+                                  ],
+                                  onChanged: (value) {
+                                    if (value != null) {
+                                      setDialogState(
+                                        () => directions[index] = value,
+                                      );
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                            controlAffinity: ListTileControlAffinity.leading,
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('취소'),
+                ),
+                FilledButton.icon(
+                  onPressed: selected.isEmpty
+                      ? null
+                      : () => Navigator.pop(dialogContext, (
+                          selected: {...selected},
+                          directions: {...directions},
+                        )),
+                  icon: const Icon(Icons.auto_fix_high, size: 18),
+                  label: Text('선택 적용 (${selected.length})'),
+                ),
+              ],
+            ),
+          ),
+        );
+    if (result == null || !mounted) return;
+    _recordUndo();
+    setState(() {
+      for (final index in result.selected) {
+        final recommendation = recommendations[index];
+        if (_hasLane(recommendation.start, recommendation.end)) continue;
+        final lane = (recommendation.start, recommendation.end);
+        _recommendedLanes.add(lane);
+        _laneDirections[lane] = result.directions[index] ?? '양방향';
+      }
+      _stage = MapStage.lanes;
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('추천 Lane ${result.selected.length}개를 적용했습니다.')),
+    );
+  }
+
+  bool _showMapValidationWarnings() {
+    final warnings = _validateMap();
+    if (warnings.isEmpty) return false;
+    setState(() {
+      _processingWarning = [
+        '[맵 검증] 배포 전에 확인이 필요합니다.',
+        for (var i = 0; i < warnings.length; i++) '${i + 1}. ${warnings[i]}',
+      ].join('\n');
+    });
+    return true;
+  }
 
   _EditorSnapshot _captureSnapshot() => _EditorSnapshot(
     drawing: _drawing,
@@ -307,6 +781,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ).showSnackBar(SnackBar(content: Text('${file.name} 도면을 불러왔습니다.')));
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('도면 불러오기', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('파일을 불러오지 못했습니다: $error')));
@@ -836,8 +1311,551 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return Offset(point.dx - bounds.left, bounds.bottom - point.dy);
   }
 
+  List<Offset> _outgoingWaypoints(Offset point) {
+    final result = <Offset>[];
+    final loadedMap = _robotDeployedMap;
+    final lanes = loadedMap?.lanes ?? _recommendedLanes;
+    for (final lane in lanes) {
+      final direction = loadedMap == null
+          ? _laneDirections[lane] ?? '양방향'
+          : '양방향';
+      if ((lane.$1 - point).distance <= .01 && direction != '역방향') {
+        result.add(lane.$2);
+      }
+      if ((lane.$2 - point).distance <= .01 && direction != '정방향') {
+        result.add(lane.$1);
+      }
+    }
+    return result;
+  }
+
+  List<Offset>? _shortestRobotPath(Offset start, Offset destination) {
+    final points = <Offset>{start, destination};
+    final edges = <Offset, List<(Offset, double)>>{};
+    final loadedMap = _robotDeployedMap;
+    final lanes = loadedMap?.lanes ?? _recommendedLanes;
+    for (final lane in lanes) {
+      points.addAll([lane.$1, lane.$2]);
+      final direction = loadedMap == null
+          ? _laneDirections[lane] ?? '양방향'
+          : '양방향';
+      final distance = (lane.$1 - lane.$2).distance;
+      if (direction != '역방향') {
+        edges.putIfAbsent(lane.$1, () => []).add((lane.$2, distance));
+      }
+      if (direction != '정방향') {
+        edges.putIfAbsent(lane.$2, () => []).add((lane.$1, distance));
+      }
+    }
+    final distances = {for (final point in points) point: double.infinity};
+    final previous = <Offset, Offset>{};
+    final unvisited = points.toSet();
+    distances[start] = 0;
+    while (unvisited.isNotEmpty) {
+      Offset? current;
+      var best = double.infinity;
+      for (final point in unvisited) {
+        final distance = distances[point]!;
+        if (distance < best) {
+          best = distance;
+          current = point;
+        }
+      }
+      if (current == null || best == double.infinity) break;
+      unvisited.remove(current);
+      if (current == destination) break;
+      for (final edge in edges[current] ?? const []) {
+        final candidate = best + edge.$2;
+        if (candidate < distances[edge.$1]!) {
+          distances[edge.$1] = candidate;
+          previous[edge.$1] = current;
+        }
+      }
+    }
+    if (start != destination && !previous.containsKey(destination)) return null;
+    final path = <Offset>[destination];
+    while (path.last != start) {
+      final parent = previous[path.last];
+      if (parent == null) return null;
+      path.add(parent);
+    }
+    return path.reversed.toList();
+  }
+
+  void _finishRobotTask(_MockRobot robot) {
+    final taskId = robot.activeTaskId;
+    if (taskId == null) return;
+    final task = _mockTasks.where((item) => item.id == taskId).firstOrNull;
+    if (task != null && task.status == _MockTaskStatus.active) {
+      task.status = _MockTaskStatus.completed;
+      task.completedAt = DateTime.now();
+    }
+    robot.activeTaskId = null;
+    robot.moving = false;
+  }
+
+  void _startMockRobotTimer() {
+    _mockRobotTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted || _mockRobots.isEmpty) return;
+      final baseSpeed = math.max(
+        18.0,
+        math.min(
+              _drawing?.pixelWidth?.toDouble() ?? 1200,
+              _drawing?.pixelHeight?.toDouble() ?? 800,
+            ) /
+            18,
+      );
+      var changed = false;
+      for (final robot in _mockRobots) {
+        if (!robot.moving) continue;
+        var target = robot.targetWaypoint;
+        if (target == null) {
+          if (robot.assignedRoute.isNotEmpty) {
+            target = robot.assignedRoute.removeAt(0);
+          } else if (robot.activeTaskId != null) {
+            _finishRobotTask(robot);
+            changed = true;
+            continue;
+          } else {
+            final options = _outgoingWaypoints(robot.position);
+            if (options.isEmpty) continue;
+            target = options.firstWhere(
+              (candidate) => candidate != robot.previousWaypoint,
+              orElse: () => options.first,
+            );
+          }
+          robot.previousWaypoint = robot.position;
+          robot.targetWaypoint = target;
+        }
+        final delta = target - robot.position;
+        final step = baseSpeed * .1;
+        if (delta.distance <= step) {
+          final arrived = target;
+          robot.position = arrived;
+          robot.targetWaypoint = null;
+        } else {
+          robot.position += delta / delta.distance * step;
+        }
+        robot.battery = math.max(0, robot.battery - .003);
+        changed = true;
+      }
+      if (changed) setState(() {});
+    });
+  }
+
+  Future<void> _spawnMockRobot() async {
+    final runtimeWaypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final runtimeNames = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    if (runtimeWaypoints.isEmpty) {
+      _showProcessingWarning('Mock 로봇 Spawn', '먼저 Lane과 Waypoint를 만들어 주세요.');
+      return;
+    }
+    final controller = TextEditingController(
+      text: 'robot-${_mockRobots.length + 1}',
+    );
+    var start = runtimeWaypoints.first;
+    final result = await showDialog<(String, Offset)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.smart_toy_outlined, size: 36),
+          title: const Text('Mock 로봇 Spawn'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: '로봇 이름',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<Offset>(
+                  initialValue: start,
+                  decoration: const InputDecoration(
+                    labelText: '시작 Waypoint',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final point in runtimeWaypoints)
+                      DropdownMenuItem(
+                        value: point,
+                        child: Text(
+                          (runtimeNames[point] ?? '').trim().isEmpty
+                              ? 'Waypoint ${runtimeWaypoints.indexOf(point) + 1}'
+                              : runtimeNames[point]!,
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) setDialogState(() => start = value);
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                final name = controller.text.trim();
+                if (name.isNotEmpty) {
+                  Navigator.pop(dialogContext, (name, start));
+                }
+              },
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Spawn'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (result == null || !mounted) return;
+    if (_mockRobots.any((robot) => robot.id == result.$1)) {
+      _showProcessingWarning(
+        'Mock 로봇 Spawn',
+        '같은 이름의 로봇이 이미 있습니다: ${result.$1}',
+      );
+      return;
+    }
+    const colors = [
+      Color(0xFFDC2626),
+      Color(0xFF7C3AED),
+      Color(0xFF0891B2),
+      Color(0xFFEA580C),
+      Color(0xFF16A34A),
+    ];
+    setState(() {
+      _mockRobots.add(
+        _MockRobot(
+          id: result.$1,
+          position: result.$2,
+          color: colors[_mockRobots.length % colors.length],
+        ),
+      );
+    });
+    _startMockRobotTimer();
+  }
+
+  void _toggleMockRobot(_MockRobot robot) {
+    setState(() => robot.moving = !robot.moving);
+  }
+
+  void _removeMockRobot(_MockRobot robot) {
+    setState(() {
+      for (final task in _mockTasks.where(
+        (task) =>
+            task.robotId == robot.id &&
+            (task.status == _MockTaskStatus.active ||
+                task.status == _MockTaskStatus.queued),
+      )) {
+        task.status = _MockTaskStatus.failed;
+      }
+      _mockRobots.remove(robot);
+    });
+  }
+
+  Future<void> _createMockTask() async {
+    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    if (_mockRobots.isEmpty || waypoints.isEmpty) {
+      final action = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(
+            Icons.info_outline,
+            color: Color(0xFF2563EB),
+            size: 36,
+          ),
+          title: const Text('작업 준비가 필요합니다'),
+          content: Text(
+            waypoints.isEmpty
+                ? '작업을 생성하려면 먼저 배포된 맵을 불러와야 합니다.\n'
+                      '그 다음 로봇 메뉴에서 시작 Waypoint를 선택해 로봇을 Spawn하세요.'
+                : '운영 맵은 준비되었습니다. 로봇 메뉴에서 로봇을 Spawn한 뒤 작업을 생성하세요.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('닫기'),
+            ),
+            if (waypoints.isEmpty)
+              OutlinedButton.icon(
+                onPressed: () => Navigator.pop(dialogContext, 'map'),
+                icon: const Icon(Icons.folder_open_outlined, size: 18),
+                label: const Text('배포 맵 불러오기'),
+              ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'robots'),
+              icon: const Icon(Icons.smart_toy_outlined, size: 18),
+              label: const Text('로봇 메뉴'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'map') await _loadMapForRobots();
+      if (action == 'robots' && mounted) setState(() => _selectedMenu = 2);
+      return;
+    }
+    var robotId = '__auto__';
+    var destination = waypoints.first;
+    var taskType = '이동';
+    final result = await showDialog<(String, String, Offset)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.assignment_outlined, size: 36),
+          title: const Text('새 작업 생성'),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: taskType,
+                  decoration: const InputDecoration(
+                    labelText: '작업 유형',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: '이동', child: Text('Waypoint 이동')),
+                    DropdownMenuItem(value: '충전', child: Text('충전소 이동')),
+                    DropdownMenuItem(value: '대기', child: Text('대기 장소 이동')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) setDialogState(() => taskType = value);
+                  },
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: robotId,
+                  decoration: const InputDecoration(
+                    labelText: '로봇 배정',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '__auto__',
+                      child: Text('자동 배정'),
+                    ),
+                    for (final robot in _mockRobots)
+                      DropdownMenuItem(value: robot.id, child: Text(robot.id)),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) setDialogState(() => robotId = value);
+                  },
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<Offset>(
+                  initialValue: destination,
+                  decoration: const InputDecoration(
+                    labelText: '목적지 Waypoint',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final point in waypoints)
+                      DropdownMenuItem(
+                        value: point,
+                        child: Text(
+                          (names[point] ?? '').trim().isEmpty
+                              ? 'Waypoint ${waypoints.indexOf(point) + 1}'
+                              : names[point]!,
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => destination = value);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, (
+                taskType,
+                robotId,
+                destination,
+              )),
+              child: const Text('작업 시작'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    final available = _mockRobots
+        .where((robot) => robot.activeTaskId == null)
+        .toList();
+    final robot = result.$2 == '__auto__'
+        ? (available..sort((a, b) => b.battery.compareTo(a.battery)))
+              .firstOrNull
+        : _mockRobots.where((item) => item.id == result.$2).firstOrNull;
+    if (robot == null || robot.activeTaskId != null) {
+      _showProcessingWarning('작업 생성', '현재 작업을 수행할 수 있는 로봇이 없습니다.');
+      return;
+    }
+    final start =
+        robot.targetWaypoint ??
+        waypoints.reduce(
+          (a, b) =>
+              (a - robot.position).distance <= (b - robot.position).distance
+              ? a
+              : b,
+        );
+    final path = _shortestRobotPath(start, result.$3);
+    if (path == null) {
+      _showProcessingWarning('작업 생성', '선택한 목적지까지 이동 가능한 Lane 경로가 없습니다.');
+      return;
+    }
+    final task = _MockTask(
+      id: 'TASK-${(_mockTasks.length + 1).toString().padLeft(3, '0')}',
+      type: result.$1,
+      robotId: robot.id,
+      destination: result.$3,
+      destinationName: (names[result.$3] ?? '').trim().isEmpty
+          ? 'Waypoint ${waypoints.indexOf(result.$3) + 1}'
+          : names[result.$3]!,
+    );
+    setState(() {
+      task.status = _MockTaskStatus.active;
+      _mockTasks.insert(0, task);
+      robot.activeTaskId = task.id;
+      robot.assignedRoute
+        ..clear()
+        ..addAll(path.skip(1));
+      robot.moving = true;
+    });
+    _startMockRobotTimer();
+  }
+
+  void _cancelMockTask(_MockTask task) {
+    if (task.status != _MockTaskStatus.active &&
+        task.status != _MockTaskStatus.queued) {
+      return;
+    }
+    setState(() {
+      task.status = _MockTaskStatus.cancelled;
+      task.completedAt = DateTime.now();
+      final robot = _mockRobots
+          .where((item) => item.id == task.robotId)
+          .firstOrNull;
+      if (robot?.activeTaskId == task.id) {
+        robot!
+          ..activeTaskId = null
+          ..targetWaypoint = null
+          ..moving = false
+          ..assignedRoute.clear();
+      }
+    });
+  }
+
+  Future<void> _loadMapForRobots() async {
+    try {
+      final maps = await listDeployedMaps();
+      if (!mounted) return;
+      if (maps.isEmpty) {
+        _showProcessingWarning(
+          '배포 맵 불러오기',
+          'rmf_maps에서 배포된 building.yaml을 찾지 못했습니다.',
+        );
+        return;
+      }
+      final selected = await showDialog<DeployedMapSummary>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.map_outlined, size: 36),
+          title: const Text('배포된 맵 불러오기'),
+          content: SizedBox(
+            width: 560,
+            height: math.min(420, maps.length * 76.0 + 20),
+            child: ListView.separated(
+              itemCount: maps.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final map = maps[index];
+                final isProject = map.yamlPath.endsWith('.rmfproject');
+                return ListTile(
+                  leading: Icon(
+                    isProject
+                        ? Icons.edit_document
+                        : map.hasNavGraph
+                        ? Icons.check_circle_outline
+                        : Icons.warning_amber_outlined,
+                    color: isProject
+                        ? const Color(0xFF2563EB)
+                        : map.hasNavGraph
+                        ? const Color(0xFF15803D)
+                        : const Color(0xFFD97706),
+                  ),
+                  title: Text(map.name),
+                  subtitle: Text(
+                    '${isProject
+                        ? '저장된 RMF 프로젝트'
+                        : map.hasNavGraph
+                        ? 'nav graph 확인됨'
+                        : 'nav graph 없음'}\n${map.yamlPath}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => Navigator.pop(dialogContext, map),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null) return;
+      final loaded = await loadDeployedMap(selected);
+      if (!mounted) return;
+      setState(() {
+        _robotDeployedMap = loaded;
+        _mockRobots.clear();
+        _mockTasks.clear();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${loaded.summary.name} 배포 맵을 불러왔습니다.')),
+      );
+    } catch (error) {
+      _showProcessingWarning('배포 맵 불러오기', error);
+    }
+  }
+
+  UploadedDrawing? get _robotRuntimeDrawing {
+    final loaded = _robotDeployedMap;
+    if (loaded == null) return _drawing;
+    return UploadedDrawing(
+      name: loaded.imageName,
+      extension: loaded.imageName.split('.').last.toLowerCase(),
+      size: loaded.imageBytes.length,
+      bytes: loaded.imageBytes,
+      pixelWidth: loaded.imageSize.width.round(),
+      pixelHeight: loaded.imageSize.height.round(),
+    );
+  }
+
   @override
   void dispose() {
+    _mockRobotTimer?.cancel();
     _mapTransform.dispose();
     super.dispose();
   }
@@ -1168,6 +2186,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return;
     }
     if (!drawing.isImage || drawing.bytes == null) {
+      _showProcessingWarning(
+        '벽 자동 인식',
+        'PDF와 CAD 도면은 직접 처리할 수 없습니다. PNG 또는 JPG로 변환해 주세요.',
+      );
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('PDF와 CAD 도면은 이미지 변환 후 벽을 인식할 수 있습니다.')),
       );
@@ -1225,6 +2247,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('벽 자동 인식', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('벽 자동 인식에 실패했습니다: $error')));
@@ -1237,6 +2260,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final drawing = _drawing;
     if (drawing == null || _isGeneratingFloor) return;
     if (!drawing.isImage || drawing.bytes == null) {
+      _showProcessingWarning(
+        'Floor 생성',
+        'PDF와 CAD 도면은 직접 처리할 수 없습니다. PNG 또는 JPG로 변환해 주세요.',
+      );
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('PDF와 CAD 도면은 이미지 변환 후 Floor를 생성할 수 있습니다.'),
@@ -1300,6 +2327,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('Floor 생성', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Floor 생성에 실패했습니다: $error')));
@@ -1331,6 +2359,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final safeName = _mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
     return '$safeName.building.yaml';
   }
+
+  String get _deploymentMapName =>
+      _mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
 
   String _yamlEscape(String value) =>
       value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
@@ -1454,6 +2485,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ).showSnackBar(SnackBar(content: Text('$fileName 작업을 저장했습니다.')));
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('작업 저장', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('작업을 저장하지 못했습니다: $error')));
@@ -1582,6 +2614,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('작업 불러오기', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('작업을 불러오지 못했습니다: $error')));
@@ -1946,7 +2979,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         final end = reverse ? lane.$1 : lane.$2;
         final bidirectional = lane.$3 == '양방향';
         buffer.writeln(
-          '      - [$start, $end, {is_bidirectional: [4, $bidirectional]}]',
+          '      - [$start, $end, {bidirectional: [4, $bidirectional], graph_idx: [2, 0]}]',
         );
       }
     }
@@ -1973,11 +3006,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ? 'measurement_start'
             : measurement != null && i == measurementIndices.last
             ? 'measurement_end'
-            : waypointName != null
-            ? waypointName
-            : waypointType != null
-            ? 'waypoint_$i'
-            : '';
+            : waypointName ?? (waypointType != null ? 'waypoint_$i' : '');
         final trafficEditorProperty = switch (waypointType) {
           '충전' => 'is_charger',
           '대기' => 'is_parking_spot',
@@ -2027,6 +3056,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
     } catch (error) {
       if (!mounted) return;
+      _showProcessingWarning('YAML 저장', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('YAML 파일을 저장하지 못했습니다: $error')));
@@ -2035,16 +3065,28 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _copyBuildingYaml() async {
     if (_drawing == null) return;
-    await Clipboard.setData(ClipboardData(text: _buildBuildingYaml()));
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$_yamlFileName 내용을 클립보드에 복사했습니다.')));
+    try {
+      await Clipboard.setData(ClipboardData(text: _buildBuildingYaml()));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$_yamlFileName 내용을 클립보드에 복사했습니다.')),
+      );
+    } catch (error) {
+      _showProcessingWarning('YAML 복사', error);
+    }
   }
 
   Future<void> _deployMap() async {
     final drawing = _drawing;
     if (drawing == null) return;
+    if (!drawing.isImage || drawing.bytes == null) {
+      _showProcessingWarning(
+        'Open-RMF 맵 배포',
+        'PNG 또는 JPG 원본 이미지가 포함된 맵만 배포할 수 있습니다.',
+      );
+      return;
+    }
+    if (_showMapValidationWarnings()) return;
 
     final shouldDeploy = await showDialog<bool>(
       context: context,
@@ -2111,8 +3153,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
               ),
               const SizedBox(height: 14),
               const Text(
-                '벽, Floor, Lane과 로봇 작업 위치 설정이 함께 반영됩니다.',
-                style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+                '오류 검증 → YAML/이미지 저장 → nav graph/world 생성 → '
+                'RMF 맵 설치 → Map Server/Fleet Adapter 재시작 → 지도 수신 확인',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF64748B),
+                  height: 1.5,
+                ),
               ),
             ],
           ),
@@ -2132,24 +3179,110 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
 
     if (shouldDeploy != true || !mounted) return;
-    setState(() {
-      _stage = MapStage.deploy;
-      _isDeployed = true;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF15803D),
-        content: Row(
-          children: [
-            const Icon(Icons.check_circle, color: Colors.white),
-            const SizedBox(width: 10),
-            Expanded(child: Text('${drawing.name} 맵 배포를 완료했습니다.')),
-          ],
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => const PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: SizedBox(
+            width: 430,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 20),
+                Text(
+                  'Open-RMF 맵을 배포하고 있습니다…',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                SizedBox(height: 8),
+                Text('생성 및 서비스 재시작에는 시간이 걸릴 수 있습니다.'),
+              ],
+            ),
+          ),
         ),
       ),
     );
+    final result = await deployMapProject(
+      mapName: _deploymentMapName,
+      yaml: _buildBuildingYaml(),
+      imageName: drawing.name,
+      imageBytes: drawing.bytes!,
+    );
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    if (!result.success) {
+      _showProcessingWarning('Open-RMF 맵 배포', result.output);
+      await _showDeploymentResultDialog(success: false, output: result.output);
+      return;
+    }
+    setState(() {
+      _stage = MapStage.deploy;
+      _isDeployed = true;
+      _processingWarning = null;
+    });
+    await _showDeploymentResultDialog(success: true, output: result.output);
   }
+
+  Future<void> _showDeploymentResultDialog({
+    required bool success,
+    required String output,
+  }) => showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      icon: Icon(
+        success ? Icons.check_circle_outline : Icons.error_outline,
+        color: success ? const Color(0xFF15803D) : const Color(0xFFDC2626),
+        size: 38,
+      ),
+      title: Text(success ? '맵 배포 완료' : '맵 배포 실패'),
+      content: SizedBox(
+        width: 620,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(success ? '새 지도 수신까지 확인했습니다.' : '아래 로그를 복사해 원인을 확인해 주세요.'),
+            const SizedBox(height: 14),
+            Container(
+              constraints: const BoxConstraints(maxHeight: 360),
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: const Color(0xFF0F172A),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  output,
+                  style: const TextStyle(
+                    color: Color(0xFFE2E8F0),
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: output));
+            if (!dialogContext.mounted) return;
+            ScaffoldMessenger.of(
+              dialogContext,
+            ).showSnackBar(const SnackBar(content: Text('배포 로그를 복사했습니다.')));
+          },
+          icon: const Icon(Icons.copy_outlined, size: 18),
+          label: const Text('로그 복사'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('확인'),
+        ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -2163,285 +3296,397 @@ class _ControlDashboardState extends State<ControlDashboard> {
         child: Scaffold(
           body: Row(
             children: [
-              const _NavigationRail(),
+              _NavigationRail(
+                selectedIndex: _selectedMenu,
+                onSelected: (index) => setState(() => _selectedMenu = index),
+              ),
               Expanded(
                 child: Column(
                   children: [
-                    const _TopBar(),
+                    _TopBar(
+                      title: const [
+                        '대시보드',
+                        '맵 관리',
+                        '로봇',
+                        '작업',
+                        '운영 분석',
+                      ][_selectedMenu],
+                    ),
                     Expanded(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(32, 30, 32, 40),
-                        child: Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 1767),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                _PageHeading(
-                                  onUpload: _pickDrawing,
-                                  exportEnabled: _drawing != null,
-                                  onDownload: _downloadBuildingYaml,
-                                  onCopy: _copyBuildingYaml,
-                                  onSaveProject: _saveProject,
-                                  onLoadProject: _loadProject,
-                                ),
-                                const SizedBox(height: 24),
-                                _StageBar(activeStage: _stage),
-                                const SizedBox(height: 24),
-                                LayoutBuilder(
-                                  builder: (context, constraints) {
-                                    if (constraints.maxWidth < 980) {
-                                      return Column(
-                                        children: [
-                                          _MapWorkspace(
-                                            drawing: _drawing,
-                                            transformController: _mapTransform,
-                                            onZoomIn: () => _zoomMap(1.25),
-                                            onZoomOut: () => _zoomMap(.8),
-                                            onFitScreen: _fitMapToScreen,
-                                            onRenumberVertices:
-                                                _renumberVertices,
-                                            wallMask: _wallMask,
-                                            wallColor: _wallColor,
-                                            floorMask: _floorMask,
-                                            floorColor: _floorColor,
-                                            mapVertices: _showVertexLabels
-                                                ? _visibleMapVertices()
-                                                : const [],
-                                            vertexLabelRevision:
-                                                _vertexLabelRevision,
-                                            optimizedWalls:
-                                                _visibleWallSegments(),
-                                            recommendedLanes: _recommendedLanes,
-                                            laneDirections: _laneDirections,
-                                            laneWaypoints: _laneWaypoints,
-                                            waypointNames: _waypointNames,
-                                            waypointTypes: _waypointTypes,
-                                            activeLaneEndpoint:
-                                                _activeLaneEndpoint,
-                                            waypointMode: _isWaypointMode,
-                                            onAddWaypoint: _addLaneWaypoint,
-                                            onEditWaypoint: _editWaypoint,
-                                            onSelectLane:
-                                                _selectLaneForDeletion,
-                                            isWallConnectMode:
-                                                _isWallConnectMode,
-                                            pendingWallVertex:
-                                                _pendingWallVertex,
-                                            onToggleWallConnect:
-                                                _toggleWallConnectMode,
-                                            onSelectWallVertex:
-                                                _selectWallConnectionVertex,
-                                            isWallEndpointEditMode:
-                                                _isWallEndpointEditMode,
-                                            onToggleWallEndpointEdit:
-                                                _toggleWallEndpointEditMode,
-                                            onMoveWallEndpoint:
-                                                _moveWallEndpoint,
-                                            measurement: _measurement,
-                                            showDrawingInfo: _showDrawingInfo,
-                                            onCloseDrawingInfo: () => setState(
-                                              () => _showDrawingInfo = false,
-                                            ),
-                                            isMeasurementSelected:
-                                                _isMeasurementSelected,
-                                            onSelectMeasurement:
-                                                _selectMeasurement,
-                                            onRemoveMeasurement:
-                                                _removeMeasurement,
-                                            isMeasurementMode:
-                                                _isMeasurementMode,
-                                            onMeasurementSelected:
-                                                _askMeasurement,
-                                            onCloseMeasurementMode: () =>
-                                                setState(
-                                                  () => _isMeasurementMode =
-                                                      false,
+                      child: _selectedMenu == 1
+                          ? SingleChildScrollView(
+                              padding: const EdgeInsets.fromLTRB(
+                                32,
+                                30,
+                                32,
+                                40,
+                              ),
+                              child: Center(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 1767,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _PageHeading(
+                                        onUpload: _pickDrawing,
+                                        exportEnabled: _drawing != null,
+                                        onValidate: _showValidationDialog,
+                                        onRecommend:
+                                            _showLaneRecommendationsDialog,
+                                        onDownload: _downloadBuildingYaml,
+                                        onCopy: _copyBuildingYaml,
+                                        onSaveProject: _saveProject,
+                                        onLoadProject: _loadProject,
+                                      ),
+                                      const SizedBox(height: 24),
+                                      _StageBar(activeStage: _stage),
+                                      const SizedBox(height: 24),
+                                      LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          if (constraints.maxWidth < 980) {
+                                            return Column(
+                                              children: [
+                                                _MapWorkspace(
+                                                  drawing: _drawing,
+                                                  transformController:
+                                                      _mapTransform,
+                                                  onZoomIn: () =>
+                                                      _zoomMap(1.25),
+                                                  onZoomOut: () => _zoomMap(.8),
+                                                  onFitScreen: _fitMapToScreen,
+                                                  onRenumberVertices:
+                                                      _renumberVertices,
+                                                  wallMask: _wallMask,
+                                                  wallColor: _wallColor,
+                                                  floorMask: _floorMask,
+                                                  floorColor: _floorColor,
+                                                  mapVertices: _showVertexLabels
+                                                      ? _visibleMapVertices()
+                                                      : const [],
+                                                  vertexLabelRevision:
+                                                      _vertexLabelRevision,
+                                                  optimizedWalls:
+                                                      _visibleWallSegments(),
+                                                  recommendedLanes:
+                                                      _recommendedLanes,
+                                                  laneDirections:
+                                                      _laneDirections,
+                                                  laneWaypoints: _laneWaypoints,
+                                                  waypointNames: _waypointNames,
+                                                  waypointTypes: _waypointTypes,
+                                                  activeLaneEndpoint:
+                                                      _activeLaneEndpoint,
+                                                  waypointMode: _isWaypointMode,
+                                                  onAddWaypoint:
+                                                      _addLaneWaypoint,
+                                                  onEditWaypoint: _editWaypoint,
+                                                  onSelectLane:
+                                                      _selectLaneForDeletion,
+                                                  isWallConnectMode:
+                                                      _isWallConnectMode,
+                                                  pendingWallVertex:
+                                                      _pendingWallVertex,
+                                                  onToggleWallConnect:
+                                                      _toggleWallConnectMode,
+                                                  onSelectWallVertex:
+                                                      _selectWallConnectionVertex,
+                                                  isWallEndpointEditMode:
+                                                      _isWallEndpointEditMode,
+                                                  onToggleWallEndpointEdit:
+                                                      _toggleWallEndpointEditMode,
+                                                  onMoveWallEndpoint:
+                                                      _moveWallEndpoint,
+                                                  measurement: _measurement,
+                                                  showDrawingInfo:
+                                                      _showDrawingInfo,
+                                                  onCloseDrawingInfo: () =>
+                                                      setState(
+                                                        () => _showDrawingInfo =
+                                                            false,
+                                                      ),
+                                                  isMeasurementSelected:
+                                                      _isMeasurementSelected,
+                                                  onSelectMeasurement:
+                                                      _selectMeasurement,
+                                                  onRemoveMeasurement:
+                                                      _removeMeasurement,
+                                                  isMeasurementMode:
+                                                      _isMeasurementMode,
+                                                  onMeasurementSelected:
+                                                      _askMeasurement,
+                                                  onCloseMeasurementMode: () =>
+                                                      setState(
+                                                        () =>
+                                                            _isMeasurementMode =
+                                                                false,
+                                                      ),
+                                                  isWallEraseMode:
+                                                      _isWallEraseMode,
+                                                  canUndoWallErase:
+                                                      _previousWallMask != null,
+                                                  onToggleWallErase: () =>
+                                                      setState(
+                                                        () => _isWallEraseMode =
+                                                            !_isWallEraseMode,
+                                                      ),
+                                                  onEraseWalls: _eraseWalls,
+                                                  onUndoWallErase:
+                                                      _undoWallErase,
+                                                  isPicking: _isPicking,
+                                                  onPick: _pickDrawing,
+                                                  onRemove: _removeDrawing,
                                                 ),
-                                            isWallEraseMode: _isWallEraseMode,
-                                            canUndoWallErase:
-                                                _previousWallMask != null,
-                                            onToggleWallErase: () => setState(
-                                              () => _isWallEraseMode =
-                                                  !_isWallEraseMode,
-                                            ),
-                                            onEraseWalls: _eraseWalls,
-                                            onUndoWallErase: _undoWallErase,
-                                            isPicking: _isPicking,
-                                            onPick: _pickDrawing,
-                                            onRemove: _removeDrawing,
-                                          ),
-                                          const SizedBox(height: 20),
-                                          _SetupPanel(
-                                            drawing: _drawing,
-                                            stage: _stage,
-                                            measurement: _measurement,
-                                            isMeasurementMode:
-                                                _isMeasurementMode,
-                                            onToggleMeasurement:
-                                                _toggleMeasurementMode,
-                                            wallColor: _wallColor,
-                                            floorColor: _floorColor,
-                                            wallsDetected: _wallsDetected,
-                                            floorGenerated: _floorGenerated,
-                                            isDetectingWalls: _isDetectingWalls,
-                                            isGeneratingFloor:
-                                                _isGeneratingFloor,
-                                            onDetectWalls: _detectWalls,
-                                            onGenerateFloor: _generateFloor,
-                                            lanesGenerated:
-                                                _laneWaypoints.isNotEmpty,
-                                            waypointMode: _isWaypointMode,
-                                            onToggleWaypoint:
-                                                _toggleWaypointMode,
-                                            onWallColorChanged: (color) =>
-                                                setState(
-                                                  () => _wallColor = color,
+                                                const SizedBox(height: 20),
+                                                _SetupPanel(
+                                                  drawing: _drawing,
+                                                  stage: _stage,
+                                                  measurement: _measurement,
+                                                  isMeasurementMode:
+                                                      _isMeasurementMode,
+                                                  onToggleMeasurement:
+                                                      _toggleMeasurementMode,
+                                                  wallColor: _wallColor,
+                                                  floorColor: _floorColor,
+                                                  wallsDetected: _wallsDetected,
+                                                  floorGenerated:
+                                                      _floorGenerated,
+                                                  isDetectingWalls:
+                                                      _isDetectingWalls,
+                                                  isGeneratingFloor:
+                                                      _isGeneratingFloor,
+                                                  onDetectWalls: _detectWalls,
+                                                  onGenerateFloor:
+                                                      _generateFloor,
+                                                  lanesGenerated:
+                                                      _laneWaypoints.isNotEmpty,
+                                                  waypointMode: _isWaypointMode,
+                                                  onToggleWaypoint:
+                                                      _toggleWaypointMode,
+                                                  onWallColorChanged: (color) =>
+                                                      setState(
+                                                        () =>
+                                                            _wallColor = color,
+                                                      ),
+                                                  onFloorColorChanged:
+                                                      (color) => setState(
+                                                        () =>
+                                                            _floorColor = color,
+                                                      ),
+                                                  isDeployed: _isDeployed,
+                                                  onDeploy: _deployMap,
+                                                  onStageChanged: (value) =>
+                                                      setState(
+                                                        () => _stage = value,
+                                                      ),
                                                 ),
-                                            onFloorColorChanged: (color) =>
-                                                setState(
-                                                  () => _floorColor = color,
+                                              ],
+                                            );
+                                          }
+                                          return Row(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Expanded(
+                                                child: _MapWorkspace(
+                                                  drawing: _drawing,
+                                                  transformController:
+                                                      _mapTransform,
+                                                  onZoomIn: () =>
+                                                      _zoomMap(1.25),
+                                                  onZoomOut: () => _zoomMap(.8),
+                                                  onFitScreen: _fitMapToScreen,
+                                                  onRenumberVertices:
+                                                      _renumberVertices,
+                                                  wallMask: _wallMask,
+                                                  wallColor: _wallColor,
+                                                  floorMask: _floorMask,
+                                                  floorColor: _floorColor,
+                                                  mapVertices: _showVertexLabels
+                                                      ? _visibleMapVertices()
+                                                      : const [],
+                                                  vertexLabelRevision:
+                                                      _vertexLabelRevision,
+                                                  optimizedWalls:
+                                                      _visibleWallSegments(),
+                                                  recommendedLanes:
+                                                      _recommendedLanes,
+                                                  laneDirections:
+                                                      _laneDirections,
+                                                  laneWaypoints: _laneWaypoints,
+                                                  waypointNames: _waypointNames,
+                                                  waypointTypes: _waypointTypes,
+                                                  activeLaneEndpoint:
+                                                      _activeLaneEndpoint,
+                                                  waypointMode: _isWaypointMode,
+                                                  onAddWaypoint:
+                                                      _addLaneWaypoint,
+                                                  onEditWaypoint: _editWaypoint,
+                                                  onSelectLane:
+                                                      _selectLaneForDeletion,
+                                                  isWallConnectMode:
+                                                      _isWallConnectMode,
+                                                  pendingWallVertex:
+                                                      _pendingWallVertex,
+                                                  onToggleWallConnect:
+                                                      _toggleWallConnectMode,
+                                                  onSelectWallVertex:
+                                                      _selectWallConnectionVertex,
+                                                  isWallEndpointEditMode:
+                                                      _isWallEndpointEditMode,
+                                                  onToggleWallEndpointEdit:
+                                                      _toggleWallEndpointEditMode,
+                                                  onMoveWallEndpoint:
+                                                      _moveWallEndpoint,
+                                                  measurement: _measurement,
+                                                  showDrawingInfo:
+                                                      _showDrawingInfo,
+                                                  onCloseDrawingInfo: () =>
+                                                      setState(
+                                                        () => _showDrawingInfo =
+                                                            false,
+                                                      ),
+                                                  isMeasurementSelected:
+                                                      _isMeasurementSelected,
+                                                  onSelectMeasurement:
+                                                      _selectMeasurement,
+                                                  onRemoveMeasurement:
+                                                      _removeMeasurement,
+                                                  isMeasurementMode:
+                                                      _isMeasurementMode,
+                                                  onMeasurementSelected:
+                                                      _askMeasurement,
+                                                  onCloseMeasurementMode: () =>
+                                                      setState(
+                                                        () =>
+                                                            _isMeasurementMode =
+                                                                false,
+                                                      ),
+                                                  isWallEraseMode:
+                                                      _isWallEraseMode,
+                                                  canUndoWallErase:
+                                                      _previousWallMask != null,
+                                                  onToggleWallErase: () =>
+                                                      setState(
+                                                        () => _isWallEraseMode =
+                                                            !_isWallEraseMode,
+                                                      ),
+                                                  onEraseWalls: _eraseWalls,
+                                                  onUndoWallErase:
+                                                      _undoWallErase,
+                                                  isPicking: _isPicking,
+                                                  onPick: _pickDrawing,
+                                                  onRemove: _removeDrawing,
                                                 ),
-                                            isDeployed: _isDeployed,
-                                            onDeploy: _deployMap,
-                                            onStageChanged: (value) =>
-                                                setState(() => _stage = value),
-                                          ),
-                                        ],
-                                      );
-                                    }
-                                    return Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Expanded(
-                                          child: _MapWorkspace(
-                                            drawing: _drawing,
-                                            transformController: _mapTransform,
-                                            onZoomIn: () => _zoomMap(1.25),
-                                            onZoomOut: () => _zoomMap(.8),
-                                            onFitScreen: _fitMapToScreen,
-                                            onRenumberVertices:
-                                                _renumberVertices,
-                                            wallMask: _wallMask,
-                                            wallColor: _wallColor,
-                                            floorMask: _floorMask,
-                                            floorColor: _floorColor,
-                                            mapVertices: _showVertexLabels
-                                                ? _visibleMapVertices()
-                                                : const [],
-                                            vertexLabelRevision:
-                                                _vertexLabelRevision,
-                                            optimizedWalls:
-                                                _visibleWallSegments(),
-                                            recommendedLanes: _recommendedLanes,
-                                            laneDirections: _laneDirections,
-                                            laneWaypoints: _laneWaypoints,
-                                            waypointNames: _waypointNames,
-                                            waypointTypes: _waypointTypes,
-                                            activeLaneEndpoint:
-                                                _activeLaneEndpoint,
-                                            waypointMode: _isWaypointMode,
-                                            onAddWaypoint: _addLaneWaypoint,
-                                            onEditWaypoint: _editWaypoint,
-                                            onSelectLane:
-                                                _selectLaneForDeletion,
-                                            isWallConnectMode:
-                                                _isWallConnectMode,
-                                            pendingWallVertex:
-                                                _pendingWallVertex,
-                                            onToggleWallConnect:
-                                                _toggleWallConnectMode,
-                                            onSelectWallVertex:
-                                                _selectWallConnectionVertex,
-                                            isWallEndpointEditMode:
-                                                _isWallEndpointEditMode,
-                                            onToggleWallEndpointEdit:
-                                                _toggleWallEndpointEditMode,
-                                            onMoveWallEndpoint:
-                                                _moveWallEndpoint,
-                                            measurement: _measurement,
-                                            showDrawingInfo: _showDrawingInfo,
-                                            onCloseDrawingInfo: () => setState(
-                                              () => _showDrawingInfo = false,
-                                            ),
-                                            isMeasurementSelected:
-                                                _isMeasurementSelected,
-                                            onSelectMeasurement:
-                                                _selectMeasurement,
-                                            onRemoveMeasurement:
-                                                _removeMeasurement,
-                                            isMeasurementMode:
-                                                _isMeasurementMode,
-                                            onMeasurementSelected:
-                                                _askMeasurement,
-                                            onCloseMeasurementMode: () =>
-                                                setState(
-                                                  () => _isMeasurementMode =
-                                                      false,
+                                              ),
+                                              const SizedBox(width: 20),
+                                              SizedBox(
+                                                width: 330,
+                                                child: _SetupPanel(
+                                                  drawing: _drawing,
+                                                  stage: _stage,
+                                                  measurement: _measurement,
+                                                  isMeasurementMode:
+                                                      _isMeasurementMode,
+                                                  onToggleMeasurement:
+                                                      _toggleMeasurementMode,
+                                                  wallColor: _wallColor,
+                                                  floorColor: _floorColor,
+                                                  wallsDetected: _wallsDetected,
+                                                  floorGenerated:
+                                                      _floorGenerated,
+                                                  isDetectingWalls:
+                                                      _isDetectingWalls,
+                                                  isGeneratingFloor:
+                                                      _isGeneratingFloor,
+                                                  onDetectWalls: _detectWalls,
+                                                  onGenerateFloor:
+                                                      _generateFloor,
+                                                  lanesGenerated:
+                                                      _laneWaypoints.isNotEmpty,
+                                                  waypointMode: _isWaypointMode,
+                                                  onToggleWaypoint:
+                                                      _toggleWaypointMode,
+                                                  onWallColorChanged: (color) =>
+                                                      setState(
+                                                        () =>
+                                                            _wallColor = color,
+                                                      ),
+                                                  onFloorColorChanged:
+                                                      (color) => setState(
+                                                        () =>
+                                                            _floorColor = color,
+                                                      ),
+                                                  isDeployed: _isDeployed,
+                                                  onDeploy: _deployMap,
+                                                  onStageChanged: (value) =>
+                                                      setState(
+                                                        () => _stage = value,
+                                                      ),
                                                 ),
-                                            isWallEraseMode: _isWallEraseMode,
-                                            canUndoWallErase:
-                                                _previousWallMask != null,
-                                            onToggleWallErase: () => setState(
-                                              () => _isWallEraseMode =
-                                                  !_isWallEraseMode,
-                                            ),
-                                            onEraseWalls: _eraseWalls,
-                                            onUndoWallErase: _undoWallErase,
-                                            isPicking: _isPicking,
-                                            onPick: _pickDrawing,
-                                            onRemove: _removeDrawing,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 20),
-                                        SizedBox(
-                                          width: 330,
-                                          child: _SetupPanel(
-                                            drawing: _drawing,
-                                            stage: _stage,
-                                            measurement: _measurement,
-                                            isMeasurementMode:
-                                                _isMeasurementMode,
-                                            onToggleMeasurement:
-                                                _toggleMeasurementMode,
-                                            wallColor: _wallColor,
-                                            floorColor: _floorColor,
-                                            wallsDetected: _wallsDetected,
-                                            floorGenerated: _floorGenerated,
-                                            isDetectingWalls: _isDetectingWalls,
-                                            isGeneratingFloor:
-                                                _isGeneratingFloor,
-                                            onDetectWalls: _detectWalls,
-                                            onGenerateFloor: _generateFloor,
-                                            lanesGenerated:
-                                                _laneWaypoints.isNotEmpty,
-                                            waypointMode: _isWaypointMode,
-                                            onToggleWaypoint:
-                                                _toggleWaypointMode,
-                                            onWallColorChanged: (color) =>
-                                                setState(
-                                                  () => _wallColor = color,
-                                                ),
-                                            onFloorColorChanged: (color) =>
-                                                setState(
-                                                  () => _floorColor = color,
-                                                ),
-                                            isDeployed: _isDeployed,
-                                            onDeploy: _deployMap,
-                                            onStageChanged: (value) =>
-                                                setState(() => _stage = value),
-                                          ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
+                                      if (_processingWarning != null) ...[
+                                        const SizedBox(height: 20),
+                                        _ProcessingWarningPanel(
+                                          message: _processingWarning!,
+                                          onDismiss: _clearProcessingWarning,
                                         ),
                                       ],
-                                    );
-                                  },
+                                    ],
+                                  ),
                                 ),
-                              ],
+                              ),
+                            )
+                          : _selectedMenu == 2
+                          ? _RobotManagementPage(
+                              drawing: _robotRuntimeDrawing,
+                              activeMapName:
+                                  _robotDeployedMap?.summary.name ?? _mapName,
+                              lanes:
+                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
+                              waypoints:
+                                  _robotDeployedMap?.waypoints ??
+                                  _laneWaypoints,
+                              waypointNames:
+                                  _robotDeployedMap?.waypointNames ??
+                                  _waypointNames,
+                              robots: _mockRobots,
+                              onLoadMap: _loadMapForRobots,
+                              onSpawn: _spawnMockRobot,
+                              onToggle: _toggleMockRobot,
+                              onRemove: _removeMockRobot,
+                            )
+                          : _selectedMenu == 3
+                          ? _TaskManagementPage(
+                              tasks: _mockTasks,
+                              robots: _mockRobots,
+                              activeMapName:
+                                  _robotDeployedMap?.summary.name ?? _mapName,
+                              mapReady:
+                                  (_robotDeployedMap?.waypoints ??
+                                          _laneWaypoints)
+                                      .isNotEmpty,
+                              onLoadMap: _loadMapForRobots,
+                              onOpenRobots: () =>
+                                  setState(() => _selectedMenu = 2),
+                              onCreate: _createMockTask,
+                              onCancel: _cancelMockTask,
+                            )
+                          : _ComingSoonPage(
+                              title: const [
+                                '대시보드',
+                                '맵 관리',
+                                '로봇',
+                                '작업',
+                                '운영 분석',
+                              ][_selectedMenu],
                             ),
-                          ),
-                        ),
-                      ),
                     ),
                   ],
                 ),
@@ -2454,8 +3699,854 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 }
 
+class _TaskManagementPage extends StatelessWidget {
+  const _TaskManagementPage({
+    required this.tasks,
+    required this.robots,
+    required this.activeMapName,
+    required this.mapReady,
+    required this.onLoadMap,
+    required this.onOpenRobots,
+    required this.onCreate,
+    required this.onCancel,
+  });
+
+  final List<_MockTask> tasks;
+  final List<_MockRobot> robots;
+  final String activeMapName;
+  final bool mapReady;
+  final VoidCallback onLoadMap;
+  final VoidCallback onOpenRobots;
+  final VoidCallback onCreate;
+  final ValueChanged<_MockTask> onCancel;
+
+  String _statusLabel(_MockTaskStatus status) => switch (status) {
+    _MockTaskStatus.queued => '대기',
+    _MockTaskStatus.active => '진행 중',
+    _MockTaskStatus.completed => '완료',
+    _MockTaskStatus.cancelled => '취소',
+    _MockTaskStatus.failed => '실패',
+  };
+
+  Color _statusColor(_MockTaskStatus status) => switch (status) {
+    _MockTaskStatus.queued => const Color(0xFFD97706),
+    _MockTaskStatus.active => const Color(0xFF2563EB),
+    _MockTaskStatus.completed => const Color(0xFF15803D),
+    _MockTaskStatus.cancelled => const Color(0xFF64748B),
+    _MockTaskStatus.failed => const Color(0xFFDC2626),
+  };
+
+  String _time(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}:${value.second.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final active = tasks
+        .where(
+          (task) =>
+              task.status == _MockTaskStatus.active ||
+              task.status == _MockTaskStatus.queued,
+        )
+        .length;
+    final completed = tasks
+        .where((task) => task.status == _MockTaskStatus.completed)
+        .length;
+    return Padding(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '작업 관리',
+                      style: Theme.of(context).textTheme.headlineMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text('Mock 로봇에게 목적지 작업을 배정하고 진행 상태를 확인합니다.'),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: onLoadMap,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('배포 맵 불러오기'),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: onCreate,
+                icon: const Icon(Icons.add_task),
+                label: const Text('새 작업'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: mapReady && robots.isNotEmpty
+                  ? const Color(0xFFF0FDF4)
+                  : const Color(0xFFFFFBEB),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: mapReady && robots.isNotEmpty
+                    ? const Color(0xFF86EFAC)
+                    : const Color(0xFFFCD34D),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  mapReady && robots.isNotEmpty
+                      ? Icons.check_circle_outline
+                      : Icons.info_outline,
+                  color: mapReady && robots.isNotEmpty
+                      ? const Color(0xFF15803D)
+                      : const Color(0xFFD97706),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    !mapReady
+                        ? '1단계: 배포 맵을 불러오세요.'
+                        : robots.isEmpty
+                        ? '현재 맵: $activeMapName · 2단계: 로봇 메뉴에서 로봇을 Spawn하세요.'
+                        : '작업 준비 완료 · 맵: $activeMapName · 로봇 ${robots.length}대',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                if (!mapReady)
+                  TextButton(onPressed: onLoadMap, child: const Text('맵 불러오기'))
+                else if (robots.isEmpty)
+                  TextButton(
+                    onPressed: onOpenRobots,
+                    child: const Text('로봇 메뉴로 이동'),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              _TaskSummaryCard(
+                label: '전체 작업',
+                value: tasks.length,
+                color: const Color(0xFF334155),
+              ),
+              const SizedBox(width: 12),
+              _TaskSummaryCard(
+                label: '진행 중',
+                value: active,
+                color: const Color(0xFF2563EB),
+              ),
+              const SizedBox(width: 12),
+              _TaskSummaryCard(
+                label: '완료',
+                value: completed,
+                color: const Color(0xFF15803D),
+              ),
+              const SizedBox(width: 12),
+              _TaskSummaryCard(
+                label: '가용 로봇',
+                value: robots
+                    .where((robot) => robot.activeTaskId == null)
+                    .length,
+                color: const Color(0xFF7C3AED),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFE2E8F0)),
+              ),
+              child: tasks.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.assignment_outlined,
+                            size: 52,
+                            color: Color(0xFF94A3B8),
+                          ),
+                          SizedBox(height: 12),
+                          Text('생성된 작업이 없습니다.'),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: tasks.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final task = tasks[index];
+                        final color = _statusColor(task.status);
+                        return ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 9,
+                          ),
+                          leading: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: .12),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(Icons.route_outlined, color: color),
+                          ),
+                          title: Row(
+                            children: [
+                              Text(
+                                task.id,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: .12),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  _statusLabel(task.status),
+                                  style: TextStyle(
+                                    color: color,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          subtitle: Padding(
+                            padding: const EdgeInsets.only(top: 5),
+                            child: Text(
+                              '${task.type} · ${task.robotId} → ${task.destinationName} · 생성 ${_time(task.createdAt)}',
+                            ),
+                          ),
+                          trailing:
+                              task.status == _MockTaskStatus.active ||
+                                  task.status == _MockTaskStatus.queued
+                              ? OutlinedButton.icon(
+                                  onPressed: () => onCancel(task),
+                                  icon: const Icon(
+                                    Icons.cancel_outlined,
+                                    size: 17,
+                                  ),
+                                  label: const Text('취소'),
+                                )
+                              : task.completedAt == null
+                              ? null
+                              : Text(
+                                  _time(task.completedAt!),
+                                  style: const TextStyle(
+                                    color: Color(0xFF64748B),
+                                  ),
+                                ),
+                        );
+                      },
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TaskSummaryCard extends StatelessWidget {
+  const _TaskSummaryCard({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+  final String label;
+  final int value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 5,
+            height: 34,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$value',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  color: color,
+                ),
+              ),
+              Text(
+                label,
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _ComingSoonPage extends StatelessWidget {
+  const _ComingSoonPage({required this.title});
+  final String title;
+
+  @override
+  Widget build(BuildContext context) =>
+      Center(child: Text('$title 화면은 준비 중입니다.'));
+}
+
+class _RobotManagementPage extends StatefulWidget {
+  const _RobotManagementPage({
+    required this.drawing,
+    required this.activeMapName,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.robots,
+    required this.onLoadMap,
+    required this.onSpawn,
+    required this.onToggle,
+    required this.onRemove,
+  });
+
+  final UploadedDrawing? drawing;
+  final String activeMapName;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_MockRobot> robots;
+  final VoidCallback onLoadMap;
+  final VoidCallback onSpawn;
+  final ValueChanged<_MockRobot> onToggle;
+  final ValueChanged<_MockRobot> onRemove;
+
+  @override
+  State<_RobotManagementPage> createState() => _RobotManagementPageState();
+}
+
+class _RobotManagementPageState extends State<_RobotManagementPage> {
+  String _runtimeMode = '앱 Mock';
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.all(28),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '로봇 운영',
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('Gazebo나 RViz 창 없이 앱 지도에서 로봇을 확인할 수 있습니다.'),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 220,
+              child: DropdownButtonFormField<String>(
+                initialValue: _runtimeMode,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: '로봇 실행 방식',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: const [
+                  DropdownMenuItem(value: '앱 Mock', child: Text('앱 Mock')),
+                  DropdownMenuItem(
+                    value: 'Headless Gazebo',
+                    child: Text('Headless Gazebo'),
+                  ),
+                  DropdownMenuItem(value: '실제 로봇', child: Text('실제 로봇')),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => _runtimeMode = value);
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Chip(
+              avatar: Icon(Icons.visibility_off_outlined, size: 17),
+              label: Text('Gazebo · RViz 끔'),
+            ),
+            const SizedBox(width: 12),
+            OutlinedButton.icon(
+              onPressed: widget.onLoadMap,
+              icon: const Icon(Icons.folder_open_outlined),
+              label: const Text('배포 맵 불러오기'),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.icon(
+              onPressed: _runtimeMode == '앱 Mock' ? widget.onSpawn : null,
+              icon: const Icon(Icons.add_circle_outline),
+              label: const Text('로봇 Spawn'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            const Icon(Icons.map_outlined, size: 18, color: Color(0xFF2563EB)),
+            const SizedBox(width: 7),
+            Text(
+              '현재 운영 맵: ${widget.activeMapName}',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_runtimeMode != '앱 Mock')
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEFF6FF),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '$_runtimeMode 모드는 외부 백엔드 연결용입니다. 이 화면의 Spawn은 앱 Mock 모드에서 사용하세요.',
+              style: const TextStyle(color: Color(0xFF1D4ED8)),
+            ),
+          ),
+        const SizedBox(height: 18),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final map = _RobotMapCard(
+                drawing: widget.drawing,
+                lanes: widget.lanes,
+                waypoints: widget.waypoints,
+                waypointNames: widget.waypointNames,
+                robots: widget.robots,
+              );
+              final list = _RobotListCard(
+                robots: widget.robots,
+                onToggle: widget.onToggle,
+                onRemove: widget.onRemove,
+              );
+              if (constraints.maxWidth < 960) {
+                return Column(
+                  children: [
+                    Expanded(child: map),
+                    const SizedBox(height: 14),
+                    SizedBox(height: 230, child: list),
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(child: map),
+                  const SizedBox(width: 18),
+                  SizedBox(width: 340, child: list),
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _RobotMapCard extends StatelessWidget {
+  const _RobotMapCard({
+    required this.drawing,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.robots,
+  });
+
+  final UploadedDrawing? drawing;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_MockRobot> robots;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = drawing;
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: current?.isImage == true && current!.bytes != null
+          ? Stack(
+              fit: StackFit.expand,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Image.memory(current.bytes!, fit: BoxFit.contain),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: CustomPaint(
+                    painter: _RobotOperationsPainter(
+                      sourceSize: Size(
+                        current.pixelWidth!.toDouble(),
+                        current.pixelHeight!.toDouble(),
+                      ),
+                      lanes: lanes,
+                      waypoints: waypoints,
+                      waypointNames: waypointNames,
+                      robots: robots,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : const Center(child: Text('맵 관리에서 이미지 도면과 Lane을 먼저 작성하세요.')),
+    );
+  }
+}
+
+class _RobotListCard extends StatelessWidget {
+  const _RobotListCard({
+    required this.robots,
+    required this.onToggle,
+    required this.onRemove,
+  });
+  final List<_MockRobot> robots;
+  final ValueChanged<_MockRobot> onToggle;
+  final ValueChanged<_MockRobot> onRemove;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: const Color(0xFFE2E8F0)),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              const Text(
+                'Spawn 로봇',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const Spacer(),
+              Text('${robots.length}대'),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: robots.isEmpty
+              ? const Center(child: Text('Spawn된 Mock 로봇이 없습니다.'))
+              : ListView.separated(
+                  itemCount: robots.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final robot = robots[index];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: robot.color,
+                        child: const Icon(
+                          Icons.smart_toy,
+                          color: Colors.white,
+                          size: 19,
+                        ),
+                      ),
+                      title: Text(
+                        robot.id,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      subtitle: Text(
+                        '${robot.activeTaskId ?? (robot.moving ? '자율 이동' : '정지')} · 배터리 ${robot.battery.toStringAsFixed(1)}%',
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            onPressed: () => onToggle(robot),
+                            tooltip: robot.moving ? '정지' : '재개',
+                            icon: Icon(
+                              robot.moving
+                                  ? Icons.pause_circle_outline
+                                  : Icons.play_circle_outline,
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => onRemove(robot),
+                            tooltip: '삭제',
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              color: Color(0xFFDC2626),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _RobotOperationsPainter extends CustomPainter {
+  const _RobotOperationsPainter({
+    required this.sourceSize,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.robots,
+  });
+  final Size sourceSize;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_MockRobot> robots;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fitted = applyBoxFit(BoxFit.contain, sourceSize, size).destination;
+    final target = Alignment.center.inscribe(fitted, Offset.zero & size);
+    Offset convert(Offset point) => Offset(
+      target.left + point.dx * target.width / sourceSize.width,
+      target.top + point.dy * target.height / sourceSize.height,
+    );
+    final lanePaint = Paint()
+      ..color = const Color(0xAA0891B2)
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    for (final lane in lanes) {
+      canvas.drawLine(convert(lane.$1), convert(lane.$2), lanePaint);
+    }
+    for (final waypoint in waypoints) {
+      canvas.drawCircle(convert(waypoint), 5, Paint()..color = Colors.white);
+      canvas.drawCircle(
+        convert(waypoint),
+        3,
+        Paint()..color = const Color(0xFF0891B2),
+      );
+    }
+    final waypointObstacles = [
+      for (final waypoint in waypoints)
+        Rect.fromCircle(center: convert(waypoint), radius: 9),
+      for (final robot in robots)
+        Rect.fromCircle(center: convert(robot.position), radius: 18),
+    ];
+    final occupiedLabels = <Rect>[];
+    final canvasBounds = Offset.zero & size;
+    for (final waypoint in waypoints) {
+      final name = (waypointNames[waypoint] ?? '').trim();
+      if (name.isEmpty) continue;
+      final center = convert(waypoint);
+      final label = TextPainter(
+        text: TextSpan(
+          text: name,
+          style: const TextStyle(
+            color: Color(0xFF0F172A),
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: 140);
+      final labelSize = Size(label.width + 10, label.height + 6);
+      final candidates = [
+        Rect.fromLTWH(
+          center.dx + 11,
+          center.dy - labelSize.height / 2,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - 11 - labelSize.width,
+          center.dy - labelSize.height / 2,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - labelSize.width / 2,
+          center.dy - 11 - labelSize.height,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - labelSize.width / 2,
+          center.dy + 11,
+          labelSize.width,
+          labelSize.height,
+        ),
+      ];
+      bool available(Rect candidate) =>
+          canvasBounds.contains(candidate.topLeft) &&
+          canvasBounds.contains(candidate.bottomRight) &&
+          !occupiedLabels.any((rect) => rect.inflate(3).overlaps(candidate)) &&
+          !waypointObstacles.any((rect) => rect.overlaps(candidate));
+      int overlapCount(Rect candidate) =>
+          occupiedLabels.where((rect) => rect.overlaps(candidate)).length +
+          waypointObstacles.where((rect) => rect.overlaps(candidate)).length;
+      final labelRect = candidates.firstWhere(
+        available,
+        orElse: () => candidates.reduce(
+          (best, candidate) =>
+              overlapCount(candidate) < overlapCount(best) ? candidate : best,
+        ),
+      );
+      occupiedLabels.add(labelRect);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(labelRect, const Radius.circular(4)),
+        Paint()..color = const Color(0xEFFFFFFF),
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(labelRect, const Radius.circular(4)),
+        Paint()
+          ..color = const Color(0x330F172A)
+          ..style = PaintingStyle.stroke,
+      );
+      label.paint(canvas, Offset(labelRect.left + 5, labelRect.top + 3));
+    }
+    for (final robot in robots) {
+      final center = convert(robot.position);
+      canvas.drawCircle(center, 16, Paint()..color = const Color(0xCCFFFFFF));
+      canvas.drawCircle(center, 12, Paint()..color = robot.color);
+      final label = TextPainter(
+        text: TextSpan(
+          text: robot.id,
+          style: const TextStyle(
+            color: Color(0xFF0F172A),
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final rect = Rect.fromLTWH(
+        center.dx + 16,
+        center.dy - label.height / 2 - 3,
+        label.width + 10,
+        label.height + 6,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(5)),
+        Paint()..color = const Color(0xEFFFFFFF),
+      );
+      label.paint(canvas, Offset(rect.left + 5, rect.top + 3));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RobotOperationsPainter oldDelegate) => true;
+}
+
+class _ProcessingWarningPanel extends StatelessWidget {
+  const _ProcessingWarningPanel({
+    required this.message,
+    required this.onDismiss,
+  });
+
+  final String message;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: const Color(0xFFFFFBEB),
+      border: Border.all(color: const Color(0xFFF59E0B)),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.warning_amber_rounded, color: Color(0xFFB45309)),
+        const SizedBox(width: 12),
+        Expanded(
+          child: SelectableText(
+            message,
+            style: const TextStyle(
+              color: Color(0xFF78350F),
+              height: 1.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: message));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Warning 메시지를 복사했습니다.')),
+            );
+          },
+          icon: const Icon(Icons.copy_rounded, size: 18),
+          label: const Text('복사'),
+        ),
+        IconButton(
+          onPressed: onDismiss,
+          icon: const Icon(Icons.close_rounded),
+          tooltip: 'Warning 닫기',
+          color: const Color(0xFF92400E),
+        ),
+      ],
+    ),
+  );
+}
+
 class _NavigationRail extends StatelessWidget {
-  const _NavigationRail();
+  const _NavigationRail({
+    required this.selectedIndex,
+    required this.onSelected,
+  });
+
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -2501,12 +4592,16 @@ class _NavigationRail extends StatelessWidget {
               ),
               const SizedBox(height: 38),
               for (var i = 0; i < items.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 7),
-                  child: _NavItem(
-                    icon: items[i].$1,
-                    label: items[i].$2,
-                    selected: i == 1,
+                InkWell(
+                  onTap: () => onSelected(i),
+                  borderRadius: BorderRadius.circular(9),
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 7),
+                    child: _NavItem(
+                      icon: items[i].$1,
+                      label: items[i].$2,
+                      selected: i == selectedIndex,
+                    ),
                   ),
                 ),
               const Spacer(),
@@ -2620,7 +4715,8 @@ class _NavItem extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar();
+  const _TopBar({required this.title});
+  final String title;
   @override
   Widget build(BuildContext context) => Container(
     height: 68,
@@ -2629,21 +4725,21 @@ class _TopBar extends StatelessWidget {
       color: Colors.white,
       border: Border(bottom: BorderSide(color: Color(0xFFE5EAF0))),
     ),
-    child: const Row(
+    child: Row(
       children: [
         Text(
-          '맵 관리',
-          style: TextStyle(
+          title,
+          style: const TextStyle(
             fontWeight: FontWeight.w700,
             color: Color(0xFF334155),
           ),
         ),
-        Spacer(),
-        _StatusDot(),
-        SizedBox(width: 20),
-        Icon(Icons.notifications_none_rounded, color: Color(0xFF64748B)),
-        SizedBox(width: 18),
-        Icon(Icons.help_outline_rounded, color: Color(0xFF64748B)),
+        const Spacer(),
+        const _StatusDot(),
+        const SizedBox(width: 20),
+        const Icon(Icons.notifications_none_rounded, color: Color(0xFF64748B)),
+        const SizedBox(width: 18),
+        const Icon(Icons.help_outline_rounded, color: Color(0xFF64748B)),
       ],
     ),
   );
@@ -2681,6 +4777,8 @@ class _PageHeading extends StatelessWidget {
   const _PageHeading({
     required this.onUpload,
     required this.exportEnabled,
+    required this.onValidate,
+    required this.onRecommend,
     required this.onDownload,
     required this.onCopy,
     required this.onSaveProject,
@@ -2688,6 +4786,8 @@ class _PageHeading extends StatelessWidget {
   });
   final VoidCallback onUpload;
   final bool exportEnabled;
+  final VoidCallback onValidate;
+  final VoidCallback onRecommend;
   final VoidCallback onDownload;
   final VoidCallback onCopy;
   final VoidCallback onSaveProject;
@@ -2721,6 +4821,24 @@ class _PageHeading extends StatelessWidget {
         onPressed: exportEnabled ? onSaveProject : null,
         icon: const Icon(Icons.save_outlined, size: 18),
         label: const Text('작업 저장'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
+      OutlinedButton.icon(
+        onPressed: exportEnabled ? onValidate : null,
+        icon: const Icon(Icons.fact_check_outlined, size: 18),
+        label: const Text('오류 검증'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
+      OutlinedButton.icon(
+        onPressed: exportEnabled ? onRecommend : null,
+        icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+        label: const Text('경로 추천'),
         style: OutlinedButton.styleFrom(
           padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
         ),
@@ -2812,7 +4930,7 @@ class _StageBar extends StatelessWidget {
     'Measurement',
     '벽 인식',
     'Floor 생성',
-    'Lane 추천',
+    'Lane 만들기',
     '위치 지정',
     '배포',
   ];
@@ -3899,6 +6017,7 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                   lanes: widget.recommendedLanes,
                   directions: widget.laneDirections,
                   waypoints: widget.laneWaypoints,
+                  waypointNames: widget.waypointNames,
                   activeEndpoint: widget.activeLaneEndpoint,
                   sourceSize: widget.sourceSize,
                 ),
@@ -4566,6 +6685,7 @@ class _LanePainter extends CustomPainter {
     required this.lanes,
     required this.directions,
     required this.waypoints,
+    required this.waypointNames,
     required this.activeEndpoint,
     required this.sourceSize,
   });
@@ -4573,6 +6693,7 @@ class _LanePainter extends CustomPainter {
   final List<(Offset, Offset)> lanes;
   final Map<(Offset, Offset), String> directions;
   final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
   final Offset? activeEndpoint;
   final Size sourceSize;
 
@@ -4630,6 +6751,85 @@ class _LanePainter extends CustomPainter {
       canvas.drawCircle(point, 12, Paint()..color = const Color(0xFFFFFFFF));
       canvas.drawCircle(point, 10, paint);
     }
+    final waypointObstacles = [
+      for (final waypoint in waypoints)
+        Rect.fromCircle(center: convert(waypoint), radius: 14),
+    ];
+    final occupiedLabels = <Rect>[];
+    for (final waypoint in waypoints) {
+      final name = (waypointNames[waypoint] ?? '').trim();
+      if (name.isEmpty) continue;
+      final center = convert(waypoint);
+      final label = TextPainter(
+        text: TextSpan(
+          text: name,
+          style: const TextStyle(
+            color: Color(0xFF0F172A),
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: 160);
+      final labelSize = Size(label.width + 12, label.height + 6);
+      final candidates = <Rect>[
+        Rect.fromLTWH(
+          center.dx + 16,
+          center.dy - labelSize.height / 2,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - 16 - labelSize.width,
+          center.dy - labelSize.height / 2,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - labelSize.width / 2,
+          center.dy - 16 - labelSize.height,
+          labelSize.width,
+          labelSize.height,
+        ),
+        Rect.fromLTWH(
+          center.dx - labelSize.width / 2,
+          center.dy + 16,
+          labelSize.width,
+          labelSize.height,
+        ),
+      ];
+      final canvasBounds = Offset.zero & size;
+      bool isAvailable(Rect candidate) =>
+          canvasBounds.contains(candidate.topLeft) &&
+          canvasBounds.contains(candidate.bottomRight) &&
+          !occupiedLabels.any((rect) => rect.inflate(3).overlaps(candidate)) &&
+          !waypointObstacles.any((rect) => rect.overlaps(candidate));
+      final labelRect = candidates.firstWhere(
+        isAvailable,
+        orElse: () => candidates.reduce((best, candidate) {
+          int overlapCount(Rect rect) =>
+              occupiedLabels.where((used) => used.overlaps(rect)).length +
+              waypointObstacles.where((point) => point.overlaps(rect)).length;
+          return overlapCount(candidate) < overlapCount(best)
+              ? candidate
+              : best;
+        }),
+      );
+      occupiedLabels.add(labelRect);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(labelRect, const Radius.circular(5)),
+        Paint()..color = const Color(0xEFFFFFFF),
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(labelRect, const Radius.circular(5)),
+        Paint()
+          ..color = const Color(0x330F172A)
+          ..style = PaintingStyle.stroke,
+      );
+      label.paint(canvas, Offset(labelRect.left + 6, labelRect.top + 3));
+    }
     if (activeEndpoint != null) {
       final point = convert(activeEndpoint!);
       canvas.drawCircle(
@@ -4655,6 +6855,7 @@ class _LanePainter extends CustomPainter {
       oldDelegate.lanes != lanes ||
       oldDelegate.directions != directions ||
       oldDelegate.waypoints != waypoints ||
+      oldDelegate.waypointNames != waypointNames ||
       oldDelegate.activeEndpoint != activeEndpoint ||
       oldDelegate.sourceSize != sourceSize;
 }

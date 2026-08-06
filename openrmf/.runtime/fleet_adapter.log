@@ -1,0 +1,20 @@
+[INFO] [launch]: All log files can be found below /home/gyi/.ros/log/2026-08-06-12-23-01-112384-gyi-15UD50T-GX5JK-78923
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [fleet_manager-1]: process started with pid [78985]
+[INFO] [fleet_adapter-2]: process started with pid [78986]
+[fleet_adapter-2] [retreat_to_charger_interval] value is not provided, default to 10 seconds
+[fleet_adapter-2] Finishing request: park
+[fleet_adapter-2] Fleet is configured to perform ParkRobot as finishing request
+[fleet_adapter-2] Maximum delay is not provided, default to 10.0
+[fleet_adapter-2] [INFO] [1785986581.822862030] [tinyRobot_fleet_adapter]: Parameter [discovery_timeout] set to: 60.000000
+[fleet_adapter-2] Starting fleet adapter...
+[fleet_adapter-2] Traceback (most recent call last):
+[fleet_adapter-2]   File "/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_adapter", line 33, in <module>
+[fleet_adapter-2]     sys.exit(load_entry_point('rmf-demos-fleet-adapter', 'console_scripts', 'fleet_adapter')())
+[fleet_adapter-2]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[fleet_adapter-2]   File "/home/gyi/rmf_ws/build/rmf_demos_fleet_adapter/rmf_demos_fleet_adapter/fleet_adapter.py", line 97, in main
+[fleet_adapter-2]     assert adapter, (
+[fleet_adapter-2]            ^^^^^^^
+[fleet_adapter-2] AssertionError: Unable to initialize fleet adapter. Please ensure RMF Schedule Node is running
+[ERROR] [fleet_adapter-2]: process has died [pid 78986, exit code 1, cmd '/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_adapter -c /home/gyi/rmf_ws/install/rmf_demos/share/rmf_demos/config/office/tinyRobot_config.yaml -n /home/gyi/robosapiens/rmf_maps/robosapiens/nav_graphs/0.yaml -sim --ros-args --params-file /tmp/launch_params_p45wj8pv --params-file /tmp/launch_params_cfa85q3m'].
+[fleet_manager-1] Starting fleet manager...
