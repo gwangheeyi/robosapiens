@@ -1765,15 +1765,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _loadMapForRobots() async {
     try {
-      final maps = await listDeployedMaps();
-      if (!mounted) return;
-      if (maps.isEmpty) {
-        _showProcessingWarning(
-          '배포 맵 불러오기',
-          'rmf_maps에서 배포된 building.yaml을 찾지 못했습니다.',
-        );
-        return;
-      }
+      final mapsFuture = listDeployedMaps();
       final selected = await showDialog<DeployedMapSummary>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -1781,37 +1773,71 @@ class _ControlDashboardState extends State<ControlDashboard> {
           title: const Text('배포된 맵 불러오기'),
           content: SizedBox(
             width: 560,
-            height: math.min(420, maps.length * 76.0 + 20),
-            child: ListView.separated(
-              itemCount: maps.length,
-              separatorBuilder: (_, _) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final map = maps[index];
-                final isProject = map.yamlPath.endsWith('.rmfproject');
-                return ListTile(
-                  leading: Icon(
-                    isProject
-                        ? Icons.edit_document
-                        : map.hasNavGraph
-                        ? Icons.check_circle_outline
-                        : Icons.warning_amber_outlined,
-                    color: isProject
-                        ? const Color(0xFF2563EB)
-                        : map.hasNavGraph
-                        ? const Color(0xFF15803D)
-                        : const Color(0xFFD97706),
-                  ),
-                  title: Text(map.name),
-                  subtitle: Text(
-                    '${isProject
-                        ? '저장된 RMF 프로젝트'
-                        : map.hasNavGraph
-                        ? 'nav graph 확인됨'
-                        : 'nav graph 없음'}\n${map.yamlPath}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  onTap: () => Navigator.pop(dialogContext, map),
+            height: 380,
+            child: FutureBuilder<List<DeployedMapSummary>>(
+              future: mapsFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 14),
+                        Text('프로젝트의 배포 맵을 검색하고 있습니다…'),
+                      ],
+                    ),
+                  );
+                }
+                if (snapshot.hasError) {
+                  return Center(
+                    child: SelectableText(
+                      '맵 목록을 읽지 못했습니다.\n${snapshot.error}',
+                      textAlign: TextAlign.center,
+                    ),
+                  );
+                }
+                final maps = snapshot.data ?? const [];
+                if (maps.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'rmf_maps에서 building.yaml 또는 rmfproject를 찾지 못했습니다.',
+                      textAlign: TextAlign.center,
+                    ),
+                  );
+                }
+                return ListView.separated(
+                  itemCount: maps.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final map = maps[index];
+                    final isProject = map.yamlPath.endsWith('.rmfproject');
+                    return ListTile(
+                      leading: Icon(
+                        isProject
+                            ? Icons.edit_document
+                            : map.hasNavGraph
+                            ? Icons.check_circle_outline
+                            : Icons.warning_amber_outlined,
+                        color: isProject
+                            ? const Color(0xFF2563EB)
+                            : map.hasNavGraph
+                            ? const Color(0xFF15803D)
+                            : const Color(0xFFD97706),
+                      ),
+                      title: Text(map.name),
+                      subtitle: Text(
+                        '${isProject
+                            ? '저장된 RMF 프로젝트'
+                            : map.hasNavGraph
+                            ? 'nav graph 확인됨'
+                            : 'nav graph 없음'}\n${map.yamlPath}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () => Navigator.pop(dialogContext, map),
+                    );
+                  },
                 );
               },
             ),
@@ -1837,6 +1863,27 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
     } catch (error) {
       _showProcessingWarning('배포 맵 불러오기', error);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.error_outline, color: Color(0xFFDC2626)),
+          title: const Text('배포 맵을 불러오지 못했습니다'),
+          content: SelectableText('$error'),
+          actions: [
+            TextButton.icon(
+              onPressed: () =>
+                  Clipboard.setData(ClipboardData(text: error.toString())),
+              icon: const Icon(Icons.copy_outlined, size: 18),
+              label: const Text('오류 복사'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
+      );
     }
   }
 

@@ -27,6 +27,12 @@ void main() {
     expect(find.text('배포 맵 불러오기'), findsOneWidget);
     expect(find.text('Gazebo · RViz 끔'), findsOneWidget);
 
+    await tester.tap(find.text('배포 맵 불러오기'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('배포된 맵 불러오기'), findsOneWidget);
+    await tester.tap(find.text('취소'));
+    await tester.pump(const Duration(milliseconds: 400));
+
     await tester.tap(find.text('작업'));
     await tester.pumpAndSettle();
 
