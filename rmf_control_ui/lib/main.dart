@@ -139,15 +139,36 @@ class _LaneRecommendation {
   final Offset end;
 }
 
+enum _RobotKind { mockMobile, pinky, omxManipulator, mockHumanoid }
+
+extension on _RobotKind {
+  String get label => switch (this) {
+    _RobotKind.mockMobile => 'Mock 주행로봇',
+    _RobotKind.pinky => 'Pinky',
+    _RobotKind.omxManipulator => 'OMX Manipulator',
+    _RobotKind.mockHumanoid => 'Mock 휴머노이드',
+  };
+
+  bool get isMobile => this != _RobotKind.omxManipulator;
+  bool get canCarry =>
+      this == _RobotKind.mockMobile || this == _RobotKind.pinky;
+}
+
 class _MockRobot {
-  _MockRobot({required this.id, required this.position, required this.color});
+  _MockRobot({
+    required this.id,
+    required this.position,
+    required this.color,
+    required this.kind,
+  });
 
   final String id;
   Offset position;
   final Color color;
+  final _RobotKind kind;
   Offset? previousWaypoint;
   Offset? targetWaypoint;
-  bool moving = true;
+  bool moving = false;
   double battery = 100;
   final List<Offset> assignedRoute = [];
   String? activeTaskId;
@@ -155,23 +176,78 @@ class _MockRobot {
 
 enum _MockTaskStatus { queued, active, completed, cancelled, failed }
 
+enum _TaskStepType { navigate, armLoad, wait }
+
+enum _TaskStepStatus { pending, active, completed, failed, cancelled }
+
+class _MockTaskStep {
+  _MockTaskStep({
+    required this.type,
+    this.destination,
+    this.destinationName,
+    this.durationSeconds = 0,
+  });
+
+  final _TaskStepType type;
+  final Offset? destination;
+  final String? destinationName;
+  final double durationSeconds;
+  _TaskStepStatus status = _TaskStepStatus.pending;
+  double remainingSeconds = 0;
+  String? failureReason;
+
+  String get label => switch (type) {
+    _TaskStepType.navigate => 'Pinky 이동 · $destinationName',
+    _TaskStepType.armLoad => 'OMX-AI 픽업/적재',
+    _TaskStepType.wait => '대기 · ${durationSeconds.toStringAsFixed(0)}초',
+  };
+}
+
 class _MockTask {
   _MockTask({
     required this.id,
+    required this.name,
+    required this.description,
     required this.type,
     required this.robotId,
-    required this.destination,
-    required this.destinationName,
+    required this.steps,
   });
 
   final String id;
+  final String name;
+  final String description;
   final String type;
   final String robotId;
-  final Offset destination;
-  final String destinationName;
+  final List<_MockTaskStep> steps;
+  int currentStepIndex = 0;
   _MockTaskStatus status = _MockTaskStatus.queued;
   final DateTime createdAt = DateTime.now();
   DateTime? completedAt;
+
+  _MockTaskStep? get currentStep =>
+      currentStepIndex < steps.length ? steps[currentStepIndex] : null;
+}
+
+class _TaskStepDraft {
+  _TaskStepDraft(this.type, {this.destination});
+
+  _TaskStepType type;
+  Offset? destination;
+  double durationSeconds = 3;
+}
+
+class _TaskEditorResult {
+  const _TaskEditorResult({
+    required this.name,
+    required this.description,
+    required this.robotId,
+    required this.steps,
+  });
+
+  final String name;
+  final String description;
+  final String robotId;
+  final List<_TaskStepDraft> steps;
 }
 
 class ControlDashboard extends StatefulWidget {
@@ -1006,7 +1082,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 TextField(
                   controller: nameController,
                   autofocus: true,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Waypoint 이름',
                     border: OutlineInputBorder(),
                   ),
@@ -1394,6 +1470,69 @@ class _ControlDashboardState extends State<ControlDashboard> {
     robot.moving = false;
   }
 
+  void _failRobotTask(_MockRobot robot, _MockTask task, String reason) {
+    final step = task.currentStep;
+    if (step != null) {
+      step.status = _TaskStepStatus.failed;
+      step.failureReason = reason;
+    }
+    task.status = _MockTaskStatus.failed;
+    task.completedAt = DateTime.now();
+    robot
+      ..activeTaskId = null
+      ..moving = false
+      ..targetWaypoint = null
+      ..assignedRoute.clear();
+  }
+
+  void _startTaskStep(_MockRobot robot, _MockTask task) {
+    final step = task.currentStep;
+    if (step == null) {
+      _finishRobotTask(robot);
+      return;
+    }
+    step.status = _TaskStepStatus.active;
+    step.remainingSeconds = step.durationSeconds;
+    if (step.type != _TaskStepType.navigate) {
+      robot.moving = true;
+      return;
+    }
+    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final destination = step.destination;
+    if (destination == null || waypoints.isEmpty) {
+      _failRobotTask(robot, task, '이동 목적지가 없습니다.');
+      return;
+    }
+    final start =
+        robot.targetWaypoint ??
+        waypoints.reduce(
+          (a, b) =>
+              (a - robot.position).distance <= (b - robot.position).distance
+              ? a
+              : b,
+        );
+    final path = _shortestRobotPath(start, destination);
+    if (path == null) {
+      _failRobotTask(robot, task, '${step.destinationName}까지 Lane 경로가 없습니다.');
+      return;
+    }
+    robot
+      ..targetWaypoint = null
+      ..assignedRoute.clear()
+      ..assignedRoute.addAll(path.skip(1))
+      ..moving = true;
+  }
+
+  void _completeCurrentTaskStep(_MockRobot robot, _MockTask task) {
+    task.currentStep?.status = _TaskStepStatus.completed;
+    task.currentStepIndex++;
+    if (task.currentStep == null) {
+      _finishRobotTask(robot);
+    } else {
+      _startTaskStep(robot, task);
+    }
+  }
+
   void _startMockRobotTimer() {
     _mockRobotTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted || _mockRobots.isEmpty) return;
@@ -1408,12 +1547,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
       var changed = false;
       for (final robot in _mockRobots) {
         if (!robot.moving) continue;
+        final task = robot.activeTaskId == null
+            ? null
+            : _mockTasks
+                  .where((item) => item.id == robot.activeTaskId)
+                  .firstOrNull;
+        final activeStep = task?.currentStep;
+        if (task != null &&
+            activeStep != null &&
+            activeStep.type != _TaskStepType.navigate) {
+          activeStep.remainingSeconds = math.max(
+            0,
+            activeStep.remainingSeconds - .1,
+          );
+          if (activeStep.remainingSeconds <= 0) {
+            _completeCurrentTaskStep(robot, task);
+          }
+          changed = true;
+          continue;
+        }
         var target = robot.targetWaypoint;
         if (target == null) {
           if (robot.assignedRoute.isNotEmpty) {
             target = robot.assignedRoute.removeAt(0);
-          } else if (robot.activeTaskId != null) {
-            _finishRobotTask(robot);
+          } else if (task != null) {
+            _completeCurrentTaskStep(robot, task);
             changed = true;
             continue;
           } else {
@@ -1450,21 +1608,47 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _showProcessingWarning('Mock 로봇 Spawn', '먼저 Lane과 Waypoint를 만들어 주세요.');
       return;
     }
+    var kind = _RobotKind.mockMobile;
     final controller = TextEditingController(
-      text: 'robot-${_mockRobots.length + 1}',
+      text: 'mock-${_mockRobots.length + 1}',
     );
     var start = runtimeWaypoints.first;
-    final result = await showDialog<(String, Offset)>(
+    final result = await showDialog<(String, Offset, _RobotKind)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           icon: const Icon(Icons.smart_toy_outlined, size: 36),
-          title: const Text('Mock 로봇 Spawn'),
+          title: const Text('로봇 Spawn'),
           content: SizedBox(
             width: 420,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                DropdownButtonFormField<_RobotKind>(
+                  initialValue: kind,
+                  decoration: const InputDecoration(
+                    labelText: '로봇 유형',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final value in _RobotKind.values)
+                      DropdownMenuItem(value: value, child: Text(value.label)),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setDialogState(() {
+                      kind = value;
+                      final prefix = switch (value) {
+                        _RobotKind.mockMobile => 'mock',
+                        _RobotKind.pinky => 'pinky',
+                        _RobotKind.omxManipulator => 'omx',
+                        _RobotKind.mockHumanoid => 'humanoid',
+                      };
+                      controller.text = '$prefix-${_mockRobots.length + 1}';
+                    });
+                  },
+                ),
+                const SizedBox(height: 14),
                 TextField(
                   controller: controller,
                   decoration: const InputDecoration(
@@ -1475,8 +1659,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 const SizedBox(height: 14),
                 DropdownButtonFormField<Offset>(
                   initialValue: start,
-                  decoration: const InputDecoration(
-                    labelText: '시작 Waypoint',
+                  decoration: InputDecoration(
+                    labelText: kind.isMobile ? '시작 Waypoint' : '고정 설치 Waypoint',
                     border: OutlineInputBorder(),
                   ),
                   items: [
@@ -1506,7 +1690,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
               onPressed: () {
                 final name = controller.text.trim();
                 if (name.isNotEmpty) {
-                  Navigator.pop(dialogContext, (name, start));
+                  Navigator.pop(dialogContext, (name, start, kind));
                 }
               },
               icon: const Icon(Icons.add, size: 18),
@@ -1538,6 +1722,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           id: result.$1,
           position: result.$2,
           color: colors[_mockRobots.length % colors.length],
+          kind: result.$3,
         ),
       );
     });
@@ -1545,6 +1730,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   void _toggleMockRobot(_MockRobot robot) {
+    if (!robot.kind.isMobile) return;
     setState(() => robot.moving = !robot.moving);
   }
 
@@ -1565,7 +1751,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _createMockTask() async {
     final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
     final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
-    if (_mockRobots.isEmpty || waypoints.isEmpty) {
+    final taskRobots = _mockRobots
+        .where((robot) => robot.kind.canCarry)
+        .toList();
+    if (taskRobots.isEmpty || waypoints.isEmpty) {
       final action = await showDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -1579,7 +1768,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             waypoints.isEmpty
                 ? '작업을 생성하려면 먼저 배포된 맵을 불러와야 합니다.\n'
                       '그 다음 로봇 메뉴에서 시작 Waypoint를 선택해 로봇을 Spawn하세요.'
-                : '운영 맵은 준비되었습니다. 로봇 메뉴에서 로봇을 Spawn한 뒤 작업을 생성하세요.',
+                : '운영 맵은 준비되었습니다. 로봇 메뉴에서 Pinky 또는 Mock 주행로봇을 Spawn한 뒤 작업을 생성하세요.',
           ),
           actions: [
             TextButton(
@@ -1604,140 +1793,56 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (action == 'robots' && mounted) setState(() => _selectedMenu = 2);
       return;
     }
-    var robotId = '__auto__';
-    var destination = waypoints.first;
-    var taskType = '이동';
-    final result = await showDialog<(String, String, Offset)>(
+    final result = await showDialog<_TaskEditorResult>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          icon: const Icon(Icons.assignment_outlined, size: 36),
-          title: const Text('새 작업 생성'),
-          content: SizedBox(
-            width: 440,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DropdownButtonFormField<String>(
-                  initialValue: taskType,
-                  decoration: const InputDecoration(
-                    labelText: '작업 유형',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: const [
-                    DropdownMenuItem(value: '이동', child: Text('Waypoint 이동')),
-                    DropdownMenuItem(value: '충전', child: Text('충전소 이동')),
-                    DropdownMenuItem(value: '대기', child: Text('대기 장소 이동')),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) setDialogState(() => taskType = value);
-                  },
-                ),
-                const SizedBox(height: 14),
-                DropdownButtonFormField<String>(
-                  initialValue: robotId,
-                  decoration: const InputDecoration(
-                    labelText: '로봇 배정',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '__auto__',
-                      child: Text('자동 배정'),
-                    ),
-                    for (final robot in _mockRobots)
-                      DropdownMenuItem(value: robot.id, child: Text(robot.id)),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) setDialogState(() => robotId = value);
-                  },
-                ),
-                const SizedBox(height: 14),
-                DropdownButtonFormField<Offset>(
-                  initialValue: destination,
-                  decoration: const InputDecoration(
-                    labelText: '목적지 Waypoint',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    for (final point in waypoints)
-                      DropdownMenuItem(
-                        value: point,
-                        child: Text(
-                          (names[point] ?? '').trim().isEmpty
-                              ? 'Waypoint ${waypoints.indexOf(point) + 1}'
-                              : names[point]!,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setDialogState(() => destination = value);
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('취소'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, (
-                taskType,
-                robotId,
-                destination,
-              )),
-              child: const Text('작업 시작'),
-            ),
-          ],
-        ),
+      builder: (_) => _SequentialTaskEditorDialog(
+        initialName: '연속 작업 ${_mockTasks.length + 1}',
+        robots: taskRobots,
+        waypoints: waypoints,
+        waypointNames: names,
       ),
     );
     if (result == null || !mounted) return;
-    final available = _mockRobots
+    final available = taskRobots
         .where((robot) => robot.activeTaskId == null)
         .toList();
-    final robot = result.$2 == '__auto__'
+    final robot = result.robotId == '__auto__'
         ? (available..sort((a, b) => b.battery.compareTo(a.battery)))
               .firstOrNull
-        : _mockRobots.where((item) => item.id == result.$2).firstOrNull;
+        : taskRobots.where((item) => item.id == result.robotId).firstOrNull;
     if (robot == null || robot.activeTaskId != null) {
       _showProcessingWarning('작업 생성', '현재 작업을 수행할 수 있는 로봇이 없습니다.');
       return;
     }
-    final start =
-        robot.targetWaypoint ??
-        waypoints.reduce(
-          (a, b) =>
-              (a - robot.position).distance <= (b - robot.position).distance
-              ? a
-              : b,
-        );
-    final path = _shortestRobotPath(start, result.$3);
-    if (path == null) {
-      _showProcessingWarning('작업 생성', '선택한 목적지까지 이동 가능한 Lane 경로가 없습니다.');
-      return;
-    }
+    final steps = result.steps.map((draft) {
+      final destination = draft.destination;
+      final destinationName = destination == null
+          ? null
+          : (names[destination] ?? '').trim().isEmpty
+          ? 'Waypoint ${waypoints.indexOf(destination) + 1}'
+          : names[destination]!;
+      return _MockTaskStep(
+        type: draft.type,
+        destination: destination,
+        destinationName: destinationName,
+        durationSeconds: draft.type == _TaskStepType.armLoad
+            ? 9.6
+            : draft.durationSeconds,
+      );
+    }).toList();
     final task = _MockTask(
       id: 'TASK-${(_mockTasks.length + 1).toString().padLeft(3, '0')}',
-      type: result.$1,
+      name: result.name,
+      description: result.description,
+      type: '연속 작업',
       robotId: robot.id,
-      destination: result.$3,
-      destinationName: (names[result.$3] ?? '').trim().isEmpty
-          ? 'Waypoint ${waypoints.indexOf(result.$3) + 1}'
-          : names[result.$3]!,
+      steps: steps,
     );
     setState(() {
       task.status = _MockTaskStatus.active;
       _mockTasks.insert(0, task);
       robot.activeTaskId = task.id;
-      robot.assignedRoute
-        ..clear()
-        ..addAll(path.skip(1));
-      robot.moving = true;
+      _startTaskStep(robot, task);
     });
     _startMockRobotTimer();
   }
@@ -1750,6 +1855,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     setState(() {
       task.status = _MockTaskStatus.cancelled;
       task.completedAt = DateTime.now();
+      for (final step in task.steps.where(
+        (step) =>
+            step.status == _TaskStepStatus.pending ||
+            step.status == _TaskStepStatus.active,
+      )) {
+        step.status = _TaskStepStatus.cancelled;
+      }
       final robot = _mockRobots
           .where((item) => item.id == task.robotId)
           .firstOrNull;
@@ -3378,6 +3490,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                         CrossAxisAlignment.start,
                                     children: [
                                       _PageHeading(
+                                        onHelp: () => _showUsageGuide(
+                                          context,
+                                          _UsageGuideTopic.map,
+                                        ),
                                         onUpload: _pickDrawing,
                                         exportEnabled: _drawing != null,
                                         onValidate: _showValidationDialog,
@@ -3746,6 +3862,277 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 }
 
+class _SequentialTaskEditorDialog extends StatefulWidget {
+  const _SequentialTaskEditorDialog({
+    required this.initialName,
+    required this.robots,
+    required this.waypoints,
+    required this.waypointNames,
+  });
+
+  final String initialName;
+  final List<_MockRobot> robots;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+
+  @override
+  State<_SequentialTaskEditorDialog> createState() =>
+      _SequentialTaskEditorDialogState();
+}
+
+class _SequentialTaskEditorDialogState
+    extends State<_SequentialTaskEditorDialog> {
+  late final TextEditingController _name;
+  final _description = TextEditingController();
+  String _robotId = '__auto__';
+  late final List<_TaskStepDraft> _steps;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.initialName);
+    _steps = [
+      _TaskStepDraft(
+        _TaskStepType.navigate,
+        destination: widget.waypoints.first,
+      ),
+      _TaskStepDraft(_TaskStepType.armLoad),
+      _TaskStepDraft(
+        _TaskStepType.navigate,
+        destination: widget.waypoints.first,
+      ),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  String _waypointLabel(Offset point) {
+    final name = widget.waypointNames[point]?.trim() ?? '';
+    return name.isEmpty
+        ? 'Waypoint ${widget.waypoints.indexOf(point) + 1}'
+        : name;
+  }
+
+  bool get _valid =>
+      _name.text.trim().isNotEmpty &&
+      _steps.isNotEmpty &&
+      _steps.every(
+        (step) =>
+            step.type != _TaskStepType.navigate || step.destination != null,
+      );
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    icon: const Icon(Icons.account_tree_outlined, size: 36),
+    title: const Text('연속 작업 편집기'),
+    content: SizedBox(
+      width: 650,
+      height: 560,
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _name,
+                  decoration: const InputDecoration(
+                    labelText: '작업 이름 *',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _robotId,
+                  decoration: const InputDecoration(
+                    labelText: 'Pinky 배정',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '__auto__',
+                      child: Text('자동 배정'),
+                    ),
+                    for (final robot in widget.robots)
+                      DropdownMenuItem(value: robot.id, child: Text(robot.id)),
+                  ],
+                  onChanged: (value) => setState(() => _robotId = value!),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _description,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: '상세 지시',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '실행 단계',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => setState(
+                  () => _steps.add(
+                    _TaskStepDraft(
+                      _TaskStepType.navigate,
+                      destination: widget.waypoints.first,
+                    ),
+                  ),
+                ),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('단계 추가'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ReorderableListView.builder(
+              itemCount: _steps.length,
+              onReorderItem: (oldIndex, newIndex) => setState(() {
+                _steps.insert(newIndex, _steps.removeAt(oldIndex));
+              }),
+              itemBuilder: (context, index) {
+                final step = _steps[index];
+                return Card(
+                  key: ObjectKey(step),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Row(
+                      children: [
+                        CircleAvatar(radius: 15, child: Text('${index + 1}')),
+                        const SizedBox(width: 10),
+                        SizedBox(
+                          width: 165,
+                          child: DropdownButtonFormField<_TaskStepType>(
+                            initialValue: step.type,
+                            decoration: const InputDecoration(
+                              labelText: '동작',
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: _TaskStepType.navigate,
+                                child: Text('Pinky 이동'),
+                              ),
+                              DropdownMenuItem(
+                                value: _TaskStepType.armLoad,
+                                child: Text('OMX-AI 픽업'),
+                              ),
+                              DropdownMenuItem(
+                                value: _TaskStepType.wait,
+                                child: Text('대기'),
+                              ),
+                            ],
+                            onChanged: (value) => setState(() {
+                              step.type = value!;
+                              if (value == _TaskStepType.navigate) {
+                                step.destination ??= widget.waypoints.first;
+                              }
+                            }),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: step.type == _TaskStepType.navigate
+                              ? DropdownButtonFormField<Offset>(
+                                  initialValue: step.destination,
+                                  decoration: const InputDecoration(
+                                    labelText: '목적지 Waypoint',
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: [
+                                    for (final point in widget.waypoints)
+                                      DropdownMenuItem(
+                                        value: point,
+                                        child: Text(_waypointLabel(point)),
+                                      ),
+                                  ],
+                                  onChanged: (value) =>
+                                      setState(() => step.destination = value),
+                                )
+                              : step.type == _TaskStepType.wait
+                              ? DropdownButtonFormField<double>(
+                                  initialValue: step.durationSeconds,
+                                  decoration: const InputDecoration(
+                                    labelText: '대기 시간',
+                                    isDense: true,
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: const [3, 5, 10, 30, 60]
+                                      .map(
+                                        (seconds) => DropdownMenuItem(
+                                          value: seconds.toDouble(),
+                                          child: Text('$seconds초'),
+                                        ),
+                                      )
+                                      .toList(),
+                                  onChanged: (value) => setState(
+                                    () => step.durationSeconds = value!,
+                                  ),
+                                )
+                              : const Text(
+                                  '현재 위치에서 화물을 집어 Pinky 데크에 적재',
+                                  style: TextStyle(color: Color(0xFF475569)),
+                                ),
+                        ),
+                        IconButton(
+                          tooltip: '단계 삭제',
+                          onPressed: () => setState(() => _steps.remove(step)),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
+                        const Icon(Icons.drag_handle),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('취소'),
+      ),
+      FilledButton.icon(
+        onPressed: !_valid
+            ? null
+            : () => Navigator.pop(
+                context,
+                _TaskEditorResult(
+                  name: _name.text.trim(),
+                  description: _description.text.trim(),
+                  robotId: _robotId,
+                  steps: _steps,
+                ),
+              ),
+        icon: const Icon(Icons.play_arrow, size: 18),
+        label: const Text('연속 작업 시작'),
+      ),
+    ],
+  );
+}
+
 class _TaskManagementPage extends StatelessWidget {
   const _TaskManagementPage({
     required this.tasks,
@@ -3814,10 +4201,17 @@ class _TaskManagementPage extends StatelessWidget {
                       style: Theme.of(context).textTheme.headlineMedium,
                     ),
                     const SizedBox(height: 6),
-                    const Text('Mock 로봇에게 목적지 작업을 배정하고 진행 상태를 확인합니다.'),
+                    const Text('Pinky 이동과 OMX-AI 픽업을 순서대로 편집하고 실행 상태를 확인합니다.'),
                   ],
                 ),
               ),
+              OutlinedButton.icon(
+                onPressed: () =>
+                    _showUsageGuide(context, _UsageGuideTopic.task),
+                icon: const Icon(Icons.help_outline),
+                label: const Text('사용법'),
+              ),
+              const SizedBox(width: 10),
               OutlinedButton.icon(
                 onPressed: onLoadMap,
                 icon: const Icon(Icons.folder_open_outlined),
@@ -3836,12 +4230,12 @@ class _TaskManagementPage extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.all(13),
             decoration: BoxDecoration(
-              color: mapReady && robots.isNotEmpty
+              color: mapReady && robots.any((robot) => robot.kind.canCarry)
                   ? const Color(0xFFF0FDF4)
                   : const Color(0xFFFFFBEB),
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: mapReady && robots.isNotEmpty
+                color: mapReady && robots.any((robot) => robot.kind.canCarry)
                     ? const Color(0xFF86EFAC)
                     : const Color(0xFFFCD34D),
               ),
@@ -3849,10 +4243,10 @@ class _TaskManagementPage extends StatelessWidget {
             child: Row(
               children: [
                 Icon(
-                  mapReady && robots.isNotEmpty
+                  mapReady && robots.any((robot) => robot.kind.canCarry)
                       ? Icons.check_circle_outline
                       : Icons.info_outline,
-                  color: mapReady && robots.isNotEmpty
+                  color: mapReady && robots.any((robot) => robot.kind.canCarry)
                       ? const Color(0xFF15803D)
                       : const Color(0xFFD97706),
                 ),
@@ -3861,15 +4255,15 @@ class _TaskManagementPage extends StatelessWidget {
                   child: Text(
                     !mapReady
                         ? '1단계: 배포 맵을 불러오세요.'
-                        : robots.isEmpty
-                        ? '현재 맵: $activeMapName · 2단계: 로봇 메뉴에서 로봇을 Spawn하세요.'
+                        : !robots.any((robot) => robot.kind.canCarry)
+                        ? '현재 맵: $activeMapName · 2단계: Pinky 또는 Mock 주행로봇을 Spawn하세요.'
                         : '작업 준비 완료 · 맵: $activeMapName · 로봇 ${robots.length}대',
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                 ),
                 if (!mapReady)
                   TextButton(onPressed: onLoadMap, child: const Text('맵 불러오기'))
-                else if (robots.isEmpty)
+                else if (!robots.any((robot) => robot.kind.canCarry))
                   TextButton(
                     onPressed: onOpenRobots,
                     child: const Text('로봇 메뉴로 이동'),
@@ -3901,7 +4295,10 @@ class _TaskManagementPage extends StatelessWidget {
               _TaskSummaryCard(
                 label: '가용 로봇',
                 value: robots
-                    .where((robot) => robot.activeTaskId == null)
+                    .where(
+                      (robot) =>
+                          robot.kind.canCarry && robot.activeTaskId == null,
+                    )
                     .length,
                 color: const Color(0xFF7C3AED),
               ),
@@ -3952,10 +4349,22 @@ class _TaskManagementPage extends StatelessWidget {
                           ),
                           title: Row(
                             children: [
+                              Expanded(
+                                child: Text(
+                                  task.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
                               Text(
                                 task.id,
                                 style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF64748B),
+                                  fontSize: 12,
                                 ),
                               ),
                               const SizedBox(width: 10),
@@ -3982,7 +4391,11 @@ class _TaskManagementPage extends StatelessWidget {
                           subtitle: Padding(
                             padding: const EdgeInsets.only(top: 5),
                             child: Text(
-                              '${task.type} · ${task.robotId} → ${task.destinationName} · 생성 ${_time(task.createdAt)}',
+                              '${task.type} · ${task.robotId} · ${task.currentStepIndex}/${task.steps.length}단계 완료 · 생성 ${_time(task.createdAt)}'
+                              '\n${task.steps.map((step) => step.label).join(' → ')}'
+                              '${task.description.isEmpty ? '' : '\n${task.description}'}',
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                           trailing:
@@ -4130,6 +4543,12 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                 ],
               ),
             ),
+            OutlinedButton.icon(
+              onPressed: () => _showUsageGuide(context, _UsageGuideTopic.robot),
+              icon: const Icon(Icons.help_outline),
+              label: const Text('사용법'),
+            ),
+            const SizedBox(width: 10),
             SizedBox(
               width: 220,
               child: DropdownButtonFormField<String>(
@@ -4327,7 +4746,7 @@ class _RobotListCard extends StatelessWidget {
         const Divider(height: 1),
         Expanded(
           child: robots.isEmpty
-              ? const Center(child: Text('Spawn된 Mock 로봇이 없습니다.'))
+              ? const Center(child: Text('Spawn된 로봇이 없습니다.'))
               : ListView.separated(
                   itemCount: robots.length,
                   separatorBuilder: (_, _) => const Divider(height: 1),
@@ -4336,8 +4755,14 @@ class _RobotListCard extends StatelessWidget {
                     return ListTile(
                       leading: CircleAvatar(
                         backgroundColor: robot.color,
-                        child: const Icon(
-                          Icons.smart_toy,
+                        child: Icon(
+                          switch (robot.kind) {
+                            _RobotKind.mockMobile => Icons.smart_toy,
+                            _RobotKind.pinky => Icons.agriculture,
+                            _RobotKind.omxManipulator =>
+                              Icons.precision_manufacturing,
+                            _RobotKind.mockHumanoid => Icons.accessibility_new,
+                          },
                           color: Colors.white,
                           size: 19,
                         ),
@@ -4347,20 +4772,22 @@ class _RobotListCard extends StatelessWidget {
                         style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
                       subtitle: Text(
-                        '${robot.activeTaskId ?? (robot.moving ? '자율 이동' : '정지')} · 배터리 ${robot.battery.toStringAsFixed(1)}%',
+                        '${robot.kind.label} · ${robot.activeTaskId ?? (robot.kind.isMobile ? (robot.moving ? '자율 이동' : '정지') : '고정 설치')}'
+                        '${robot.kind.isMobile ? ' · 배터리 ${robot.battery.toStringAsFixed(1)}%' : ''}',
                       ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          IconButton(
-                            onPressed: () => onToggle(robot),
-                            tooltip: robot.moving ? '정지' : '재개',
-                            icon: Icon(
-                              robot.moving
-                                  ? Icons.pause_circle_outline
-                                  : Icons.play_circle_outline,
+                          if (robot.kind.isMobile)
+                            IconButton(
+                              onPressed: () => onToggle(robot),
+                              tooltip: robot.moving ? '정지' : '재개',
+                              icon: Icon(
+                                robot.moving
+                                    ? Icons.pause_circle_outline
+                                    : Icons.play_circle_outline,
+                              ),
                             ),
-                          ),
                           IconButton(
                             onPressed: () => onRemove(robot),
                             tooltip: '삭제',
@@ -4500,7 +4927,54 @@ class _RobotOperationsPainter extends CustomPainter {
     for (final robot in robots) {
       final center = convert(robot.position);
       canvas.drawCircle(center, 16, Paint()..color = const Color(0xCCFFFFFF));
-      canvas.drawCircle(center, 12, Paint()..color = robot.color);
+      final robotPaint = Paint()
+        ..color = robot.color
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round;
+      switch (robot.kind) {
+        case _RobotKind.omxManipulator:
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(
+              Rect.fromCenter(center: center, width: 22, height: 22),
+              const Radius.circular(4),
+            ),
+            robotPaint,
+          );
+          canvas.drawLine(
+            center,
+            center + const Offset(7, -8),
+            Paint()
+              ..color = Colors.white
+              ..strokeWidth = 3,
+          );
+        case _RobotKind.mockHumanoid:
+          canvas.drawCircle(center - const Offset(0, 7), 5, robotPaint);
+          canvas.drawLine(
+            center - const Offset(0, 1),
+            center + const Offset(0, 8),
+            robotPaint,
+          );
+          canvas.drawLine(
+            center + const Offset(0, 2),
+            center + const Offset(-7, 5),
+            robotPaint,
+          );
+          canvas.drawLine(
+            center + const Offset(0, 2),
+            center + const Offset(7, 5),
+            robotPaint,
+          );
+        case _RobotKind.pinky:
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(
+              Rect.fromCenter(center: center, width: 25, height: 18),
+              const Radius.circular(7),
+            ),
+            robotPaint,
+          );
+        case _RobotKind.mockMobile:
+          canvas.drawCircle(center, 12, robotPaint);
+      }
       final label = TextPainter(
         text: TextSpan(
           text: robot.id,
@@ -4818,10 +5292,379 @@ class _StatusDot extends StatelessWidget {
   );
 }
 
+enum _UsageGuideTopic { map, robot, task }
+
+class _UsageGuideStep {
+  const _UsageGuideStep({
+    required this.title,
+    required this.why,
+    required this.actions,
+    required this.doneWhen,
+    this.caution,
+  });
+
+  final String title;
+  final String why;
+  final List<String> actions;
+  final String doneWhen;
+  final String? caution;
+}
+
+Future<void> _showUsageGuide(
+  BuildContext context,
+  _UsageGuideTopic topic,
+) async {
+  final (title, introduction, steps) = switch (topic) {
+    _UsageGuideTopic.map => (
+      '맵 관리 사용법',
+      '맵은 단순한 배경 그림이 아닙니다. 로봇이 이동할 수 있는 공간, 정지할 위치와 '
+          '이동 방향을 관제 시스템이 이해할 수 있는 데이터로 만드는 과정입니다. 아래 '
+          '순서를 바꾸지 말고 도면부터 배포까지 진행하세요.',
+      const [
+        _UsageGuideStep(
+          title: '도면 업로드와 축척 확인',
+          why: '실제 거리와 이미지 픽셀의 관계가 틀리면 로봇 속도, 위치와 안전거리가 모두 틀어집니다.',
+          actions: [
+            '도면 업로드를 눌러 창고 PNG/JPG/PDF를 선택합니다.',
+            '도면 방향과 잘린 영역이 없는지 확인합니다.',
+            '측정 도구로 실제 길이를 아는 벽이나 통로를 지정하고 실제 길이를 입력합니다.',
+          ],
+          doneWhen: '화면의 측정값과 현장 도면의 실제 길이가 일치하면 완료입니다.',
+          caution: '사진처럼 기울어진 이미지나 축척을 모르는 도면은 바로 Lane 작성에 사용하지 마세요.',
+        ),
+        _UsageGuideStep(
+          title: 'Wall 검출과 Floor 생성',
+          why: 'Wall은 진입하면 안 되는 경계이고 Floor는 이동 가능한 영역입니다. 이후 경로 검증의 기준이 됩니다.',
+          actions: [
+            'Wall 검출을 실행하고 누락된 벽이나 잘못 검출된 선을 확인합니다.',
+            '지우기와 벽 연결 도구로 출입구를 막는 선이나 끊어진 외벽을 수정합니다.',
+            'Floor 생성을 눌러 실제 이동 가능한 바닥 영역이 채워지는지 확인합니다.',
+          ],
+          doneWhen: '벽 바깥이나 선반 내부가 Floor로 잡히지 않고, 실제 통로가 연결되어 있으면 완료입니다.',
+          caution: '출입문을 Wall로 막으면 Lane이 있어도 로봇이 통과할 수 없습니다.',
+        ),
+        _UsageGuideStep(
+          title: 'Lane과 Waypoint 작성',
+          why: 'Lane은 로봇이 주행할 중심선이고 Waypoint는 출발·도착·대기·충전·픽업 위치입니다.',
+          actions: [
+            'Lane 만들기를 켜고 통로 중앙에 Waypoint를 순서대로 놓습니다.',
+            '교차로, 회전 전후, 픽업 위치와 하차 위치에는 별도 Waypoint를 만듭니다.',
+            'Lane을 양방향·정방향·역방향 중 실제 운영 규칙에 맞게 지정합니다.',
+            '대기, 충전, 픽업, 드랍오프 Waypoint에 알아보기 쉬운 이름을 부여합니다.',
+          ],
+          doneWhen: '모든 운영 위치가 Lane으로 연결되고 이름만 보고 목적을 알 수 있으면 완료입니다.',
+          caution: 'Waypoint끼리 Lane 없이 가깝게 놓아도 연결된 것으로 처리되지 않습니다.',
+        ),
+        _UsageGuideStep(
+          title: '오류 검증과 경로 추천 확인',
+          why: '화면상으로 자연스러워 보여도 단방향 설정이나 끊어진 Lane 때문에 도달할 수 없는 지점이 생길 수 있습니다.',
+          actions: [
+            '오류 검증을 눌러 고립된 Waypoint, 이름과 Lane 문제를 확인합니다.',
+            'Warning의 Waypoint를 찾아 실제로 왕복 가능한 경로가 있는지 확인합니다.',
+            '경로 추천은 참고자료로 사용하고 벽, 회전 반경과 일방통행 규칙에 맞게 수정합니다.',
+            '수정 후 오류 검증을 다시 실행합니다.',
+          ],
+          doneWhen: '설명 가능한 Warning만 남고 모든 필수 지점에 도달 가능하면 완료입니다.',
+        ),
+        _UsageGuideStep(
+          title: '저장과 배포',
+          why: '작업 저장은 편집을 보존하고, 배포는 RMF와 로봇이 사용할 운영 파일을 생성·설치하는 과정입니다.',
+          actions: [
+            '작업 저장으로 편집 가능한 프로젝트 파일을 먼저 보존합니다.',
+            '배포를 실행해 building.yaml, 이미지, nav graph와 world를 생성합니다.',
+            '배포 로그에서 Map Server와 Fleet Adapter 재시작 및 새 지도 수신을 확인합니다.',
+            '로봇 메뉴에서 배포 맵을 다시 불러와 Waypoint와 Lane이 보이는지 확인합니다.',
+          ],
+          doneWhen: '배포 로그가 성공이고 로봇 메뉴에서 같은 맵을 불러올 수 있으면 완료입니다.',
+          caution: '작업 저장과 배포는 다릅니다. 저장만 해서는 실제 관제 맵이 변경되지 않습니다.',
+        ),
+      ],
+    ),
+    _UsageGuideTopic.robot => (
+      '로봇 운영 사용법',
+      '로봇 화면은 운영 맵 위에 장비를 등록하고 현재 위치와 상태를 확인하는 곳입니다. '
+          'Spawn은 출발 명령이 아니라 지정 Waypoint에 로봇을 배치하고 관제 대상으로 '
+          '등록하는 동작입니다.',
+      const [
+        _UsageGuideStep(
+          title: '배포 맵 불러오기',
+          why:
+              '로봇과 작업은 동일한 Waypoint 좌표계를 사용해야 합니다. 맵 없이 Spawn하면 위치와 경로를 해석할 수 없습니다.',
+          actions: [
+            '배포 맵 불러오기를 누릅니다.',
+            'nav graph 확인됨 상태인 운영 맵을 선택합니다.',
+            '도면, Lane, Waypoint 이름과 현재 운영 맵 이름을 확인합니다.',
+          ],
+          doneWhen: '로봇 화면에 도면과 Lane, 이름이 표시되면 완료입니다.',
+          caution: '운영 중 맵을 교체하면 기존 로봇과 작업의 좌표가 맞지 않을 수 있으므로 다시 등록해야 합니다.',
+        ),
+        _UsageGuideStep(
+          title: '실행 방식 선택',
+          why: '앱 Mock, Headless Gazebo와 실제 로봇은 위치를 만드는 주체와 안전 책임이 다릅니다.',
+          actions: [
+            'UI 확인은 앱 Mock을 선택합니다.',
+            '물리 시뮬레이션은 Headless Gazebo와 외부 백엔드를 사용합니다.',
+            '실장비는 로컬 Linux Edge Agent와 Fleet Adapter 연결 상태를 먼저 확인합니다.',
+          ],
+          doneWhen: '시험 목적에 맞는 실행 방식과 백엔드가 준비되면 완료입니다.',
+          caution:
+              '현재 앱의 직접 Spawn은 Mock 표현입니다. 실제 장비는 전원을 켜고 Edge Agent로 등록해야 합니다.',
+        ),
+        _UsageGuideStep(
+          title: '로봇 유형과 Spawn 위치 선택',
+          why: '장비 종류에 따라 이동 가능 여부와 수행할 수 있는 작업이 다르기 때문입니다.',
+          actions: [
+            'Mock 주행로봇, Pinky, OMX Manipulator 또는 Mock 휴머노이드를 선택합니다.',
+            '중복되지 않는 이름을 입력합니다.',
+            '이동 로봇은 시작 Waypoint, OMX는 고정 설치 Waypoint를 선택합니다.',
+            'Spawn 후 선택한 위치에서 정지 상태인지 확인합니다.',
+          ],
+          doneWhen: '지도와 목록에 올바른 유형·이름·위치로 표시되고 정지 상태이면 완료입니다.',
+          caution: 'OMX Manipulator는 고정 장비이므로 Lane을 따라 이동하지 않습니다.',
+        ),
+        _UsageGuideStep(
+          title: '상태 확인과 이동 시작',
+          why: '등록 직후 예상하지 않은 이동을 방지하고 작업 전 장비 상태를 확인해야 합니다.',
+          actions: [
+            '목록에서 연결 상태, 정지 여부, 배터리와 활성 작업을 확인합니다.',
+            '수동 확인이 필요할 때만 재개를 눌러 자율 이동을 시작합니다.',
+            '업무 이동은 수동 재개보다 작업 메뉴에서 목적지를 배정해 시작합니다.',
+            '이상 동작이 있으면 정지를 누르고 작업과 경로를 확인합니다.',
+          ],
+          doneWhen: '의도한 명령을 받은 로봇만 움직이고 나머지는 정지해 있으면 정상입니다.',
+        ),
+        _UsageGuideStep(
+          title: '실장비 운영 전 확인',
+          why: '화면의 아이콘이 정상이어도 실제 센서, 비상정지와 네트워크가 준비되지 않으면 안전하게 운행할 수 없습니다.',
+          actions: [
+            'Pinky의 비상정지, 라이다, odometry와 배터리를 확인합니다.',
+            'OMX-AI의 원점 복귀, 그리퍼와 작업 범위를 확인합니다.',
+            'Edge Agent 및 게이트웨이 연결과 연결 끊김 시 안전 정지를 시험합니다.',
+            '저속 단일 로봇 시험 후 여러 로봇 작업을 시작합니다.',
+          ],
+          doneWhen: '통신 단절과 비상정지 시험까지 통과하면 실작업 준비 완료입니다.',
+        ),
+      ],
+    ),
+    _UsageGuideTopic.task => (
+      '작업 관리 사용법',
+      '작업은 단순 목적지 지정이 아니라 Pinky 이동, OMX-AI 적재와 하차를 정해진 '
+          '순서로 실행하는 절차입니다. 앞 단계의 성공이 검증되어야 다음 단계가 시작됩니다.',
+      const [
+        _UsageGuideStep(
+          title: '맵과 로봇 준비',
+          why: '작업은 맵의 Waypoint와 실제 수행 로봇을 참조하므로 두 항목이 먼저 준비되어야 합니다.',
+          actions: [
+            '화면의 준비 안내에서 운영 맵이 선택되었는지 확인합니다.',
+            'Pinky 또는 Mock 주행로봇이 Spawn되어 정지 중인지 확인합니다.',
+            '실제 적재 작업이면 담당 OMX-AI와 픽업 스테이션의 연결 상태를 확인합니다.',
+          ],
+          doneWhen: '상단에 작업 준비 완료와 가용 로봇 수가 표시되면 완료입니다.',
+        ),
+        _UsageGuideStep(
+          title: '연속 작업 생성',
+          why:
+              '이동과 팔 동작을 한 작업에 묶어야 잘못된 위치에서 팔이 움직이거나 적재 전에 로봇이 출발하는 일을 막을 수 있습니다.',
+          actions: [
+            '새 작업을 누르고 작업자가 구분할 수 있는 이름을 입력합니다.',
+            '자동 배정 또는 특정 Pinky를 선택합니다.',
+            '단계 추가로 Pinky 이동, OMX-AI 픽업과 대기를 구성합니다.',
+            '카드를 끌어 실제 실행 순서대로 배치하고 필요 없는 단계는 삭제합니다.',
+          ],
+          doneWhen: '작업 이름, 수행 로봇과 모든 단계의 목적지가 지정되면 시작할 수 있습니다.',
+        ),
+        _UsageGuideStep(
+          title: '권장 주문 작업 순서',
+          why: '로봇 도착과 적재 성공을 각각 확인해야 상품 누락과 빈 차 출발을 방지할 수 있습니다.',
+          actions: [
+            '1단계: Pinky를 주문 온도에 맞는 픽업 Waypoint로 이동시킵니다.',
+            '2단계: Pinky가 정지한 뒤 OMX-AI 픽업/적재를 실행합니다.',
+            '3단계: 적재 성공 후 Pinky를 하차 Waypoint로 이동시킵니다.',
+            '필요하면 작업자 확인이나 설비 동작을 위한 대기 단계를 추가합니다.',
+          ],
+          doneWhen: '픽업 이동 → 적재 → 하차 이동 순서가 명확하면 완료입니다.',
+          caution: 'OMX-AI 성공 전에 하차 이동을 시작하도록 순서를 만들지 마세요.',
+        ),
+        _UsageGuideStep(
+          title: '실행 상태와 오류 확인',
+          why: '진행 중인 단계와 실패 위치를 알아야 재시도 여부와 현장 조치를 안전하게 결정할 수 있습니다.',
+          actions: [
+            '목록에서 완료 단계 수와 현재 활성 단계를 확인합니다.',
+            '경로 없음은 맵의 Lane 연결과 방향을 먼저 확인합니다.',
+            '적재 실패는 상품, 로봇 ID, 정지 위치, OMX 그리퍼 상태를 확인합니다.',
+            '원인을 모르는 상태에서는 반복 시작하지 말고 작업을 취소한 뒤 현장을 확인합니다.',
+          ],
+          doneWhen: '모든 단계가 완료되고 로봇이 최종 Waypoint에서 정지하면 운반 단계가 완료된 것입니다.',
+        ),
+        _UsageGuideStep(
+          title: '실제 주문 완료 판단',
+          why: '로봇이 하차 지점에 도착한 것과 주문 상품이 실제 인계된 것은 서로 다른 사건입니다.',
+          actions: [
+            '작업자 확인, 자동 하차 설비 응답 또는 데크 센서로 상품 인수를 확인합니다.',
+            '인수 완료 후 주문 상태와 재고 이력을 완료 처리합니다.',
+            '취소·실패 작업은 적재된 상품과 예약 재고 상태를 반드시 대조합니다.',
+          ],
+          doneWhen: '상품 인수와 재고 반영까지 확인되어야 주문 전체가 완료입니다.',
+          caution: '현재 앱 Mock 엔진의 완료 표시는 실제 상품 인수 증명이 아닙니다.',
+        ),
+      ],
+    ),
+  };
+
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      icon: const Icon(Icons.menu_book_outlined, size: 38),
+      title: Text(title),
+      content: SizedBox(
+        width: 780,
+        height: 650,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFBFDBFE)),
+              ),
+              child: Text(
+                introduction,
+                style: const TextStyle(height: 1.55, color: Color(0xFF1E3A8A)),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: ListView.separated(
+                itemCount: steps.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 12),
+                itemBuilder: (context, index) {
+                  final step = steps[index];
+                  return Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 15,
+                              backgroundColor: const Color(0xFF2563EB),
+                              foregroundColor: Colors.white,
+                              child: Text('${index + 1}'),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                step.title,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          '왜 필요한가: ${step.why}',
+                          style: const TextStyle(height: 1.45),
+                        ),
+                        const SizedBox(height: 9),
+                        for (
+                          var actionIndex = 0;
+                          actionIndex < step.actions.length;
+                          actionIndex++
+                        )
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 5),
+                            child: Text(
+                              '${actionIndex + 1}) ${step.actions[actionIndex]}',
+                              style: const TextStyle(height: 1.4),
+                            ),
+                          ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '완료 기준: ${step.doneWhen}',
+                          style: const TextStyle(
+                            color: Color(0xFF15803D),
+                            fontWeight: FontWeight.w700,
+                            height: 1.4,
+                          ),
+                        ),
+                        if (step.caution != null) ...[
+                          const SizedBox(height: 7),
+                          Text(
+                            '주의: ${step.caution}',
+                            style: const TextStyle(
+                              color: Color(0xFFB45309),
+                              fontWeight: FontWeight.w700,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            final plainText = StringBuffer('$title\n\n$introduction\n');
+            for (var index = 0; index < steps.length; index++) {
+              final step = steps[index];
+              plainText
+                ..writeln('\n${index + 1}. ${step.title}')
+                ..writeln('왜 필요한가: ${step.why}');
+              for (
+                var actionIndex = 0;
+                actionIndex < step.actions.length;
+                actionIndex++
+              ) {
+                plainText.writeln(
+                  '  ${actionIndex + 1}) ${step.actions[actionIndex]}',
+                );
+              }
+              plainText.writeln('완료 기준: ${step.doneWhen}');
+              if (step.caution != null) {
+                plainText.writeln('주의: ${step.caution}');
+              }
+            }
+            await Clipboard.setData(ClipboardData(text: plainText.toString()));
+            if (!dialogContext.mounted) return;
+            ScaffoldMessenger.of(
+              dialogContext,
+            ).showSnackBar(const SnackBar(content: Text('사용법 전체 내용을 복사했습니다.')));
+          },
+          icon: const Icon(Icons.copy_outlined),
+          label: const Text('전체 복사'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('확인'),
+        ),
+      ],
+    ),
+  );
+}
+
 enum _ExportAction { download, copy }
 
 class _PageHeading extends StatelessWidget {
   const _PageHeading({
+    required this.onHelp,
     required this.onUpload,
     required this.exportEnabled,
     required this.onValidate,
@@ -4831,6 +5674,7 @@ class _PageHeading extends StatelessWidget {
     required this.onSaveProject,
     required this.onLoadProject,
   });
+  final VoidCallback onHelp;
   final VoidCallback onUpload;
   final bool exportEnabled;
   final VoidCallback onValidate;
@@ -4855,6 +5699,15 @@ class _PageHeading extends StatelessWidget {
           ],
         ),
       ),
+      OutlinedButton.icon(
+        onPressed: onHelp,
+        icon: const Icon(Icons.help_outline, size: 18),
+        label: const Text('사용법'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
       OutlinedButton.icon(
         onPressed: onLoadProject,
         icon: const Icon(Icons.folder_open_outlined, size: 18),

@@ -8,6 +8,7 @@
 - [맵 작성 및 배포 가이드](docs/MAP_AUTHORING_AND_DEPLOYMENT.md)
 - [앱 전용 Mock 로봇 가이드](docs/APP_MOCK_ROBOTS.md)
 - [Mock 로봇 작업 관리 가이드](docs/MOCK_TASKS.md)
+- [식품 주문 · Pinky · OMX-AI 연동 설계](docs/FOOD_ORDER_PINKY_OMX_WORKFLOW.md)
 
 ## 실행
 

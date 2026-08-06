@@ -19,6 +19,13 @@ void main() {
     expect(find.text('창고 도면을 올려주세요'), findsOneWidget);
     expect(find.text('맵 생성 설정'), findsOneWidget);
 
+    await tester.tap(find.text('사용법'));
+    await tester.pumpAndSettle();
+    expect(find.text('맵 관리 사용법'), findsOneWidget);
+    expect(find.textContaining('왜 필요한가:'), findsWidgets);
+    await tester.tap(find.text('확인'));
+    await tester.pumpAndSettle();
+
     await tester.tap(find.text('로봇'));
     await tester.pumpAndSettle();
 
@@ -26,6 +33,12 @@ void main() {
     expect(find.text('로봇 Spawn'), findsOneWidget);
     expect(find.text('배포 맵 불러오기'), findsOneWidget);
     expect(find.text('Gazebo · RViz 끔'), findsOneWidget);
+
+    await tester.tap(find.text('사용법'));
+    await tester.pumpAndSettle();
+    expect(find.text('로봇 운영 사용법'), findsOneWidget);
+    await tester.tap(find.text('확인'));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('배포 맵 불러오기'));
     await tester.pump(const Duration(milliseconds: 400));
@@ -40,6 +53,12 @@ void main() {
     expect(find.text('새 작업'), findsOneWidget);
     expect(find.text('생성된 작업이 없습니다.'), findsOneWidget);
     expect(find.text('1단계: 배포 맵을 불러오세요.'), findsOneWidget);
+
+    await tester.tap(find.text('사용법'));
+    await tester.pumpAndSettle();
+    expect(find.text('작업 관리 사용법'), findsOneWidget);
+    await tester.tap(find.text('확인'));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('새 작업'));
     await tester.pumpAndSettle();
