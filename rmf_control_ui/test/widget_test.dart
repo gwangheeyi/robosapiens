@@ -4,13 +4,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/main.dart';
 
 void main() {
-  testWidgets('관제 맵 업로드 화면을 표시한다', (tester) async {
+  testWidgets('대시보드와 주요 운영 화면을 표시한다', (tester) async {
     tester.view.physicalSize = const Size(1600, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const RmfControlApp());
+
+    expect(find.text('운영 대시보드'), findsOneWidget);
+    expect(find.text('실시간 운영 맵'), findsOneWidget);
+    expect(find.text('최근 작업 활동'), findsOneWidget);
+    expect(find.text('빠른 실행'), findsOneWidget);
+
+    await tester.tap(find.text('맵 관리').first);
+    await tester.pumpAndSettle();
 
     expect(find.text('새 창고 맵 만들기'), findsOneWidget);
     expect(find.text('도면 올리기'), findsOneWidget);

@@ -294,7 +294,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   bool _showVertexLabels = true;
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
-  int _selectedMenu = 1;
+  int _selectedMenu = 0;
   final List<_MockRobot> _mockRobots = [];
   final List<_MockTask> _mockTasks = [];
   Timer? _mockRobotTimer;
@@ -3472,7 +3472,39 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       ][_selectedMenu],
                     ),
                     Expanded(
-                      child: _selectedMenu == 1
+                      child: _selectedMenu == 0
+                          ? _MainDashboard(
+                              drawing: _robotRuntimeDrawing,
+                              mapName:
+                                  _robotDeployedMap?.summary.name ?? _mapName,
+                              mapReady:
+                                  (_robotDeployedMap?.waypoints ??
+                                          _laneWaypoints)
+                                      .isNotEmpty,
+                              deployed:
+                                  _isDeployed || _robotDeployedMap != null,
+                              lanes:
+                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
+                              waypoints:
+                                  _robotDeployedMap?.waypoints ??
+                                  _laneWaypoints,
+                              waypointNames:
+                                  _robotDeployedMap?.waypointNames ??
+                                  _waypointNames,
+                              robots: _mockRobots,
+                              tasks: _mockTasks,
+                              warning: _processingWarning,
+                              onOpenMap: () =>
+                                  setState(() => _selectedMenu = 1),
+                              onOpenRobots: () =>
+                                  setState(() => _selectedMenu = 2),
+                              onOpenTasks: () =>
+                                  setState(() => _selectedMenu = 3),
+                              onLoadMap: _loadMapForRobots,
+                              onSpawn: _spawnMockRobot,
+                              onCreateTask: _createMockTask,
+                            )
+                          : _selectedMenu == 1
                           ? SingleChildScrollView(
                               padding: const EdgeInsets.fromLTRB(
                                 32,
@@ -4475,6 +4507,552 @@ class _TaskSummaryCard extends StatelessWidget {
               ),
             ],
           ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _MainDashboard extends StatelessWidget {
+  const _MainDashboard({
+    required this.drawing,
+    required this.mapName,
+    required this.mapReady,
+    required this.deployed,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.robots,
+    required this.tasks,
+    required this.warning,
+    required this.onOpenMap,
+    required this.onOpenRobots,
+    required this.onOpenTasks,
+    required this.onLoadMap,
+    required this.onSpawn,
+    required this.onCreateTask,
+  });
+
+  final UploadedDrawing? drawing;
+  final String mapName;
+  final bool mapReady;
+  final bool deployed;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_MockRobot> robots;
+  final List<_MockTask> tasks;
+  final String? warning;
+  final VoidCallback onOpenMap;
+  final VoidCallback onOpenRobots;
+  final VoidCallback onOpenTasks;
+  final VoidCallback onLoadMap;
+  final VoidCallback onSpawn;
+  final VoidCallback onCreateTask;
+
+  String _taskStatus(_MockTaskStatus status) => switch (status) {
+    _MockTaskStatus.queued => '대기',
+    _MockTaskStatus.active => '진행 중',
+    _MockTaskStatus.completed => '완료',
+    _MockTaskStatus.cancelled => '취소',
+    _MockTaskStatus.failed => '실패',
+  };
+
+  String _clock(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final moving = robots.where((robot) => robot.moving).length;
+    final robotErrors = robots.where((robot) => robot.battery <= 10).length;
+    final activeTasks = tasks
+        .where(
+          (task) =>
+              task.status == _MockTaskStatus.active ||
+              task.status == _MockTaskStatus.queued,
+        )
+        .length;
+    final failedTasks = tasks
+        .where((task) => task.status == _MockTaskStatus.failed)
+        .length;
+    final completedTasks = tasks
+        .where((task) => task.status == _MockTaskStatus.completed)
+        .length;
+    final hasIssue = warning != null || failedTasks > 0 || robotErrors > 0;
+    final arms = robots
+        .where((robot) => robot.kind == _RobotKind.omxManipulator)
+        .toList();
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '운영 대시보드',
+                      style: Theme.of(context).textTheme.headlineMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text('맵, 로봇과 작업 상태를 한 화면에서 확인합니다.'),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: onLoadMap,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('운영 맵 불러오기'),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: onSpawn,
+                icon: const Icon(Icons.add_circle_outline),
+                label: const Text('로봇 Spawn'),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: onCreateTask,
+                icon: const Icon(Icons.add_task),
+                label: const Text('새 작업'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: hasIssue
+                  ? const Color(0xFFFFFBEB)
+                  : const Color(0xFFF0FDF4),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: hasIssue
+                    ? const Color(0xFFFCD34D)
+                    : const Color(0xFF86EFAC),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  hasIssue ? Icons.warning_amber_rounded : Icons.check_circle,
+                  color: hasIssue
+                      ? const Color(0xFFD97706)
+                      : const Color(0xFF15803D),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    hasIssue
+                        ? '운영 주의 · Warning 또는 실패 작업을 확인하세요.'
+                        : mapReady
+                        ? '운영 준비 정상 · 현재 맵 $mapName'
+                        : '운영 준비 필요 · 먼저 맵을 작성하거나 배포 맵을 불러오세요.',
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+                _DashboardStatusChip(
+                  label: deployed ? '맵 배포됨' : '맵 미배포',
+                  ok: deployed,
+                ),
+                const SizedBox(width: 8),
+                _DashboardStatusChip(
+                  label: mapReady ? 'Nav graph 준비' : 'Nav graph 없음',
+                  ok: mapReady,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final columns = width >= 1100
+                  ? 4
+                  : width >= 620
+                  ? 2
+                  : 1;
+              final cardWidth = (width - (columns - 1) * 12) / columns;
+              return Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  SizedBox(
+                    width: cardWidth,
+                    child: _DashboardMetricCard(
+                      icon: Icons.smart_toy_outlined,
+                      label: '등록 로봇',
+                      value: '${robots.length}대',
+                      detail: '이동 $moving · 정지 ${robots.length - moving}',
+                      color: const Color(0xFF2563EB),
+                      onTap: onOpenRobots,
+                    ),
+                  ),
+                  SizedBox(
+                    width: cardWidth,
+                    child: _DashboardMetricCard(
+                      icon: Icons.pending_actions_outlined,
+                      label: '진행 작업',
+                      value: '$activeTasks건',
+                      detail: '완료 $completedTasks건',
+                      color: const Color(0xFF7C3AED),
+                      onTap: onOpenTasks,
+                    ),
+                  ),
+                  SizedBox(
+                    width: cardWidth,
+                    child: _DashboardMetricCard(
+                      icon: Icons.error_outline,
+                      label: '확인 필요',
+                      value: '${failedTasks + robotErrors}건',
+                      detail: '실패 작업 $failedTasks · 저전압 $robotErrors',
+                      color: const Color(0xFFDC2626),
+                      onTap: onOpenTasks,
+                    ),
+                  ),
+                  SizedBox(
+                    width: cardWidth,
+                    child: _DashboardMetricCard(
+                      icon: Icons.precision_manufacturing_outlined,
+                      label: 'OMX 스테이션',
+                      value: '${arms.length}대',
+                      detail: arms.isEmpty ? '등록 필요' : '고정 장비 등록됨',
+                      color: const Color(0xFF0891B2),
+                      onTap: onOpenRobots,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 18),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 1050;
+              final map = _DashboardPanel(
+                title: '실시간 운영 맵',
+                icon: Icons.map_outlined,
+                trailing: TextButton(
+                  onPressed: onOpenRobots,
+                  child: const Text('로봇 화면 열기'),
+                ),
+                child: SizedBox(
+                  height: 430,
+                  child: _RobotMapCard(
+                    drawing: drawing,
+                    lanes: lanes,
+                    waypoints: waypoints,
+                    waypointNames: waypointNames,
+                    robots: robots,
+                  ),
+                ),
+              );
+              final side = Column(
+                children: [
+                  _DashboardPanel(
+                    title: 'Warning',
+                    icon: Icons.warning_amber_outlined,
+                    child: warning == null && failedTasks == 0
+                        ? const _DashboardEmpty(
+                            icon: Icons.check_circle_outline,
+                            text: '현재 확인할 Warning이 없습니다.',
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (warning != null)
+                                SelectableText(
+                                  warning!,
+                                  style: const TextStyle(
+                                    color: Color(0xFFB45309),
+                                    height: 1.45,
+                                  ),
+                                ),
+                              if (failedTasks > 0)
+                                ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(
+                                    Icons.error_outline,
+                                    color: Color(0xFFDC2626),
+                                  ),
+                                  title: Text('실패 작업 $failedTasks건'),
+                                  trailing: TextButton(
+                                    onPressed: onOpenTasks,
+                                    child: const Text('확인'),
+                                  ),
+                                ),
+                            ],
+                          ),
+                  ),
+                  const SizedBox(height: 14),
+                  _DashboardPanel(
+                    title: 'OMX 스테이션',
+                    icon: Icons.precision_manufacturing_outlined,
+                    child: arms.isEmpty
+                        ? const _DashboardEmpty(
+                            icon: Icons.add_location_alt_outlined,
+                            text: 'OMX Manipulator를 설치 Waypoint에 Spawn하세요.',
+                          )
+                        : Column(
+                            children: [
+                              for (final arm in arms)
+                                ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: CircleAvatar(
+                                    backgroundColor: arm.color,
+                                    child: const Icon(
+                                      Icons.precision_manufacturing,
+                                      color: Colors.white,
+                                      size: 18,
+                                    ),
+                                  ),
+                                  title: Text(arm.id),
+                                  subtitle: const Text('고정 설치 · 대기'),
+                                ),
+                            ],
+                          ),
+                  ),
+                ],
+              );
+              if (compact) {
+                return Column(
+                  children: [map, const SizedBox(height: 14), side],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(flex: 2, child: map),
+                  const SizedBox(width: 16),
+                  Expanded(child: side),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 18),
+          _DashboardPanel(
+            title: '최근 작업 활동',
+            icon: Icons.history,
+            trailing: TextButton(
+              onPressed: onOpenTasks,
+              child: const Text('전체 작업 보기'),
+            ),
+            child: tasks.isEmpty
+                ? const _DashboardEmpty(
+                    icon: Icons.inbox_outlined,
+                    text: '아직 생성된 작업이 없습니다.',
+                  )
+                : Column(
+                    children: [
+                      for (final task in tasks.take(5))
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                            task.status == _MockTaskStatus.failed
+                                ? Icons.error_outline
+                                : task.status == _MockTaskStatus.completed
+                                ? Icons.check_circle_outline
+                                : Icons.route_outlined,
+                          ),
+                          title: Text('${task.id} · ${task.name}'),
+                          subtitle: Text(
+                            '${task.robotId} · ${task.currentStepIndex}/${task.steps.length}단계',
+                          ),
+                          trailing: Text(
+                            '${_taskStatus(task.status)} · ${_clock(task.createdAt)}',
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 18),
+          _DashboardPanel(
+            title: '빠른 실행',
+            icon: Icons.bolt_outlined,
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: onOpenMap,
+                  icon: const Icon(Icons.map_outlined),
+                  label: const Text('맵 관리'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onOpenRobots,
+                  icon: const Icon(Icons.smart_toy_outlined),
+                  label: const Text('로봇 관리'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onOpenTasks,
+                  icon: const Icon(Icons.assignment_outlined),
+                  label: const Text('작업 관리'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onLoadMap,
+                  icon: const Icon(Icons.folder_open_outlined),
+                  label: const Text('배포 맵 불러오기'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashboardStatusChip extends StatelessWidget {
+  const _DashboardStatusChip({required this.label, required this.ok});
+  final String label;
+  final bool ok;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: ok ? const Color(0xFFDCFCE7) : const Color(0xFFFFEDD5),
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Text(
+      label,
+      style: TextStyle(
+        color: ok ? const Color(0xFF15803D) : const Color(0xFFC2410C),
+        fontSize: 12,
+        fontWeight: FontWeight.w800,
+      ),
+    ),
+  );
+}
+
+class _DashboardMetricCard extends StatelessWidget {
+  const _DashboardMetricCard({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.detail,
+    required this.color,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final String value;
+  final String detail;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(12),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: color),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: const TextStyle(color: Color(0xFF64748B))),
+                  Text(
+                    value,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  Text(detail, style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: Color(0xFF94A3B8)),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _DashboardPanel extends StatelessWidget {
+  const _DashboardPanel({
+    required this.title,
+    required this.icon,
+    required this.child,
+    this.trailing,
+  });
+  final String title;
+  final IconData icon;
+  final Widget child;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: const Color(0xFFE2E8F0)),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 20, color: const Color(0xFF334155)),
+            const SizedBox(width: 8),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+            ),
+            const Spacer(),
+            trailing ?? const SizedBox.shrink(),
+          ],
+        ),
+        const SizedBox(height: 12),
+        child,
+      ],
+    ),
+  );
+}
+
+class _DashboardEmpty extends StatelessWidget {
+  const _DashboardEmpty({required this.icon, required this.text});
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 22),
+    child: Center(
+      child: Column(
+        children: [
+          Icon(icon, color: const Color(0xFF94A3B8), size: 32),
+          const SizedBox(height: 8),
+          Text(text, style: const TextStyle(color: Color(0xFF64748B))),
         ],
       ),
     ),
