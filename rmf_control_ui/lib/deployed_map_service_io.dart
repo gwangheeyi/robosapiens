@@ -64,7 +64,10 @@ Future<List<DeployedMapSummary>> listDeployedMaps() async {
     if (data['format'] != 'robosapiens-map-project') continue;
     final drawing = data['drawing'] as Map<String, dynamic>?;
     final drawingName = drawing?['name'] as String? ?? '';
-    final name = drawingName.contains('.')
+    final savedMapName = (data['mapName'] as String?)?.trim();
+    final name = savedMapName?.isNotEmpty == true
+        ? savedMapName!
+        : drawingName.contains('.')
         ? drawingName.substring(0, drawingName.lastIndexOf('.'))
         : entity.uri.pathSegments.last.replaceFirst('.rmfproject', '');
     final existing = results.indexWhere((map) => map.name == name);
@@ -155,6 +158,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
 
   final vertices = <Offset>[];
   final names = <int, String>{};
+  final equipmentIndices = <int>{};
   var inVertices = false;
   for (final line in const LineSplitter().convert(yaml)) {
     if (line.startsWith('    vertices:')) {
@@ -170,7 +174,11 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     vertices.add(
       Offset(double.parse(match.group(1)!), double.parse(match.group(2)!)),
     );
-    names[vertices.length - 1] = match.group(3)!;
+    final index = vertices.length - 1;
+    names[index] = match.group(3)!;
+    if (line.contains('robosapiens_equipment: [4, true]')) {
+      equipmentIndices.add(index);
+    }
   }
 
   final laneIndices = <(int, int)>[];
@@ -195,6 +203,9 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     final end = vertices[lane.$2];
     lanes.add((start, end));
     waypointSet.addAll([start, end]);
+  }
+  for (final index in equipmentIndices) {
+    if (index < vertices.length) waypointSet.add(vertices[index]);
   }
   final waypointNames = <Offset, String>{};
   for (var i = 0; i < vertices.length; i++) {

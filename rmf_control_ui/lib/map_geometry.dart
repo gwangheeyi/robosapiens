@@ -1,0 +1,148 @@
+import 'dart:math' as math;
+import 'dart:ui';
+
+/// A wall or a lane: two points in image pixel coordinates.
+typedef Segment = (Offset, Offset);
+
+/// Distance from [point] to the segment [start]-[end].
+double pointSegmentDistance(Offset point, Offset start, Offset end) {
+  final vector = end - start;
+  final lengthSquared = vector.dx * vector.dx + vector.dy * vector.dy;
+  if (lengthSquared <= .0001) return (point - start).distance;
+  final ratio =
+      (((point.dx - start.dx) * vector.dx +
+                  (point.dy - start.dy) * vector.dy) /
+              lengthSquared)
+          .clamp(0.0, 1.0);
+  return (point - (start + vector * ratio)).distance;
+}
+
+/// Whether two segments touch or cross, including endpoint contact and
+/// overlapping collinear segments.
+bool segmentsCross(Offset a, Offset b, Offset c, Offset d) {
+  double side(Offset p, Offset q, Offset r) =>
+      (q.dx - p.dx) * (r.dy - p.dy) - (q.dy - p.dy) * (r.dx - p.dx);
+  bool onSegment(Offset p, Offset q, Offset r) =>
+      q.dx >= math.min(p.dx, r.dx) - .01 &&
+      q.dx <= math.max(p.dx, r.dx) + .01 &&
+      q.dy >= math.min(p.dy, r.dy) - .01 &&
+      q.dy <= math.max(p.dy, r.dy) + .01;
+  final abC = side(a, b, c);
+  final abD = side(a, b, d);
+  final cdA = side(c, d, a);
+  final cdB = side(c, d, b);
+  if (((abC > .01 && abD < -.01) || (abC < -.01 && abD > .01)) &&
+      ((cdA > .01 && cdB < -.01) || (cdA < -.01 && cdB > .01))) {
+    return true;
+  }
+  if (abC.abs() <= .01 && onSegment(a, c, b)) return true;
+  if (abD.abs() <= .01 && onSegment(a, d, b)) return true;
+  if (cdA.abs() <= .01 && onSegment(c, a, d)) return true;
+  if (cdB.abs() <= .01 && onSegment(c, b, d)) return true;
+  return false;
+}
+
+/// Distance between two segments.
+///
+/// Endpoint distances alone read as "far apart" for two segments that cross,
+/// so a crossing is detected first and reported as zero.
+double segmentDistance(Offset a, Offset b, Offset c, Offset d) {
+  if (segmentsCross(a, b, c, d)) return 0;
+  return [
+    pointSegmentDistance(a, c, d),
+    pointSegmentDistance(b, c, d),
+    pointSegmentDistance(c, a, b),
+    pointSegmentDistance(d, a, b),
+  ].reduce(math.min);
+}
+
+/// Distance from the segment [start]-[end] to the nearest of [walls].
+double segmentWallClearance(Offset start, Offset end, List<Segment> walls) {
+  var clearance = double.infinity;
+  for (final wall in walls) {
+    clearance = math.min(
+      clearance,
+      segmentDistance(start, end, wall.$1, wall.$2),
+    );
+  }
+  return clearance;
+}
+
+/// Whether [point] is inside [polygon], counting points on the edge as inside.
+bool insidePolygon(
+  Offset point,
+  List<Offset> polygon, {
+  double edgeTolerance = .5,
+}) {
+  if (polygon.length < 3) return false;
+  for (var index = 0; index < polygon.length; index++) {
+    if (pointSegmentDistance(
+          point,
+          polygon[index],
+          polygon[(index + 1) % polygon.length],
+        ) <=
+        edgeTolerance) {
+      return true;
+    }
+  }
+  var inside = false;
+  for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    final a = polygon[i];
+    final b = polygon[j];
+    final crosses =
+        (a.dy > point.dy) != (b.dy > point.dy) &&
+        point.dx < (b.dx - a.dx) * (point.dy - a.dy) / (b.dy - a.dy) + a.dx;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+/// Why a dragged Waypoint may not be dropped where it was released.
+enum WaypointMoveIssue {
+  /// The drop point is outside the Floor polygon.
+  outsideFloor,
+
+  /// Another Waypoint already sits on the drop point.
+  waypointTooClose,
+
+  /// A Lane attached to the dragged Waypoint would run into a wall.
+  laneTouchesWall,
+}
+
+/// Checks whether [original] may be dropped at [updated].
+///
+/// Only Lanes attached to the dragged Waypoint are checked. Lanes elsewhere on
+/// the map keep whatever state they were already in — a Lane that is too close
+/// to a wall somewhere else is a problem to fix there, not a reason to freeze
+/// every Waypoint on the map in place.
+WaypointMoveIssue? waypointMoveIssue({
+  required Offset original,
+  required Offset updated,
+  required List<Offset> waypoints,
+  required List<Segment> lanes,
+  required List<Segment> walls,
+  required List<Offset> floorOutline,
+  required double laneWallClearance,
+  double waypointGap = 4,
+}) {
+  if (!insidePolygon(updated, floorOutline)) {
+    return WaypointMoveIssue.outsideFloor;
+  }
+  for (final point in waypoints) {
+    if ((point - original).distance <= .01) continue;
+    if ((point - updated).distance < waypointGap) {
+      return WaypointMoveIssue.waypointTooClose;
+    }
+  }
+  for (final lane in lanes) {
+    final startMoves = (lane.$1 - original).distance <= .01;
+    final endMoves = (lane.$2 - original).distance <= .01;
+    if (!startMoves && !endMoves) continue;
+    final start = startMoves ? updated : lane.$1;
+    final end = endMoves ? updated : lane.$2;
+    if (segmentWallClearance(start, end, walls) < laneWallClearance - .01) {
+      return WaypointMoveIssue.laneTouchesWall;
+    }
+  }
+  return null;
+}

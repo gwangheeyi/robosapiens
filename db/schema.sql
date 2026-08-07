@@ -219,6 +219,32 @@ CREATE TABLE IF NOT EXISTS `task_steps` (
     REFERENCES `tasks` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- RMF Control UI에서 작성한 재사용 가능한 작업 정의. payload에는 지도 Waypoint,
+-- 단계와 배정 정보를 JSON으로 보존한다.
+CREATE TABLE IF NOT EXISTS `rmf_ui_tasks` (
+  `id`         VARCHAR(64)  NOT NULL,
+  `name`       VARCHAR(255) NOT NULL,
+  `status`     VARCHAR(32)  NOT NULL,
+  `payload`    JSON         NOT NULL,
+  `created_at` DATETIME(6)  NOT NULL,
+  `updated_at` DATETIME(6)  NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_rmf_ui_tasks_status` (`status`),
+  KEY `idx_rmf_ui_tasks_updated` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 작업 생성·수정·삭제·상태 변경 이력. 작업 삭제 뒤에도 기록을 보존한다.
+CREATE TABLE IF NOT EXISTS `rmf_ui_task_history` (
+  `id`          BIGINT      NOT NULL AUTO_INCREMENT,
+  `task_id`     VARCHAR(64) NOT NULL,
+  `event_type`  VARCHAR(32) NOT NULL,
+  `payload`     JSON        NOT NULL,
+  `recorded_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_rmf_ui_task_history_task` (`task_id`, `recorded_at`),
+  KEY `idx_rmf_ui_task_history_at` (`recorded_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 
 -- ---------------------------------------------------------------------------
 -- 운행 이력 · 안전

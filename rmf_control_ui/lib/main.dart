@@ -4,11 +4,16 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'deployment_service.dart';
 import 'deployed_map_service.dart';
+import 'map_ai_service.dart';
+import 'map_geometry.dart';
+import 'scenario_route_planner.dart';
+import 'task_store.dart';
 
 void main() => runApp(const RmfControlApp());
 
@@ -100,6 +105,13 @@ class _EditorSnapshot {
     required this.frozenAutoWalls,
     required this.recommendedLanes,
     required this.laneDirections,
+    required this.laneSpeedLimits,
+    required this.laneOrientations,
+    required this.laneMutexGroups,
+    required this.robotWidthMeters,
+    required this.turningRadiusMeters,
+    required this.localizationMarginMeters,
+    required this.mapScenarioSummary,
     required this.laneWaypoints,
     required this.waypointTypes,
     required this.waypointNames,
@@ -119,6 +131,13 @@ class _EditorSnapshot {
   final List<(Offset, Offset)> frozenAutoWalls;
   final List<(Offset, Offset)> recommendedLanes;
   final Map<(Offset, Offset), String> laneDirections;
+  final Map<(Offset, Offset), double> laneSpeedLimits;
+  final Map<(Offset, Offset), String> laneOrientations;
+  final Map<(Offset, Offset), String> laneMutexGroups;
+  final double robotWidthMeters;
+  final double turningRadiusMeters;
+  final double localizationMarginMeters;
+  final String? mapScenarioSummary;
   final List<Offset> laneWaypoints;
   final Map<Offset, String> waypointTypes;
   final Map<Offset, String> waypointNames;
@@ -139,7 +158,52 @@ class _LaneRecommendation {
   final Offset end;
 }
 
-enum _RobotKind { mockMobile, pinky, omxManipulator, mockHumanoid }
+class _MapScenarioConfig {
+  const _MapScenarioConfig({
+    required this.robotCount,
+    required this.homeCount,
+    required this.chargerCount,
+    required this.ambientPickupCount,
+    required this.chilledPickupCount,
+    required this.frozenPickupCount,
+    required this.dropoffCount,
+    required this.returnHome,
+    required this.singleLoadPerTrip,
+  });
+
+  final int robotCount;
+  final int homeCount;
+  final int chargerCount;
+  final int ambientPickupCount;
+  final int chilledPickupCount;
+  final int frozenPickupCount;
+  final int dropoffCount;
+  final bool returnHome;
+  final bool singleLoadPerTrip;
+
+  int get requiredWaypointCount =>
+      homeCount +
+      homeCount +
+      chargerCount +
+      ambientPickupCount +
+      chilledPickupCount +
+      frozenPickupCount +
+      dropoffCount;
+}
+
+class _ScenarioWaypointAssignment {
+  const _ScenarioWaypointAssignment({
+    required this.point,
+    required this.category,
+    required this.name,
+  });
+
+  final Offset point;
+  final String category;
+  final String name;
+}
+
+enum _RobotKind { mockMobile, pinky, omxManipulator, mockHumanoid, human }
 
 extension on _RobotKind {
   String get label => switch (this) {
@@ -147,6 +211,7 @@ extension on _RobotKind {
     _RobotKind.pinky => 'Pinky',
     _RobotKind.omxManipulator => 'OMX Manipulator',
     _RobotKind.mockHumanoid => 'Mock 휴머노이드',
+    _RobotKind.human => 'Human',
   };
 
   bool get isMobile => this != _RobotKind.omxManipulator;
@@ -160,12 +225,16 @@ class _MockRobot {
     required this.position,
     required this.color,
     required this.kind,
+    this.imageBytes,
+    this.image,
   });
 
   final String id;
   Offset position;
   final Color color;
   final _RobotKind kind;
+  final Uint8List? imageBytes;
+  final ui.Image? image;
   Offset? previousWaypoint;
   Offset? targetWaypoint;
   bool moving = false;
@@ -174,9 +243,42 @@ class _MockRobot {
   String? activeTaskId;
 }
 
+class _RobotSpawnSelection {
+  const _RobotSpawnSelection({
+    required this.name,
+    required this.position,
+    required this.kind,
+    this.imageBytes,
+    this.image,
+  });
+
+  final String name;
+  final Offset position;
+  final _RobotKind kind;
+  final Uint8List? imageBytes;
+  final ui.Image? image;
+}
+
 enum _MockTaskStatus { queued, active, completed, cancelled, failed }
 
-enum _TaskStepType { navigate, armLoad, wait }
+enum _TaskStepType { navigate, returnHome, armLoad, wait }
+
+extension on _TaskStepType {
+  bool get isMovement =>
+      this == _TaskStepType.navigate || this == _TaskStepType.returnHome;
+}
+
+enum _OrderTrigger { manual, any, ambient, chilled, frozen }
+
+extension on _OrderTrigger {
+  String get label => switch (this) {
+    _OrderTrigger.manual => '수동 실행',
+    _OrderTrigger.any => '모든 주문',
+    _OrderTrigger.ambient => '상온 주문',
+    _OrderTrigger.chilled => '냉장 주문',
+    _OrderTrigger.frozen => '냉동 주문',
+  };
+}
 
 enum _TaskStepStatus { pending, active, completed, failed, cancelled }
 
@@ -189,8 +291,8 @@ class _MockTaskStep {
   });
 
   final _TaskStepType type;
-  final Offset? destination;
-  final String? destinationName;
+  Offset? destination;
+  String? destinationName;
   final double durationSeconds;
   _TaskStepStatus status = _TaskStepStatus.pending;
   double remainingSeconds = 0;
@@ -198,6 +300,7 @@ class _MockTaskStep {
 
   String get label => switch (type) {
     _TaskStepType.navigate => 'Pinky 이동 · $destinationName',
+    _TaskStepType.returnHome => '홈 복귀(자동) · ${destinationName ?? '배정 대기'}',
     _TaskStepType.armLoad => 'OMX-AI 픽업/적재',
     _TaskStepType.wait => '대기 · ${durationSeconds.toStringAsFixed(0)}초',
   };
@@ -211,17 +314,22 @@ class _MockTask {
     required this.type,
     required this.robotId,
     required this.steps,
-  });
+    this.trigger = _OrderTrigger.manual,
+    this.orderId,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
 
   final String id;
-  final String name;
-  final String description;
+  String name;
+  String description;
   final String type;
-  final String robotId;
+  String robotId;
   final List<_MockTaskStep> steps;
+  _OrderTrigger trigger;
+  final String? orderId;
   int currentStepIndex = 0;
   _MockTaskStatus status = _MockTaskStatus.queued;
-  final DateTime createdAt = DateTime.now();
+  final DateTime createdAt;
   DateTime? completedAt;
 
   _MockTaskStep? get currentStep =>
@@ -229,11 +337,11 @@ class _MockTask {
 }
 
 class _TaskStepDraft {
-  _TaskStepDraft(this.type, {this.destination});
+  _TaskStepDraft(this.type, {this.destination, this.durationSeconds = 3});
 
   _TaskStepType type;
   Offset? destination;
-  double durationSeconds = 3;
+  double durationSeconds;
 }
 
 class _TaskEditorResult {
@@ -242,12 +350,16 @@ class _TaskEditorResult {
     required this.description,
     required this.robotId,
     required this.steps,
+    required this.startImmediately,
+    required this.trigger,
   });
 
   final String name;
   final String description;
   final String robotId;
   final List<_TaskStepDraft> steps;
+  final bool startImmediately;
+  final _OrderTrigger trigger;
 }
 
 class ControlDashboard extends StatefulWidget {
@@ -260,6 +372,8 @@ class ControlDashboard extends StatefulWidget {
 class _ControlDashboardState extends State<ControlDashboard> {
   final TransformationController _mapTransform = TransformationController();
   UploadedDrawing? _drawing;
+  String? _mapNameOverride;
+  String? _projectFileName;
   MapStage _stage = MapStage.upload;
   bool _isPicking = false;
   bool _isDeployed = false;
@@ -285,6 +399,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
   List<(Offset, Offset)> _frozenAutoWalls = [];
   List<(Offset, Offset)> _recommendedLanes = [];
   final Map<(Offset, Offset), String> _laneDirections = {};
+  final Map<(Offset, Offset), double> _laneSpeedLimits = {};
+  final Map<(Offset, Offset), String> _laneOrientations = {};
+  final Map<(Offset, Offset), String> _laneMutexGroups = {};
+  double _robotWidthMeters = .6;
+  double _turningRadiusMeters = .3;
+  double _localizationMarginMeters = .1;
+  String? _mapScenarioSummary;
+  bool _scenarioUsesSeparateRoutes = true;
+  List<Offset> _scenarioHoldingAnchors = const [];
   final List<Offset> _laneWaypoints = [];
   final Map<Offset, String> _waypointTypes = {};
   final Map<Offset, String> _waypointNames = {};
@@ -297,15 +420,287 @@ class _ControlDashboardState extends State<ControlDashboard> {
   int _selectedMenu = 0;
   final List<_MockRobot> _mockRobots = [];
   final List<_MockTask> _mockTasks = [];
+  final Map<Offset, String> _homeReservations = {};
+  Future<void> _taskSaveChain = Future<void>.value();
   Timer? _mockRobotTimer;
+  Timer? _orderDispatchTimer;
+  bool _isPollingOrders = false;
   DeployedMapData? _robotDeployedMap;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(
+      _loadMockTasks().whenComplete(() {
+        if (!mounted) return;
+        unawaited(_pollPendingOrders());
+        _orderDispatchTimer = Timer.periodic(
+          const Duration(seconds: 5),
+          (_) => unawaited(_pollPendingOrders()),
+        );
+      }),
+    );
+  }
+
+  bool _triggerMatches(_OrderTrigger trigger, Set<String> zones) =>
+      trigger == _OrderTrigger.any || zones.contains(trigger.name);
+
+  Future<void> _pollPendingOrders() async {
+    if (_isPollingOrders || !mounted) return;
+    _isPollingOrders = true;
+    try {
+      final raw = jsonDecode(await loadPendingOrders());
+      if (raw is! List) return;
+      for (final value in raw) {
+        if (value is! Map<String, dynamic>) continue;
+        final orderId = value['id'] as String?;
+        if (orderId == null || orderId.isEmpty) continue;
+        final existing = _mockTasks
+            .where((task) => task.orderId == orderId)
+            .firstOrNull;
+        if (existing != null) {
+          await markOrderDispatched(orderId, existing.id);
+          continue;
+        }
+        final zones = (value['zones'] as List<dynamic>? ?? const ['ambient'])
+            .whereType<String>()
+            .toSet();
+        final template = _mockTasks
+            .where(
+              (task) =>
+                  task.orderId == null &&
+                  task.trigger != _OrderTrigger.manual &&
+                  _triggerMatches(task.trigger, zones),
+            )
+            .firstOrNull;
+        if (template == null) continue;
+        final available =
+            _mockRobots
+                .where(
+                  (robot) => robot.kind.canCarry && robot.activeTaskId == null,
+                )
+                .toList()
+              ..sort((a, b) => b.battery.compareTo(a.battery));
+        final robot = available.firstOrNull;
+        final task = _MockTask(
+          id: _nextTaskId(),
+          name: '${template.name} · 주문 $orderId',
+          description:
+              '${template.description}${template.description.isEmpty ? '' : '\n'}'
+              '자동 생성 주문: $orderId · 고객: ${value['customer'] ?? '-'}',
+          type: template.type,
+          robotId: robot?.id ?? '__auto__',
+          orderId: orderId,
+          steps: [
+            for (final step in template.steps)
+              _MockTaskStep(
+                type: step.type,
+                destination: step.destination,
+                destinationName: step.destinationName,
+                durationSeconds: step.durationSeconds,
+              ),
+          ],
+        );
+        setState(() {
+          task.status = robot == null
+              ? _MockTaskStatus.queued
+              : _MockTaskStatus.active;
+          _mockTasks.insert(0, task);
+          if (robot != null) {
+            robot.activeTaskId = task.id;
+            _startTaskStep(robot, task);
+          }
+        });
+        await _saveMockTasks();
+        await markOrderDispatched(orderId, task.id);
+      }
+      _startQueuedOrderTasks();
+      if (_processingWarning?.startsWith('[주문 자동 분류]') == true && mounted) {
+        setState(() => _processingWarning = null);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _processingWarning = '[주문 자동 분류] MySQL 주문 처리 실패: $error');
+    } finally {
+      _isPollingOrders = false;
+    }
+  }
+
+  void _startQueuedOrderTasks() {
+    final available =
+        _mockRobots
+            .where((robot) => robot.kind.canCarry && robot.activeTaskId == null)
+            .toList()
+          ..sort((a, b) => b.battery.compareTo(a.battery));
+    final queued = _mockTasks
+        .where(
+          (task) =>
+              task.orderId != null && task.status == _MockTaskStatus.queued,
+        )
+        .toList();
+    var changed = false;
+    while (available.isNotEmpty && queued.isNotEmpty) {
+      final robot = available.removeAt(0);
+      final task = queued.removeAt(0);
+      task
+        ..robotId = robot.id
+        ..status = _MockTaskStatus.active;
+      robot.activeTaskId = task.id;
+      _startTaskStep(robot, task);
+      changed = true;
+    }
+    if (changed) {
+      setState(() {});
+      unawaited(_saveMockTasks());
+      _startMockRobotTimer();
+    }
+  }
+
+  Map<String, Object?> _encodeTask(_MockTask task) => {
+    'id': task.id,
+    'name': task.name,
+    'description': task.description,
+    'type': task.type,
+    'robotId': task.robotId,
+    'status': task.status.name,
+    'trigger': task.trigger.name,
+    'orderId': task.orderId,
+    'currentStepIndex': task.currentStepIndex,
+    'createdAt': task.createdAt.toIso8601String(),
+    'completedAt': task.completedAt?.toIso8601String(),
+    'steps': [
+      for (final step in task.steps)
+        {
+          'type': step.type.name,
+          'destination': step.destination == null
+              ? null
+              : {'x': step.destination!.dx, 'y': step.destination!.dy},
+          'destinationName': step.destinationName,
+          'durationSeconds': step.durationSeconds,
+          'status': step.status.name,
+          'remainingSeconds': step.remainingSeconds,
+          'failureReason': step.failureReason,
+        },
+    ],
+  };
+
+  _MockTask _decodeTask(Map<String, dynamic> data) {
+    final savedStatus = _MockTaskStatus.values.byName(
+      data['status'] as String? ?? _MockTaskStatus.queued.name,
+    );
+    final task = _MockTask(
+      id: data['id'] as String,
+      name: data['name'] as String? ?? '저장된 작업',
+      description: data['description'] as String? ?? '',
+      type: data['type'] as String? ?? '연속 작업',
+      robotId: data['robotId'] as String? ?? '__auto__',
+      trigger: _OrderTrigger.values.byName(
+        data['trigger'] as String? ?? _OrderTrigger.manual.name,
+      ),
+      orderId: data['orderId'] as String?,
+      createdAt:
+          DateTime.tryParse(data['createdAt'] as String? ?? '') ??
+          DateTime.now(),
+      steps: [
+        for (final raw in data['steps'] as List<dynamic>? ?? const [])
+          if (raw is Map<String, dynamic>)
+            _MockTaskStep(
+                type: _TaskStepType.values.byName(raw['type'] as String),
+                destination: switch (raw['destination']) {
+                  {'x': final num x, 'y': final num y} => Offset(
+                    x.toDouble(),
+                    y.toDouble(),
+                  ),
+                  _ => null,
+                },
+                destinationName: raw['destinationName'] as String?,
+                durationSeconds:
+                    (raw['durationSeconds'] as num?)?.toDouble() ?? 0,
+              )
+              ..status = _TaskStepStatus.values.byName(
+                raw['status'] as String? ?? _TaskStepStatus.pending.name,
+              )
+              ..remainingSeconds =
+                  (raw['remainingSeconds'] as num?)?.toDouble() ?? 0
+              ..failureReason = raw['failureReason'] as String?,
+      ],
+    );
+    task.status = savedStatus == _MockTaskStatus.active
+        ? _MockTaskStatus.queued
+        : savedStatus;
+    task.currentStepIndex = (data['currentStepIndex'] as num?)?.toInt() ?? 0;
+    if (savedStatus == _MockTaskStatus.active ||
+        savedStatus == _MockTaskStatus.queued) {
+      task.currentStepIndex = 0;
+      for (final step in task.steps) {
+        step
+          ..status = _TaskStepStatus.pending
+          ..remainingSeconds = 0
+          ..failureReason = null;
+      }
+    }
+    task.completedAt = DateTime.tryParse(data['completedAt'] as String? ?? '');
+    return task;
+  }
+
+  Future<void> _loadMockTasks() async {
+    try {
+      final contents = await loadSavedTasks();
+      if (contents == null || contents.trim().isEmpty) return;
+      final data = jsonDecode(contents);
+      if (data is! List) return;
+      final loaded = <_MockTask>[];
+      for (final raw in data) {
+        if (raw is! Map<String, dynamic>) continue;
+        try {
+          loaded.add(_decodeTask(raw));
+        } catch (_) {
+          // 손상된 단일 작업은 건너뛰고 나머지 목록을 복원한다.
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        final currentIds = _mockTasks.map((task) => task.id).toSet();
+        _mockTasks.addAll(
+          loaded.where((task) => !currentIds.contains(task.id)),
+        );
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _processingWarning = '[작업 불러오기] 저장된 작업을 읽지 못했습니다: $error');
+    }
+  }
+
+  Future<void> _saveMockTasks() {
+    final contents = const JsonEncoder.withIndent(
+      '  ',
+    ).convert(_mockTasks.map(_encodeTask).toList());
+    _taskSaveChain = _taskSaveChain.then((_) => saveTasks(contents)).catchError(
+      (Object error) {
+        if (!mounted) return;
+        setState(
+          () => _processingWarning = '[작업 저장] 작업 목록을 저장하지 못했습니다: $error',
+        );
+      },
+    );
+    return _taskSaveChain;
+  }
+
+  String _nextTaskId() {
+    var highest = 0;
+    for (final task in _mockTasks) {
+      final number = int.tryParse(task.id.replaceFirst('TASK-', ''));
+      if (number != null) highest = math.max(highest, number);
+    }
+    return 'TASK-${(highest + 1).toString().padLeft(3, '0')}';
+  }
 
   void _showProcessingWarning(String operation, Object error) {
     if (!mounted) return;
     final message = [
-      '[$operation] 맵 처리 중 문제가 발생했습니다.',
+      '[$operation] 처리 중 문제가 발생했습니다.',
       '원인: $error',
-      '도면과 설정값을 확인한 뒤 다시 시도해 주세요.',
+      '입력값과 설정을 확인한 뒤 다시 시도해 주세요.',
     ].join('\n');
     setState(() => _processingWarning = message);
   }
@@ -332,6 +727,64 @@ class _ControlDashboardState extends State<ControlDashboard> {
           .length;
       if (zeroLengthLaneCount > 0) {
         warnings.add('시작점과 끝점이 같은 Lane이 $zeroLengthLaneCount개 있습니다.');
+      }
+      var duplicateLaneCount = 0;
+      for (var i = 0; i < _recommendedLanes.length; i++) {
+        for (var j = i + 1; j < _recommendedLanes.length; j++) {
+          final first = _recommendedLanes[i];
+          final second = _recommendedLanes[j];
+          final sameDirection =
+              (first.$1 - second.$1).distance <= .01 &&
+              (first.$2 - second.$2).distance <= .01;
+          final reverseDirection =
+              (first.$1 - second.$2).distance <= .01 &&
+              (first.$2 - second.$1).distance <= .01;
+          if (sameDirection || reverseDirection) duplicateLaneCount++;
+        }
+      }
+      if (duplicateLaneCount > 0) {
+        warnings.add(
+          '동일한 Waypoint 쌍을 연결하는 중복 Lane이 $duplicateLaneCount개 있습니다.',
+        );
+      }
+      final wallCrossingCount = _recommendedLanes
+          .where((lane) => _crossesWall(lane.$1, lane.$2))
+          .length;
+      if (wallCrossingCount > 0) {
+        warnings.add('벽을 통과하는 Lane이 $wallCrossingCount개 있습니다.');
+      }
+      final metersPerPixel = _metersPerPixel;
+      if (metersPerPixel != null) {
+        final minimumLaneLengthMeters = math.max(.3, _turningRadiusMeters * 2);
+        final minimumWallClearanceMeters =
+            _robotWidthMeters / 2 + _localizationMarginMeters;
+        final shortLaneCount = _recommendedLanes
+            .where(
+              (lane) =>
+                  (lane.$1 - lane.$2).distance * metersPerPixel <
+                  minimumLaneLengthMeters,
+            )
+            .length;
+        if (shortLaneCount > 0) {
+          warnings.add(
+            '길이가 ${minimumLaneLengthMeters}m보다 짧아 회전·정지 여유가 부족한 Lane이 $shortLaneCount개 있습니다.',
+          );
+        }
+        final walls = _visibleWallSegments();
+        final narrowLaneCount = _recommendedLanes.where((lane) {
+          if (walls.isEmpty) return false;
+          final clearancePixels = walls
+              .map(
+                (wall) => _segmentDistance(lane.$1, lane.$2, wall.$1, wall.$2),
+              )
+              .reduce(math.min);
+          return clearancePixels * metersPerPixel < minimumWallClearanceMeters;
+        }).length;
+        if (narrowLaneCount > 0) {
+          warnings.add(
+            '벽과의 중심선 여유가 ${minimumWallClearanceMeters}m보다 작은 Lane이 $narrowLaneCount개 있습니다. 로봇 폭을 확인하세요.',
+          );
+        }
       }
       final adjacency = <Offset, Set<Offset>>{};
       for (final lane in _recommendedLanes) {
@@ -361,6 +814,84 @@ class _ControlDashboardState extends State<ControlDashboard> {
           '${names.isEmpty ? '' : ': ${names.join(', ')}'}.',
         );
       }
+      final directed = <Offset, Set<Offset>>{
+        for (final point in _laneWaypoints)
+          if (_waypointTypes[point] != '설비') point: <Offset>{},
+      };
+      final reversed = <Offset, Set<Offset>>{
+        for (final point in _laneWaypoints)
+          if (_waypointTypes[point] != '설비') point: <Offset>{},
+      };
+      void addDirected(Offset from, Offset to) {
+        directed.putIfAbsent(from, () => <Offset>{}).add(to);
+        directed.putIfAbsent(to, () => <Offset>{});
+        reversed.putIfAbsent(to, () => <Offset>{}).add(from);
+        reversed.putIfAbsent(from, () => <Offset>{});
+      }
+
+      for (final lane in _recommendedLanes) {
+        final direction = _laneDirections[lane] ?? '양방향';
+        if (direction != '역방향') addDirected(lane.$1, lane.$2);
+        if (direction != '정방향') addDirected(lane.$2, lane.$1);
+      }
+      Set<Offset> reachable(Map<Offset, Set<Offset>> graph, Offset start) {
+        final visited = <Offset>{};
+        final pending = <Offset>[start];
+        while (pending.isNotEmpty) {
+          final point = pending.removeLast();
+          if (!visited.add(point)) continue;
+          pending.addAll(
+            (graph[point] ?? const <Offset>{}).where(
+              (next) => !visited.contains(next),
+            ),
+          );
+        }
+        return visited;
+      }
+
+      if (directed.isNotEmpty) {
+        final root = directed.keys.first;
+        final unreachable = directed.keys.toSet()
+          ..removeAll(reachable(directed, root));
+        final noReturnPath = reversed.keys.toSet()
+          ..removeAll(reachable(reversed, root));
+        if (unreachable.isNotEmpty || noReturnPath.isNotEmpty) {
+          warnings.add(
+            '단방향 규칙 때문에 모든 Waypoint를 왕복할 수 없습니다. '
+            '(진입 불가 ${unreachable.length}개, 복귀 불가 ${noReturnPath.length}개)',
+          );
+        }
+      }
+    }
+    final connectedPoints = <Offset>{
+      for (final lane in _recommendedLanes) ...[lane.$1, lane.$2],
+    };
+    final orphanCount = _laneWaypoints
+        .where(
+          (point) =>
+              _waypointTypes[point] != '설비' &&
+              !connectedPoints.any(
+                (connected) => (connected - point).distance <= .01,
+              ),
+        )
+        .length;
+    if (orphanCount > 0) {
+      warnings.add('어떤 Lane에도 연결되지 않은 Waypoint가 $orphanCount개 있습니다.');
+    }
+    final connectedEquipmentCount = _laneWaypoints
+        .where(
+          (point) =>
+              _waypointTypes[point] == '설비' &&
+              connectedPoints.any(
+                (connected) => (connected - point).distance <= .01,
+              ),
+        )
+        .length;
+    if (connectedEquipmentCount > 0) {
+      warnings.add(
+        '고정 설비 Waypoint가 Lane에 연결되어 있습니다: $connectedEquipmentCount개. '
+        '이동 로봇용 픽업 Waypoint를 별도로 만드세요.',
+      );
     }
     final names = _waypointNames.values
         .map((name) => name.trim())
@@ -374,6 +905,1164 @@ class _ControlDashboardState extends State<ControlDashboard> {
       warnings.add('중복된 Waypoint 이름이 있습니다: ${duplicateNames.join(', ')}.');
     }
     return warnings;
+  }
+
+  Future<void> _showRobotSafetySettings() async {
+    final widthController = TextEditingController(
+      text: _robotWidthMeters.toStringAsFixed(2),
+    );
+    final radiusController = TextEditingController(
+      text: _turningRadiusMeters.toStringAsFixed(2),
+    );
+    final marginController = TextEditingController(
+      text: _localizationMarginMeters.toStringAsFixed(2),
+    );
+    final values = await showDialog<(double, double, double)>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.precision_manufacturing_outlined, size: 34),
+        title: const Text('로봇 주행 안전 기준'),
+        content: SizedBox(
+          width: 390,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: widthController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: '로봇 최대 폭 (m)',
+                    helperText:
+                        '좌우로 가장 넓은 실제 폭입니다. 적재물·돌출 센서·보호 범퍼를 포함한 최대값을 입력하세요.',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: radiusController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: '최소 회전 반경 (m)',
+                    helperText:
+                        '로봇이 주행하며 회전할 때 필요한 최소 반경입니다. 제자리 회전이 가능하면 0을 입력할 수 있습니다.',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: marginController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: '위치 오차·안전 여유 (m)',
+                    helperText:
+                        'Localization 오차, 제어 편차와 벽 충돌 방지를 위해 로봇 외곽에 추가할 거리입니다.',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final width = double.tryParse(widthController.text.trim());
+              final radius = double.tryParse(radiusController.text.trim());
+              final margin = double.tryParse(marginController.text.trim());
+              if (width == null ||
+                  radius == null ||
+                  margin == null ||
+                  width <= 0 ||
+                  radius < 0 ||
+                  margin < 0) {
+                return;
+              }
+              Navigator.pop(dialogContext, (width, radius, margin));
+            },
+            child: const Text('기준 저장'),
+          ),
+        ],
+      ),
+    );
+    widthController.dispose();
+    radiusController.dispose();
+    marginController.dispose();
+    if (values == null || !mounted) return;
+    _recordUndo();
+    setState(() {
+      _robotWidthMeters = values.$1;
+      _turningRadiusMeters = values.$2;
+      _localizationMarginMeters = values.$3;
+      _isDeployed = false;
+    });
+    await _showValidationDialog();
+  }
+
+  List<_ScenarioWaypointAssignment>? _buildScenarioAssignments(
+    _MapScenarioConfig config,
+  ) {
+    final connected = <Offset>{
+      for (final lane in _recommendedLanes) ...[lane.$1, lane.$2],
+    };
+    final candidates = _laneWaypoints
+        .where(
+          (point) =>
+              connected.contains(point) &&
+              _isInsideFloor(point) &&
+              (_waypointTypes[point] ?? '일반') == '일반' &&
+              (_waypointNames[point] ?? '').trim().isEmpty,
+        )
+        .toList();
+    int existingCount(String category, {String? namePrefix}) =>
+        _laneWaypoints.where((point) {
+          if (_waypointTypes[point] != category) return false;
+          if (namePrefix == null) return true;
+          return (_waypointNames[point] ?? '').trim().startsWith(namePrefix);
+        }).length;
+    final homeNeeded = math.max(0, config.homeCount - existingCount('홈'));
+    final chargerNeeded = math.max(
+      0,
+      config.chargerCount - existingCount('충전'),
+    );
+    final holdingNeeded = math.max(0, config.homeCount - existingCount('대기'));
+    final ambientNeeded = math.max(
+      0,
+      config.ambientPickupCount - existingCount('픽업', namePrefix: '상온'),
+    );
+    final chilledNeeded = math.max(
+      0,
+      config.chilledPickupCount - existingCount('픽업', namePrefix: '냉장'),
+    );
+    final frozenNeeded = math.max(
+      0,
+      config.frozenPickupCount - existingCount('픽업', namePrefix: '냉동'),
+    );
+    final dropoffNeeded = math.max(
+      0,
+      config.dropoffCount - existingCount('드랍오프'),
+    );
+    final neededCount =
+        homeNeeded +
+        holdingNeeded +
+        chargerNeeded +
+        ambientNeeded +
+        chilledNeeded +
+        frozenNeeded +
+        dropoffNeeded;
+    if (candidates.length < neededCount) return null;
+
+    final occupied = _laneWaypoints
+        .where((point) => (_waypointTypes[point] ?? '일반') != '일반')
+        .toList();
+    final selected = <Offset>[];
+    Offset takeSpreadPoint() {
+      if (selected.isEmpty && occupied.isEmpty) {
+        candidates.sort((a, b) {
+          final horizontal = a.dx.compareTo(b.dx);
+          return horizontal != 0 ? horizontal : a.dy.compareTo(b.dy);
+        });
+        return candidates.removeAt(0);
+      }
+      final anchors = [...occupied, ...selected];
+      var best = candidates.first;
+      var bestDistance = -1.0;
+      for (final candidate in candidates) {
+        final nearest = anchors
+            .map((anchor) => (candidate - anchor).distance)
+            .reduce(math.min);
+        if (nearest > bestDistance) {
+          best = candidate;
+          bestDistance = nearest;
+        }
+      }
+      candidates.remove(best);
+      return best;
+    }
+
+    Offset takeNearestPoint(List<Offset> anchors) {
+      if (anchors.isEmpty) return takeSpreadPoint();
+      var best = candidates.first;
+      var bestDistance = double.infinity;
+      for (final candidate in candidates) {
+        final distance = anchors
+            .map((anchor) => (candidate - anchor).distance)
+            .reduce(math.min);
+        if (distance < bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+      candidates.remove(best);
+      return best;
+    }
+
+    final usedNames = _waypointNames.values
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .toSet();
+    String nextName(String prefix) {
+      var number = 1;
+      while (usedNames.contains('$prefix$number')) {
+        number++;
+      }
+      final name = '$prefix$number';
+      usedNames.add(name);
+      return name;
+    }
+
+    final assignments = <_ScenarioWaypointAssignment>[];
+    void assign(
+      int count,
+      String category,
+      String prefix, {
+      List<Offset> near = const [],
+    }) {
+      for (var index = 0; index < count; index++) {
+        final point = near.isEmpty
+            ? takeSpreadPoint()
+            : takeNearestPoint([near[index % near.length]]);
+        selected.add(point);
+        assignments.add(
+          _ScenarioWaypointAssignment(
+            point: point,
+            category: category,
+            name: nextName(prefix),
+          ),
+        );
+      }
+    }
+
+    assign(dropoffNeeded, '드랍오프', '드랍오프');
+    final dropoffAnchors = <Offset>[
+      ..._laneWaypoints.where((point) => _waypointTypes[point] == '드랍오프'),
+      ...assignments
+          .where((assignment) => assignment.category == '드랍오프')
+          .map((assignment) => assignment.point),
+    ];
+    assign(homeNeeded, '홈', '홈', near: dropoffAnchors);
+    assign(
+      holdingNeeded,
+      '대기',
+      '대기',
+      near: _scenarioUsesSeparateRoutes ? const [] : _scenarioHoldingAnchors,
+    );
+    assign(chargerNeeded, '충전', '충전');
+    assign(ambientNeeded, '픽업', '상온픽업');
+    assign(chilledNeeded, '픽업', '냉장픽업');
+    assign(frozenNeeded, '픽업', '냉동픽업');
+    return assignments;
+  }
+
+  String? _categoryInferredFromName(String name) {
+    final normalized = name.trim().toLowerCase().replaceAll(
+      RegExp(r'[ _-]'),
+      '',
+    );
+    if (normalized.isEmpty) return null;
+    if (RegExp(r'(충전|charger|charging|charge|dock)').hasMatch(normalized)) {
+      return '충전';
+    }
+    if (RegExp(r'(홈|home)').hasMatch(normalized)) return '홈';
+    if (RegExp(r'(드랍|하차|dropoff|drop)').hasMatch(normalized)) {
+      return '드랍오프';
+    }
+    if (RegExp(r'(픽업|상차|pickup|pick)').hasMatch(normalized)) return '픽업';
+    if (RegExp(r'(대기|parking|holding|wait)').hasMatch(normalized)) return '대기';
+    return null;
+  }
+
+  int _inferWaypointTypesFromNames() {
+    final updates = <Offset, String>{};
+    for (final point in _laneWaypoints) {
+      if (_waypointTypes[point] == '설비') continue;
+      final inferred = _categoryInferredFromName(_waypointNames[point] ?? '');
+      if (inferred != null && inferred != _waypointTypes[point]) {
+        updates[point] = inferred;
+      }
+    }
+    if (updates.isEmpty) return 0;
+    _recordUndo();
+    setState(() {
+      _waypointTypes.addAll(updates);
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    return updates.length;
+  }
+
+  bool _isInsideFloor(Offset point) =>
+      insidePolygon(point, _floorOutline());
+
+  bool _floorSupportsTwoRobotRoutes() {
+    final outline = _floorOutline();
+    if (outline.length < 3) return false;
+    final bounds = _pointsBounds(outline);
+    final metersPerPixel = _metersPerPixel;
+    final clearancePixels = metersPerPixel == null || metersPerPixel <= 0
+        ? math.min(bounds.width, bounds.height) * .08
+        : (_robotWidthMeters / 2 + _localizationMarginMeters) / metersPerPixel;
+    return bounds.height >= math.max(clearancePixels * 4, 48);
+  }
+
+  ({
+    int waypointCount,
+    int laneCount,
+    int doubledCorridors,
+    List<String> unlinked,
+  })
+  _ensureScenarioDraftNetwork(_MapScenarioConfig config) {
+    const empty = (
+      waypointCount: 0,
+      laneCount: 0,
+      doubledCorridors: 0,
+      unlinked: <String>[],
+    );
+    final connected = <Offset>{
+      for (final lane in _recommendedLanes) ...[lane.$1, lane.$2],
+    };
+    final availableCount = _laneWaypoints.where((point) {
+      return connected.contains(point) &&
+          (_waypointTypes[point] ?? '일반') == '일반' &&
+          (_waypointNames[point] ?? '').trim().isEmpty;
+    }).length;
+    final deficit = math.max(0, config.requiredWaypointCount - availableCount);
+
+    final floorOutline = _floorOutline();
+    if (floorOutline.length < 3) return empty;
+    final bounds = _pointsBounds(floorOutline);
+    final metersPerPixel = _metersPerPixel;
+    final requiredClearanceMeters =
+        _robotWidthMeters / 2 + _localizationMarginMeters;
+    final clearancePixels = metersPerPixel == null || metersPerPixel <= 0
+        ? math.min(bounds.width, bounds.height) * .08
+        : requiredClearanceMeters / metersPerPixel;
+    final draftClearancePixels = math.max(
+      math.max(clearancePixels, _laneWallClearancePixels),
+      12.0,
+    );
+    final pointCount = math.max(
+      math.max(deficit, config.requiredWaypointCount),
+      8,
+    );
+
+    // Routes are planned on a clearance-aware raster of the floor rather than
+    // inset from the Floor outline. The outline is the convex hull of the Wall
+    // vertices, so a row inset from it can still end up closer to a wall than
+    // the robot may pass, which used to abort the whole draft.
+    final planner = ScenarioRoutePlanner(
+      walls: _visibleWallSegments(),
+      floorOutline: floorOutline,
+      floorMaskPoints: _floorMask?.points ?? const [],
+      clearancePixels: draftClearancePixels,
+    );
+    final plan = planner.planRoutes(waypointTarget: pointCount);
+    if (plan == null || plan.outbound.length < 2) {
+      _showProcessingWarning(
+        '시나리오 맵 자동 완성',
+        '벽에서 ${draftClearancePixels.toStringAsFixed(1)}px'
+            '${metersPerPixel == null || metersPerPixel <= 0 ? '' : '(로봇 폭 절반 + 안전 여유 ${requiredClearanceMeters.toStringAsFixed(2)}m)'}'
+            ' 이상 떨어져 지나갈 수 있는 통로를 도면에서 찾지 못했습니다.\n'
+            '도면에서 가장 여유가 큰 지점도 벽까지 '
+            '${planner.bestClearancePixels.toStringAsFixed(1)}px 입니다.\n'
+            '${metersPerPixel == null || metersPerPixel <= 0 ? '길이 기준(축척)을 먼저 측정하면 실제 로봇 크기로 통로를 판단합니다.' : '로봇 폭과 안전 여유를 줄이거나 길이 기준(축척) 측정을 다시 확인해 주세요.'}',
+      );
+      return empty;
+    }
+
+    final generated = <Offset>[];
+    final generatedLanes = <(Offset, Offset)>[];
+    final draftDirections = <(Offset, Offset), String>{};
+
+    Offset canonical(Offset point) {
+      for (final existing in generated) {
+        if ((existing - point).distance <= .01) return existing;
+      }
+      return point;
+    }
+
+    void addLaneChain(
+      List<Offset> chain,
+      String direction,
+      List<Offset> anchors,
+    ) {
+      final resolved = <Offset>[];
+      for (final raw in chain) {
+        Offset? anchor;
+        for (final candidate in anchors) {
+          if ((candidate - raw).distance <= .01) anchor = candidate;
+        }
+        final point = anchor ?? canonical(raw);
+        if (resolved.isNotEmpty &&
+            (resolved.last - point).distance <= .01) {
+          continue;
+        }
+        resolved.add(point);
+        if (anchor == null &&
+            !generated.any((existing) => (existing - point).distance <= .01)) {
+          generated.add(point);
+        }
+      }
+      for (var index = 0; index < resolved.length - 1; index++) {
+        final lane = (resolved[index], resolved[index + 1]);
+        if (generatedLanes.any(
+          (existing) =>
+              ((existing.$1 - lane.$1).distance <= .01 &&
+                  (existing.$2 - lane.$2).distance <= .01) ||
+              ((existing.$1 - lane.$2).distance <= .01 &&
+                  (existing.$2 - lane.$1).distance <= .01),
+        )) {
+          continue;
+        }
+        generatedLanes.add(lane);
+        draftDirections[lane] = direction;
+      }
+    }
+
+    // Wherever a corridor is wide enough for two robots to keep their safety
+    // distance side by side, it is drawn as a separate outbound and return
+    // one-way lane so robots never meet head-on. Narrow stretches stay a
+    // single shared lane.
+    var doubledCorridors = 0;
+    bool addDraftPath(
+      Offset start,
+      Offset end,
+      String direction, {
+      List<Offset> existingAnchors = const [],
+      double? waypointSpacing,
+    }) {
+      final path = planner.planPath(start, end);
+      if (path == null) return false;
+      final route = [start, ...path.sublist(1, path.length - 1), end];
+      for (final section in planner.splitCorridor(route)) {
+        if (section.isDoubled) doubledCorridors++;
+        for (final chain in section.chains) {
+          addLaneChain(
+            waypointSpacing == null
+                ? chain
+                : planner.densify(chain, waypointSpacing),
+            section.isDoubled ? '정방향' : direction,
+            existingAnchors,
+          );
+        }
+      }
+      return true;
+    }
+
+    // Each row is drafted as one corridor so a wide row can be split over its
+    // whole length instead of merging in and out at every waypoint.
+    double rowSpacing(List<Offset> row) =>
+        (row.last - row.first).distance / math.max(1, row.length - 1);
+    final routeDirection = plan.separateRoutes ? '정방향' : '양방향';
+    final corridors = <(Offset, Offset, double?)>[
+      (plan.outbound.first, plan.outbound.last, rowSpacing(plan.outbound)),
+      if (plan.separateRoutes) ...[
+        (plan.outbound.last, plan.returnRoute.first, null),
+        (
+          plan.returnRoute.first,
+          plan.returnRoute.last,
+          rowSpacing(plan.returnRoute),
+        ),
+        (plan.returnRoute.last, plan.outbound.first, null),
+      ],
+    ];
+    for (final (start, end, spacing) in corridors) {
+      if (addDraftPath(
+        start,
+        end,
+        routeDirection,
+        waypointSpacing: spacing,
+      )) {
+        continue;
+      }
+      _showProcessingWarning(
+        '시나리오 맵 자동 완성',
+        '벽과 로봇 안전거리를 지키는 연속 경로를 만들 수 없어 초안을 적용하지 않았습니다.\n'
+            '실패 지점: '
+            '(${start.dx.toStringAsFixed(1)}, ${start.dy.toStringAsFixed(1)}) → '
+            '(${end.dx.toStringAsFixed(1)}, ${end.dy.toStringAsFixed(1)}) · '
+            '필요 ${draftClearancePixels.toStringAsFixed(1)}px',
+      );
+      return empty;
+    }
+
+    // A doubled corridor already carries traffic both ways, so the entrance
+    // holding points a shared corridor needs are only placed without one.
+    _scenarioUsesSeparateRoutes = plan.separateRoutes || doubledCorridors > 0;
+    _scenarioHoldingAnchors = _scenarioUsesSeparateRoutes
+        ? const []
+        : [plan.outbound.first, plan.outbound.last];
+
+    // Existing waypoints join the draft only when they can be reached without
+    // giving up the clearance; the ones that cannot are reported instead of
+    // failing the whole draft.
+    final baseRoutePoints = [...generated];
+    final unlinked = <String>[];
+    String label(Offset point) {
+      final name = (_waypointNames[point] ?? '').trim();
+      return name.isEmpty
+          ? '(${point.dx.toStringAsFixed(0)}, ${point.dy.toStringAsFixed(0)})'
+          : name;
+    }
+
+    Offset nearestRoutePoint(Offset point) => baseRoutePoints.reduce(
+      (a, b) => (a - point).distance <= (b - point).distance ? a : b,
+    );
+    double routeDistance(Offset point) =>
+        (nearestRoutePoint(point) - point).distance;
+
+    final existingNetworkPoints = connected.where(_isInsideFloor).toList()
+      ..sort((a, b) => routeDistance(a).compareTo(routeDistance(b)));
+    if (existingNetworkPoints.isNotEmpty &&
+        !existingNetworkPoints.any(
+          (point) => addDraftPath(
+            point,
+            nearestRoutePoint(point),
+            '양방향',
+            existingAnchors: [point],
+          ),
+        )) {
+      unlinked.add('기존 Lane 네트워크');
+    }
+    final operationalAnchors = _laneWaypoints.where((point) {
+      final type = _waypointTypes[point] ?? '일반';
+      return _isInsideFloor(point) &&
+          (type == '홈' ||
+              type == '대기' ||
+              type == '충전' ||
+              type == '픽업' ||
+              type == '드랍오프');
+    });
+    for (final anchor in operationalAnchors) {
+      if (connected.contains(anchor)) continue;
+      if (addDraftPath(
+        anchor,
+        nearestRoutePoint(anchor),
+        '양방향',
+        existingAnchors: [anchor],
+      )) {
+        continue;
+      }
+      unlinked.add(label(anchor));
+    }
+
+    if (generatedLanes.isEmpty ||
+        generatedLanes.any(
+          (lane) => _touchesWall(
+            lane.$1,
+            lane.$2,
+            clearancePixels: draftClearancePixels,
+          ),
+        )) {
+      _showProcessingWarning(
+        '시나리오 맵 자동 완성',
+        '벽과 로봇 안전거리를 지키는 연속 경로를 만들 수 없어 초안을 적용하지 않았습니다.\n'
+            '필요 안전거리: ${draftClearancePixels.toStringAsFixed(1)}px',
+      );
+      return empty;
+    }
+
+    _recordUndo();
+    setState(() {
+      for (final point in generated) {
+        if (!_laneWaypoints.any(
+          (existing) => (existing - point).distance <= .01,
+        )) {
+          _laneWaypoints.add(point);
+          _waypointTypes[point] = '일반';
+          _waypointNames[point] = ' ';
+        }
+      }
+      for (final lane in generatedLanes) {
+        if (_hasLane(lane.$1, lane.$2)) continue;
+        _recommendedLanes.add(lane);
+        _laneDirections[lane] = draftDirections[lane] ?? '정방향';
+      }
+      _stage = MapStage.lanes;
+      _mapScenarioSummary =
+          '자동 경로 초안 · Waypoint ${generated.length} · '
+          'Lane ${generatedLanes.length} · Floor 내부 · '
+          '${_scenarioUsesSeparateRoutes ? '왕복 2경로' : '협로 1경로+입구 대기'}'
+          '${doubledCorridors == 0 ? '' : ' · 넓은 통로 왕복 분리 $doubledCorridors곳'} · 역할 적용 전'
+          '${unlinked.isEmpty ? '' : ' · 미연결 ${unlinked.length}곳'}';
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    return (
+      waypointCount: generated.length,
+      laneCount: generatedLanes.length,
+      doubledCorridors: doubledCorridors,
+      unlinked: unlinked,
+    );
+  }
+
+  Future<bool> _tryCodexScenarioMap(_MapScenarioConfig config) async {
+    if (!isMapAiConfigured) return false;
+    final drawing = _drawing;
+    if (drawing == null) return false;
+    final existingIds = <Offset, String>{
+      for (var i = 0; i < _laneWaypoints.length; i++)
+        _laneWaypoints[i]: 'existing_$i',
+    };
+    final request = <String, dynamic>{
+      'schemaVersion': 1,
+      'task': 'open_rmf_waypoint_lane_design',
+      'coordinateSystem': 'drawing_pixels_top_left_origin',
+      'drawing': {
+        'width': drawing.pixelWidth,
+        'height': drawing.pixelHeight,
+        'name': drawing.name,
+      },
+      'robotSafety': {
+        'widthMeters': _robotWidthMeters,
+        'turningRadiusMeters': _turningRadiusMeters,
+        'localizationMarginMeters': _localizationMarginMeters,
+        'pixelsPerMeter': _metersPerPixel == null ? null : 1 / _metersPerPixel!,
+      },
+      'scenario': {
+        'robotCount': config.robotCount,
+        'homeCount': config.homeCount,
+        'holdingCount': config.homeCount,
+        'chargerCount': config.chargerCount,
+        'ambientPickupCount': config.ambientPickupCount,
+        'chilledPickupCount': config.chilledPickupCount,
+        'frozenPickupCount': config.frozenPickupCount,
+        'dropoffCount': config.dropoffCount,
+        'returnHome': config.returnHome,
+        'singleLoadPerTrip': config.singleLoadPerTrip,
+        'routeMode': _floorSupportsTwoRobotRoutes()
+            ? 'separate_outbound_return'
+            : 'shared_narrow_lane_with_holding',
+      },
+      'walls': [
+        for (final wall in _visibleWallSegments())
+          {
+            'start': {'x': wall.$1.dx, 'y': wall.$1.dy},
+            'end': {'x': wall.$2.dx, 'y': wall.$2.dy},
+          },
+      ],
+      'floorPolygon': [
+        for (final point in _floorOutline()) {'x': point.dx, 'y': point.dy},
+      ],
+      'waypoints': [
+        for (final entry in existingIds.entries)
+          {
+            'id': entry.value,
+            'x': entry.key.dx,
+            'y': entry.key.dy,
+            'name': (_waypointNames[entry.key] ?? '').trim(),
+            'category': _waypointTypes[entry.key] ?? '일반',
+          },
+      ],
+      'lanes': [
+        for (final lane in _recommendedLanes)
+          {
+            'startId': existingIds[lane.$1],
+            'endId': existingIds[lane.$2],
+            'direction': _laneDirections[lane] ?? '양방향',
+          },
+      ],
+      'requirements': {
+        'preserveExistingOperationalWaypoints': true,
+        'placeEveryNewWaypointInsideFloorPolygon': true,
+        'avoidWallCrossings': true,
+        'produceSeparateOutboundAndReturnRoutes':
+            _floorSupportsTwoRobotRoutes(),
+        'placeHomesNearDropoffWaypoints': true,
+        'useSeparateRoutesOnlyWhenTwoRobotsFitSafely': true,
+        'createHoldingAtNarrowPassageEntrances': true,
+        'chargerWaypointsMustUseChargerCategory': true,
+        'minimumHoldingWaypointCount': config.homeCount,
+        'connectEveryMobileWaypoint': true,
+        'allowedCategories': ['일반', '대기', '홈', '충전', '픽업', '드랍오프'],
+        'allowedDirections': ['양방향', '정방향', '역방향'],
+      },
+    };
+    MapAiProposal? proposal;
+    try {
+      proposal = await requestMapAiProposal(request);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Codex 연결에 실패해 로컬 맵 분석으로 전환합니다.')),
+        );
+      }
+      return false;
+    }
+    if (proposal == null || !mounted) return false;
+
+    final pointsById = <String, Offset>{
+      ...{for (final entry in existingIds.entries) entry.value: entry.key},
+    };
+    final newPoints = <Offset>[];
+    final names = <Offset, String>{};
+    final categories = <Offset, String>{};
+    final allowedCategories = {'일반', '대기', '홈', '충전', '픽업', '드랍오프'};
+    final width = (drawing.pixelWidth ?? 0).toDouble();
+    final height = (drawing.pixelHeight ?? 0).toDouble();
+    try {
+      for (final item in proposal.waypoints) {
+        final id = item['id'] as String;
+        final existingPoint = existingIds.entries
+            .where((entry) => entry.value == id)
+            .firstOrNull
+            ?.key;
+        final point =
+            existingPoint ??
+            Offset(
+              (item['x'] as num).toDouble(),
+              (item['y'] as num).toDouble(),
+            );
+        if (!point.dx.isFinite ||
+            !point.dy.isFinite ||
+            point.dx < 0 ||
+            point.dy < 0 ||
+            (width > 0 && point.dx > width) ||
+            (height > 0 && point.dy > height)) {
+          throw const FormatException('Waypoint가 도면 범위를 벗어났습니다.');
+        }
+        if (existingPoint == null && !_isInsideFloor(point)) {
+          throw const FormatException('Codex Waypoint가 Floor 영역 밖에 있습니다.');
+        }
+        final category = item['category'] as String? ?? '일반';
+        if (!allowedCategories.contains(category)) {
+          throw FormatException('지원하지 않는 Waypoint 종류: $category');
+        }
+        if (!id.startsWith('existing_')) newPoints.add(point);
+        pointsById[id] = point;
+        names[point] = (item['name'] as String? ?? '').trim();
+        categories[point] = category;
+      }
+      final lanes = <(Offset, Offset)>[];
+      final directions = <(Offset, Offset), String>{};
+      for (final item in proposal.lanes) {
+        final start = pointsById[item['startId'] as String];
+        final end = pointsById[item['endId'] as String];
+        if (start == null || end == null || (start - end).distance <= .01) {
+          throw const FormatException('Lane 연결 ID가 잘못되었습니다.');
+        }
+        if (_crossesWall(start, end)) {
+          throw const FormatException('Codex Lane이 벽 또는 로봇 안전거리를 침범합니다.');
+        }
+        final lane = (start, end);
+        lanes.add(lane);
+        final direction = item['direction'] as String? ?? '양방향';
+        directions[lane] = {'양방향', '정방향', '역방향'}.contains(direction)
+            ? direction
+            : '양방향';
+      }
+      if (newPoints.isEmpty || lanes.isEmpty) {
+        throw const FormatException('Codex 제안이 비어 있습니다.');
+      }
+      int finalCategoryCount(String category) {
+        final existing = _laneWaypoints.where((point) {
+          final proposed = categories[point];
+          return (proposed ?? _waypointTypes[point] ?? '일반') == category;
+        }).length;
+        final added = newPoints
+            .where((point) => categories[point] == category)
+            .length;
+        return existing + added;
+      }
+
+      if (finalCategoryCount('홈') < config.homeCount ||
+          finalCategoryCount('대기') < config.homeCount ||
+          finalCategoryCount('충전') < config.chargerCount) {
+        throw const FormatException('Codex 제안에 Home·대기·충전 Waypoint가 부족합니다.');
+      }
+      final apply = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.psychology_alt_outlined, size: 36),
+          title: Text('${proposal!.provider} 맵 분석 결과'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  proposal.summary.isEmpty ? '맵 구조를 분석했습니다.' : proposal.summary,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '신규 Waypoint ${newPoints.length}개 · Lane ${lanes.length}개',
+                ),
+                if (proposal.warnings.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  for (final warning in proposal.warnings.take(4))
+                    Text('• $warning', style: const TextStyle(fontSize: 12)),
+                ],
+                const SizedBox(height: 10),
+                const Text(
+                  '응답은 좌표 범위와 벽 교차를 로컬에서 재검증했습니다.',
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('취소'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              icon: const Icon(Icons.auto_fix_high, size: 18),
+              label: const Text('Codex 제안 적용'),
+            ),
+          ],
+        ),
+      );
+      if (apply == true && mounted) {
+        _recordUndo();
+        setState(() {
+          for (final point in newPoints) {
+            if (!_laneWaypoints.any(
+              (value) => (value - point).distance <= .01,
+            )) {
+              _laneWaypoints.add(point);
+            }
+          }
+          for (final entry in names.entries) {
+            _waypointNames[entry.key] = entry.value;
+            _waypointTypes[entry.key] = categories[entry.key] ?? '일반';
+          }
+          for (final lane in lanes) {
+            if (_hasLane(lane.$1, lane.$2)) continue;
+            _recommendedLanes.add(lane);
+            _laneDirections[lane] = directions[lane] ?? '양방향';
+          }
+          _stage = MapStage.lanes;
+          _mapScenarioSummary =
+              'Codex 혼합 분석 · Waypoint ${newPoints.length} · Lane ${lanes.length}';
+          _isDeployed = false;
+          _vertexLabelRevision++;
+        });
+      }
+      return true;
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Codex 제안이 맵 안전 검증을 통과하지 못해 로컬 분석으로 전환합니다.'),
+          ),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _showScenarioMapAssistant() async {
+    if (_drawing == null) {
+      _showProcessingWarning('시나리오 맵 자동 완성', '자동 경로를 배치할 도면을 먼저 올려주세요.');
+      return;
+    }
+    if (_floorOutline().length < 3) {
+      _showProcessingWarning(
+        '시나리오 맵 자동 완성',
+        'Waypoint를 Floor 내부에만 배치하려면 Floor 영역을 먼저 생성해야 합니다.',
+      );
+      return;
+    }
+    final robotController = TextEditingController(text: '4');
+    final homeController = TextEditingController(text: '4');
+    final chargerController = TextEditingController(text: '2');
+    final ambientController = TextEditingController(text: '0');
+    final chilledController = TextEditingController(text: '0');
+    final frozenController = TextEditingController(text: '1');
+    final dropoffController = TextEditingController(text: '1');
+    var returnHome = true;
+    var singleLoad = true;
+    final config = await showDialog<_MapScenarioConfig>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Widget countField(String label, TextEditingController controller) =>
+              TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: InputDecoration(
+                  labelText: label,
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              );
+          int count(TextEditingController controller) =>
+              int.tryParse(controller.text.trim()) ?? -1;
+          final counts = [
+            robotController,
+            homeController,
+            chargerController,
+            ambientController,
+            chilledController,
+            frozenController,
+            dropoffController,
+          ].map(count).toList();
+          final valid =
+              counts.every((value) => value >= 0) &&
+              counts.first > 0 &&
+              (!returnHome || counts[1] >= counts[0]);
+          return AlertDialog(
+            icon: const Icon(Icons.auto_awesome_outlined, size: 36),
+            title: const Text('시나리오 맵 자동 완성'),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('기존 Lane에 연결된 일반 Waypoint를 운영 목적에 맞게 자동 배치합니다.'),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(child: countField('이동 로봇 수', robotController)),
+                        const SizedBox(width: 10),
+                        Expanded(child: countField('Home 수', homeController)),
+                        const SizedBox(width: 10),
+                        Expanded(child: countField('충전소 수', chargerController)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(child: countField('상온 픽업', ambientController)),
+                        const SizedBox(width: 10),
+                        Expanded(child: countField('냉장 픽업', chilledController)),
+                        const SizedBox(width: 10),
+                        Expanded(child: countField('냉동 픽업', frozenController)),
+                        const SizedBox(width: 10),
+                        Expanded(child: countField('드랍오프', dropoffController)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    CheckboxListTile(
+                      value: returnHome,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('작업 완료 후 빈 Home으로 복귀'),
+                      onChanged: (value) =>
+                          setDialogState(() => returnHome = value ?? true),
+                    ),
+                    if (returnHome && counts[1] < counts[0])
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          '각 로봇이 동시에 복귀하려면 Home 수가 이동 로봇 수 이상이어야 합니다.',
+                          style: TextStyle(
+                            color: Color(0xFFDC2626),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    CheckboxListTile(
+                      value: singleLoad,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('한 운행에서 상품을 한 번만 적재'),
+                      onChanged: (value) =>
+                          setDialogState(() => singleLoad = value ?? true),
+                    ),
+                    const Text(
+                      '모든 신규 Waypoint를 Floor 내부에만 배치합니다. Home 수만큼 대기 지점을 만들고, 충전은 충전 지점으로 지정하며, 가는 길과 오는 길을 서로 다른 두 줄의 단방향 Lane으로 생성합니다.',
+                      style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('취소'),
+              ),
+              FilledButton.icon(
+                onPressed: valid
+                    ? () => Navigator.pop(
+                        dialogContext,
+                        _MapScenarioConfig(
+                          robotCount: counts[0],
+                          homeCount: counts[1],
+                          chargerCount: counts[2],
+                          ambientPickupCount: counts[3],
+                          chilledPickupCount: counts[4],
+                          frozenPickupCount: counts[5],
+                          dropoffCount: counts[6],
+                          returnHome: returnHome,
+                          singleLoadPerTrip: singleLoad,
+                        ),
+                      )
+                    : null,
+                icon: const Icon(Icons.route_outlined, size: 18),
+                label: const Text('추천 배치 만들기'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    for (final controller in [
+      robotController,
+      homeController,
+      chargerController,
+      ambientController,
+      chilledController,
+      frozenController,
+      dropoffController,
+    ]) {
+      controller.dispose();
+    }
+    if (config == null || !mounted) return;
+    final inferredWaypointCount = _inferWaypointTypesFromNames();
+    if (await _tryCodexScenarioMap(config)) return;
+    if (!mounted) return;
+    final generatedDraft = _ensureScenarioDraftNetwork(config);
+    if (generatedDraft.laneCount == 0) return;
+    final assignments = _buildScenarioAssignments(config);
+    if (assignments == null) {
+      final connectedGeneralCount = _laneWaypoints.where((point) {
+        if ((_waypointTypes[point] ?? '일반') != '일반') return false;
+        if ((_waypointNames[point] ?? '').trim().isNotEmpty) return false;
+        return _recommendedLanes.any(
+          (lane) =>
+              (lane.$1 - point).distance <= .01 ||
+              (lane.$2 - point).distance <= .01,
+        );
+      }).length;
+      _showProcessingWarning(
+        '시나리오 맵 자동 완성',
+        '기존 픽업·드랍오프·충전·Home을 제외한 부족한 역할을 배치할 '
+            'Lane 연결 일반 Waypoint가 부족합니다. '
+            '현재 사용 가능: $connectedGeneralCount개',
+      );
+      return;
+    }
+    final apply = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.map_outlined, size: 36),
+        title: const Text('추천 배치를 적용할까요?'),
+        content: SizedBox(
+          width: 500,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '로봇 ${config.robotCount}대 · 목표 운영 지점 '
+                '${config.requiredWaypointCount}개 · 새 역할 배치 ${assignments.length}개',
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
+              if (inferredWaypointCount > 0) ...[
+                const SizedBox(height: 6),
+                Text('이름으로 인식한 운영 지점 $inferredWaypointCount개'),
+              ],
+              if (generatedDraft.waypointCount > 0) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '자동 경로 초안 · Waypoint ${generatedDraft.waypointCount}개 · '
+                  'Lane ${generatedDraft.laneCount}개 '
+                  '(${_scenarioUsesSeparateRoutes ? '2대 통행 가능: 가는 길·오는 길' : '협로: 공용 1경로+입구 대기'})'
+                  '${generatedDraft.doubledCorridors == 0 ? '' : '\n넓은 통로 ${generatedDraft.doubledCorridors}곳은 가는 길·오는 길 단방향 2차선으로 분리했습니다.'}',
+                  style: const TextStyle(
+                    color: Color(0xFF7C3AED),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+              if (generatedDraft.unlinked.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '안전거리를 지키며 연결하지 못한 지점 '
+                  '${generatedDraft.unlinked.length}곳: '
+                  '${generatedDraft.unlinked.join(', ')} · '
+                  '벽에 너무 가까워 Lane을 잇지 않았습니다.',
+                  style: const TextStyle(
+                    color: Color(0xFFB45309),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 300),
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final assignment in assignments)
+                      ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.place_outlined, size: 19),
+                        title: Text(assignment.name),
+                        subtitle: Text(
+                          '${assignment.category} · X ${assignment.point.dx.toStringAsFixed(1)}, Y ${assignment.point.dy.toStringAsFixed(1)}',
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${config.singleLoadPerTrip ? '운행당 1회 적재' : '운행당 복수 적재 허용'} · '
+                '${config.returnHome ? '작업 후 Home 자동 복귀' : '최종 작업 지점 대기'}',
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('초안만 유지'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.auto_fix_high, size: 18),
+            label: const Text('추천 맵 적용'),
+          ),
+        ],
+      ),
+    );
+    if (apply != true || !mounted) return;
+    _recordUndo();
+    setState(() {
+      for (final assignment in assignments) {
+        _waypointTypes[assignment.point] = assignment.category;
+        _waypointNames[assignment.point] = assignment.name;
+      }
+      _mapScenarioSummary =
+          '로봇 ${config.robotCount}대 · Home ${config.homeCount} · 충전 ${config.chargerCount} · '
+          '상온 ${config.ambientPickupCount} · 냉장 ${config.chilledPickupCount} · '
+          '냉동 ${config.frozenPickupCount} · 드랍오프 ${config.dropoffCount} · '
+          '${config.singleLoadPerTrip ? '1회 적재' : '복수 적재'} · '
+          '${config.returnHome ? 'Home 복귀' : '현장 대기'}';
+      if (generatedDraft.waypointCount > 0) {
+        _mapScenarioSummary =
+            '$_mapScenarioSummary · 자동 초안 Waypoint ${generatedDraft.waypointCount} / Lane ${generatedDraft.laneCount}';
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('운영 Waypoint ${assignments.length}개를 자동 배치했습니다.')),
+    );
   }
 
   Future<void> _showValidationDialog() async {
@@ -425,6 +2114,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         actions: [
           TextButton.icon(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              unawaited(_showRobotSafetySettings());
+            },
+            icon: const Icon(Icons.tune, size: 18),
+            label: const Text('로봇 안전 기준'),
+          ),
+          TextButton.icon(
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text: report));
               if (!dialogContext.mounted) return;
@@ -458,19 +2155,55 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ((lane.$1 - end).distance <= .01 && (lane.$2 - start).distance <= .01),
   );
 
-  bool _segmentsCross(Offset a, Offset b, Offset c, Offset d) {
-    double side(Offset p, Offset q, Offset r) =>
-        (q.dx - p.dx) * (r.dy - p.dy) - (q.dy - p.dy) * (r.dx - p.dx);
-    final abC = side(a, b, c);
-    final abD = side(a, b, d);
-    final cdA = side(c, d, a);
-    final cdB = side(c, d, b);
-    return abC * abD < 0 && cdA * cdB < 0;
+  double _segmentDistance(
+    Offset firstStart,
+    Offset firstEnd,
+    Offset secondStart,
+    Offset secondEnd,
+  ) => segmentDistance(firstStart, firstEnd, secondStart, secondEnd);
+
+  double? get _metersPerPixel {
+    final measurement = _measurement;
+    if (measurement == null) return null;
+    final pixels = (measurement.start - measurement.end).distance;
+    if (pixels <= .01 || measurement.length <= 0) return null;
+    final meters = measurement.unit == 'ft'
+        ? measurement.length * .3048
+        : measurement.length;
+    return meters / pixels;
   }
 
-  bool _crossesWall(Offset start, Offset end) => _visibleWallSegments().any(
-    (wall) => _segmentsCross(start, end, wall.$1, wall.$2),
-  );
+  double get _laneWallClearancePixels {
+    final metersPerPixel = _metersPerPixel;
+    if (metersPerPixel == null || metersPerPixel <= 0) return 2;
+    return math.max(
+      2,
+      (_robotWidthMeters / 2 + _localizationMarginMeters) / metersPerPixel,
+    );
+  }
+
+  bool _touchesWall(Offset start, Offset end, {double? clearancePixels}) {
+    final clearance = clearancePixels ?? _laneWallClearancePixels;
+    return _visibleWallSegments().any(
+      (wall) =>
+          _segmentDistance(start, end, wall.$1, wall.$2) < clearance - .01,
+    );
+  }
+
+  bool _crossesWall(Offset start, Offset end) => _touchesWall(start, end);
+
+  String? _laneCreationIssue(Offset start, Offset end) {
+    if ((start - end).distance <= .01) return '시작점과 끝점이 같은 Lane은 만들 수 없습니다.';
+    if (_hasLane(start, end)) return '두 Waypoint 사이에 Lane이 이미 있습니다.';
+    if (_crossesWall(start, end)) return '벽을 통과하는 Lane은 만들 수 없습니다.';
+    return null;
+  }
+
+  void _showLaneCreationIssue(String issue) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(issue), backgroundColor: const Color(0xFFDC2626)),
+    );
+  }
 
   List<_LaneRecommendation> _buildLaneRecommendations() {
     if (_recommendedLanes.isEmpty) return const [];
@@ -729,6 +2462,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     frozenAutoWalls: [..._frozenAutoWalls],
     recommendedLanes: [..._recommendedLanes],
     laneDirections: {..._laneDirections},
+    laneSpeedLimits: {..._laneSpeedLimits},
+    laneOrientations: {..._laneOrientations},
+    laneMutexGroups: {..._laneMutexGroups},
+    robotWidthMeters: _robotWidthMeters,
+    turningRadiusMeters: _turningRadiusMeters,
+    localizationMarginMeters: _localizationMarginMeters,
+    mapScenarioSummary: _mapScenarioSummary,
     laneWaypoints: [..._laneWaypoints],
     waypointTypes: {..._waypointTypes},
     waypointNames: {..._waypointNames},
@@ -768,6 +2508,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _laneDirections
         ..clear()
         ..addAll(snapshot.laneDirections);
+      _laneSpeedLimits
+        ..clear()
+        ..addAll(snapshot.laneSpeedLimits);
+      _laneOrientations
+        ..clear()
+        ..addAll(snapshot.laneOrientations);
+      _laneMutexGroups
+        ..clear()
+        ..addAll(snapshot.laneMutexGroups);
+      _robotWidthMeters = snapshot.robotWidthMeters;
+      _turningRadiusMeters = snapshot.turningRadiusMeters;
+      _localizationMarginMeters = snapshot.localizationMarginMeters;
+      _mapScenarioSummary = snapshot.mapScenarioSummary;
       _laneWaypoints
         ..clear()
         ..addAll(snapshot.laneWaypoints);
@@ -818,6 +2571,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _fitMapToScreen();
       _recordUndo();
       setState(() {
+        _mapNameOverride = null;
+        _projectFileName = null;
+        _mapScenarioSummary = null;
         _drawing = UploadedDrawing(
           name: file.name,
           extension: extension,
@@ -846,6 +2602,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _frozenAutoWalls = [];
         _recommendedLanes = [];
         _laneDirections.clear();
+        _laneSpeedLimits.clear();
+        _laneOrientations.clear();
+        _laneMutexGroups.clear();
         _laneWaypoints.clear();
         _waypointTypes.clear();
         _waypointNames.clear();
@@ -871,6 +2630,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _recordUndo();
     _fitMapToScreen();
     setState(() {
+      _mapNameOverride = null;
+      _projectFileName = null;
+      _mapScenarioSummary = null;
       _drawing = null;
       _stage = MapStage.upload;
       _isDeployed = false;
@@ -892,6 +2654,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _frozenAutoWalls = [];
       _recommendedLanes = [];
       _laneDirections.clear();
+      _laneSpeedLimits.clear();
+      _laneOrientations.clear();
+      _laneMutexGroups.clear();
       _laneWaypoints.clear();
       _waypointTypes.clear();
       _waypointNames.clear();
@@ -1015,18 +2780,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
     ),
   );
 
+  void _removeLaneProperties((Offset, Offset) lane) {
+    _laneDirections.remove(lane);
+    _laneSpeedLimits.remove(lane);
+    _laneOrientations.remove(lane);
+    _laneMutexGroups.remove(lane);
+  }
+
   void _deleteWaypoint(Offset waypoint) {
     _recordUndo();
-    var removedLane = false;
+    var removedLaneCount = 0;
     setState(() {
       for (var i = _recommendedLanes.length - 1; i >= 0; i--) {
         final lane = _recommendedLanes[i];
         if ((lane.$1 - waypoint).distance <= .01 ||
             (lane.$2 - waypoint).distance <= .01) {
-          _laneDirections.remove(lane);
+          _removeLaneProperties(lane);
           _recommendedLanes.removeAt(i);
-          removedLane = true;
-          break;
+          removedLaneCount++;
         }
       }
       _laneWaypoints.removeWhere((point) => (point - waypoint).distance <= .01);
@@ -1042,11 +2813,142 @@ class _ControlDashboardState extends State<ControlDashboard> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          removedLane ? 'Waypoint와 마지막 연결 레인을 삭제했습니다.' : 'Waypoint를 삭제했습니다.',
+          removedLaneCount > 0
+              ? 'Waypoint와 연결된 레인 $removedLaneCount개를 삭제했습니다.'
+              : 'Waypoint를 삭제했습니다.',
         ),
       ),
     );
   }
+
+  /// Why [updated] is not a valid drop point for the Waypoint at [original],
+  /// or null when the move is allowed. Shared with the drag preview so the
+  /// canvas shows the same verdict before the button is released.
+  WaypointMoveIssue? _waypointDropIssue(Offset original, Offset updated) =>
+      waypointMoveIssue(
+        original: original,
+        updated: updated,
+        waypoints: _laneWaypoints,
+        lanes: _recommendedLanes,
+        walls: _visibleWallSegments(),
+        floorOutline: _floorOutline(),
+        laneWallClearance: _laneWallClearancePixels,
+      );
+
+  String _waypointDropMessage(WaypointMoveIssue issue) => switch (issue) {
+    WaypointMoveIssue.outsideFloor => 'Waypoint는 Floor 내부로만 이동할 수 있습니다.',
+    WaypointMoveIssue.waypointTooClose => '다른 Waypoint와 너무 가깝습니다.',
+    WaypointMoveIssue.laneTouchesWall =>
+      '이동하면 연결된 Lane이 벽 안전거리'
+          '(${_laneWallClearancePixels.toStringAsFixed(1)}px)를 침범하므로 '
+          '원래 위치를 유지합니다.',
+  };
+
+  void _moveWaypoint(Offset original, Offset updated) {
+    final index = _laneWaypoints.indexWhere(
+      (point) => (point - original).distance <= .01,
+    );
+    if (index < 0 || (original - updated).distance <= .01) return;
+    final issue = _waypointDropIssue(original, updated);
+    if (issue != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_waypointDropMessage(issue))),
+      );
+      return;
+    }
+    final movedLanes = <(Offset, Offset)>[
+      for (final lane in _recommendedLanes)
+        (
+          (lane.$1 - original).distance <= .01 ? updated : lane.$1,
+          (lane.$2 - original).distance <= .01 ? updated : lane.$2,
+        ),
+    ];
+    _recordUndo();
+    final oldLanes = [..._recommendedLanes];
+    final oldDirections = {..._laneDirections};
+    final oldSpeeds = {..._laneSpeedLimits};
+    final oldOrientations = {..._laneOrientations};
+    final oldMutexGroups = {..._laneMutexGroups};
+    final type = _waypointTypes[original];
+    final name = _waypointNames[original];
+    setState(() {
+      _laneWaypoints[index] = updated;
+      _waypointTypes.remove(original);
+      _waypointNames.remove(original);
+      if (type != null) _waypointTypes[updated] = type;
+      if (name != null) _waypointNames[updated] = name;
+      _recommendedLanes = movedLanes;
+      _laneDirections.clear();
+      _laneSpeedLimits.clear();
+      _laneOrientations.clear();
+      _laneMutexGroups.clear();
+      for (var laneIndex = 0; laneIndex < oldLanes.length; laneIndex++) {
+        final oldLane = oldLanes[laneIndex];
+        final newLane = movedLanes[laneIndex];
+        if (oldDirections[oldLane] case final value?) {
+          _laneDirections[newLane] = value;
+        }
+        if (oldSpeeds[oldLane] case final value?) {
+          _laneSpeedLimits[newLane] = value;
+        }
+        if (oldOrientations[oldLane] case final value?) {
+          _laneOrientations[newLane] = value;
+        }
+        if (oldMutexGroups[oldLane] case final value?) {
+          _laneMutexGroups[newLane] = value;
+        }
+      }
+      if (_activeLaneEndpoint != null &&
+          (_activeLaneEndpoint! - original).distance <= .01) {
+        _activeLaneEndpoint = updated;
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Waypoint와 연결된 Lane을 함께 이동했습니다.')),
+    );
+  }
+
+  Future<void> _confirmDeleteWaypoint(Offset waypoint) async {
+    final name = (_waypointNames[waypoint] ?? '').trim();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.delete_outline, color: Color(0xFFDC2626)),
+        title: const Text('Waypoint를 삭제할까요?'),
+        content: Text(
+          '${name.isEmpty ? '선택한 Waypoint' : name}와 연결된 모든 레인도 함께 삭제됩니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('삭제'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) _deleteWaypoint(waypoint);
+  }
+
+  String _waypointTypeDescription(String type) => switch (type) {
+    '일반' => '경로 연결과 잠시 정지할 수 있는 지점입니다. RMF에서는 holding point로 내보냅니다.',
+    '대기' => '작업이 없을 때 로봇을 장시간 주차·대기시키는 전용 자리입니다. RMF에서는 parking spot으로 내보냅니다.',
+    '홈' => '홈 풀 자동 할당에서 복귀 위치로 사용하는 지점입니다.',
+    '충전' => '로봇 충전 위치로 사용하는 지점입니다.',
+    '픽업' => '상품이나 화물을 싣는 작업 위치입니다.',
+    '드랍오프' => '상품이나 화물을 내려놓는 작업 위치입니다.',
+    '설비' => '고정 로봇팔·컨베이어 등의 설치 좌표입니다. 이동 Lane에 연결하지 않습니다.',
+    _ => '',
+  };
 
   String _nextWaypointName(String category) {
     if (category == '일반') return ' ';
@@ -1069,7 +2971,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     var selectedType = _waypointTypes[waypoint] == '드롭오프'
         ? '드랍오프'
         : _waypointTypes[waypoint] ?? '일반';
-    final confirmed = await showDialog<bool>(
+    final action = await showDialog<String>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1095,7 +2997,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['일반', '대기', '충전', '픽업', '드랍오프']
+                  items: const ['일반', '대기', '홈', '충전', '픽업', '드랍오프', '설비']
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -1107,19 +3009,38 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     }
                   },
                 ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _waypointTypeDescription(selectedType),
+                    style: const TextStyle(
+                      color: Color(0xFF64748B),
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
+              onPressed: () => Navigator.pop(dialogContext),
               child: const Text('취소'),
+            ),
+            TextButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'delete'),
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Waypoint 삭제'),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFDC2626),
+              ),
             ),
             FilledButton(
               onPressed:
                   selectedType != '일반' && nameController.text.trim().isEmpty
                   ? null
-                  : () => Navigator.pop(dialogContext, true),
+                  : () => Navigator.pop(dialogContext, 'save'),
               child: const Text('저장'),
             ),
           ],
@@ -1129,7 +3050,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final name = selectedType == '일반' ? ' ' : nameController.text.trim();
     await Future<void>.delayed(const Duration(milliseconds: 350));
     nameController.dispose();
-    if (confirmed != true || !mounted || name.isEmpty) return;
+    if (!mounted) return;
+    if (action == 'delete') {
+      await _confirmDeleteWaypoint(waypoint);
+      return;
+    }
+    if (action != 'save' || name.isEmpty) return;
     _recordUndo();
     setState(() {
       _waypointNames[waypoint] = name;
@@ -1143,61 +3069,150 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _selectLaneForDeletion((Offset, Offset) lane) async {
     var selectedDirection = _laneDirections[lane] ?? '양방향';
-    final result = await showDialog<(String, String)>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          icon: const Icon(Icons.route_outlined, color: Color(0xFF2563EB)),
-          title: const Text('레인 설정'),
-          content: SizedBox(
-            width: 390,
-            child: DropdownButtonFormField<String>(
-              initialValue: selectedDirection,
-              decoration: const InputDecoration(
-                labelText: '이동 방향',
-                border: OutlineInputBorder(),
-              ),
-              items: const [
-                DropdownMenuItem(
-                  value: '정방향',
-                  child: Text('단방향 · 정방향 (시작 → 끝)'),
+    var selectedOrientation = _laneOrientations[lane] ?? '제약 없음';
+    final speedController = TextEditingController(
+      text: _laneSpeedLimits[lane]?.toStringAsFixed(2) ?? '',
+    );
+    final mutexController = TextEditingController(
+      text: _laneMutexGroups[lane] ?? '',
+    );
+    final result =
+        await showDialog<
+          ({
+            String action,
+            String direction,
+            double? speed,
+            String orientation,
+            String mutex,
+          })
+        >(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              icon: const Icon(Icons.route_outlined, color: Color(0xFF2563EB)),
+              title: const Text('레인 설정'),
+              content: SizedBox(
+                width: 390,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedDirection,
+                      decoration: const InputDecoration(
+                        labelText: 'Lane 이동 방향',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: '정방향',
+                          child: Text('단방향 · 정방향 (시작 → 끝)'),
+                        ),
+                        DropdownMenuItem(
+                          value: '양방향',
+                          child: Text('양방향 (시작 ↔ 끝)'),
+                        ),
+                        DropdownMenuItem(
+                          value: '역방향',
+                          child: Text('단방향 · 역방향 (끝 → 시작)'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setDialogState(() => selectedDirection = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedOrientation,
+                      decoration: const InputDecoration(
+                        labelText: '로봇 진행 자세',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: '제약 없음', child: Text('제약 없음')),
+                        DropdownMenuItem(
+                          value: 'forward',
+                          child: Text('정면 주행'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'backward',
+                          child: Text('후진 주행'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setDialogState(() => selectedOrientation = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: speedController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: '속도 제한 (m/s, 선택)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: mutexController,
+                      decoration: const InputDecoration(
+                        labelText: 'Mutex 그룹 (선택)',
+                        helperText: '좁은 통로를 동시에 한 대만 사용하게 할 그룹명',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
                 ),
-                DropdownMenuItem(value: '양방향', child: Text('양방향 (시작 ↔ 끝)')),
-                DropdownMenuItem(
-                  value: '역방향',
-                  child: Text('단방향 · 역방향 (끝 → 시작)'),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('취소'),
+                ),
+                TextButton.icon(
+                  onPressed: () => Navigator.pop(dialogContext, (
+                    action: 'delete',
+                    direction: selectedDirection,
+                    speed: null,
+                    orientation: selectedOrientation,
+                    mutex: mutexController.text.trim(),
+                  )),
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('레인 삭제'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFDC2626),
+                  ),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final speedText = speedController.text.trim();
+                    final speed = speedText.isEmpty
+                        ? null
+                        : double.tryParse(speedText);
+                    if (speedText.isNotEmpty && (speed == null || speed <= 0)) {
+                      return;
+                    }
+                    Navigator.pop(dialogContext, (
+                      action: 'save',
+                      direction: selectedDirection,
+                      speed: speed,
+                      orientation: selectedOrientation,
+                      mutex: mutexController.text.trim(),
+                    ));
+                  },
+                  child: const Text('Lane 설정 저장'),
                 ),
               ],
-              onChanged: (value) {
-                if (value != null) {
-                  setDialogState(() => selectedDirection = value);
-                }
-              },
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('취소'),
-            ),
-            TextButton.icon(
-              onPressed: () =>
-                  Navigator.pop(dialogContext, ('delete', selectedDirection)),
-              icon: const Icon(Icons.delete_outline),
-              label: const Text('레인 삭제'),
-              style: TextButton.styleFrom(
-                foregroundColor: const Color(0xFFDC2626),
-              ),
-            ),
-            FilledButton(
-              onPressed: () =>
-                  Navigator.pop(dialogContext, ('save', selectedDirection)),
-              child: const Text('방향 저장'),
-            ),
-          ],
-        ),
-      ),
-    );
+        );
+    speedController.dispose();
+    mutexController.dispose();
     if (result == null || !mounted) return;
     final index = _recommendedLanes.indexWhere(
       (candidate) =>
@@ -1207,18 +3222,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (index < 0) return;
     _recordUndo();
     setState(() {
-      if (result.$1 == 'delete') {
+      if (result.action == 'delete') {
         final removed = _recommendedLanes.removeAt(index);
-        _laneDirections.remove(removed);
+        _removeLaneProperties(removed);
       } else {
-        _laneDirections[_recommendedLanes[index]] = result.$2;
+        final target = _recommendedLanes[index];
+        _laneDirections[target] = result.direction;
+        if (result.speed == null) {
+          _laneSpeedLimits.remove(target);
+        } else {
+          _laneSpeedLimits[target] = result.speed!;
+        }
+        if (result.orientation == '제약 없음') {
+          _laneOrientations.remove(target);
+        } else {
+          _laneOrientations[target] = result.orientation;
+        }
+        if (result.mutex.isEmpty) {
+          _laneMutexGroups.remove(target);
+        } else {
+          _laneMutexGroups[target] = result.mutex;
+        }
       }
       _isDeployed = false;
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          result.$1 == 'delete' ? '선택한 레인을 삭제했습니다.' : '${result.$2}으로 설정했습니다.',
+          result.action == 'delete'
+              ? '선택한 레인을 삭제했습니다.'
+              : '${result.direction}과 Open-RMF Lane 속성을 저장했습니다.',
         ),
       ),
     );
@@ -1244,7 +3277,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       final action = await _chooseWaypointAction(snapped);
       if (!mounted || action == null) return;
       if (action == 'delete') {
-        _deleteWaypoint(snapped);
+        await _confirmDeleteWaypoint(snapped);
         return;
       }
       final start = _activeLaneEndpoint;
@@ -1253,6 +3286,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ? null
           : _firstCrossedWaypoint(start, snapped, snapTolerance);
       final laneStart = crossed ?? start;
+      if (laneStart != null) {
+        final issue = _laneCreationIssue(laneStart, snapped);
+        if (issue != null) {
+          _showLaneCreationIssue(issue);
+          return;
+        }
+      }
       _recordUndo();
       setState(() {
         if (laneStart != null) {
@@ -1307,12 +3347,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 const SizedBox(height: 18),
                 TextField(
                   controller: nameController,
-                  readOnly: true,
                   decoration: InputDecoration(
-                    labelText: '자동 이름',
-                    hintText: selectedType == '일반' ? '(공백)' : null,
+                    labelText: 'Waypoint 이름',
+                    hintText: selectedType == '일반' ? '(이름 없음)' : null,
+                    helperText: '유형에 맞는 이름을 자동 제안합니다. 원하는 이름으로 수정할 수 있습니다.',
+                    helperMaxLines: 2,
+                    errorText:
+                        nameController.text.trim().isNotEmpty &&
+                            _waypointNames.values.any(
+                              (name) =>
+                                  name.trim() == nameController.text.trim(),
+                            )
+                        ? '이미 사용 중인 Waypoint 이름입니다.'
+                        : null,
                     border: OutlineInputBorder(),
                   ),
+                  onChanged: (_) => setDialogState(() {}),
                 ),
                 const SizedBox(height: 14),
                 DropdownButtonFormField<String>(
@@ -1321,7 +3371,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['일반', '대기', '충전', '픽업', '드랍오프']
+                  items: const ['일반', '대기', '홈', '충전', '픽업', '드랍오프', '설비']
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -1336,6 +3386,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     }
                   },
                 ),
+                const SizedBox(height: 10),
+                Text(
+                  _waypointTypeDescription(selectedType),
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1345,21 +3403,37 @@ class _ControlDashboardState extends State<ControlDashboard> {
               child: const Text('취소'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
+              onPressed:
+                  (selectedType != '일반' &&
+                          nameController.text.trim().isEmpty) ||
+                      (nameController.text.trim().isNotEmpty &&
+                          _waypointNames.values.any(
+                            (name) => name.trim() == nameController.text.trim(),
+                          ))
+                  ? null
+                  : () => Navigator.pop(dialogContext, true),
               child: const Text('추가'),
             ),
           ],
         ),
       ),
     );
-    final waypointName = selectedType == '일반'
-        ? ' '
-        : nameController.text.trim();
+    final enteredName = nameController.text.trim();
+    final waypointName = enteredName.isEmpty ? ' ' : enteredName;
     nameController.dispose();
     if (confirmed != true || !mounted) return;
+    final laneStart = selectedType == '설비'
+        ? null
+        : crossedWaypoint ?? _activeLaneEndpoint;
+    if (laneStart != null) {
+      final issue = _laneCreationIssue(laneStart, point);
+      if (issue != null) {
+        _showLaneCreationIssue(issue);
+        return;
+      }
+    }
     _recordUndo();
     setState(() {
-      final laneStart = crossedWaypoint ?? _activeLaneEndpoint;
       if (laneStart != null) {
         final lane = (laneStart, point);
         _recommendedLanes.add(lane);
@@ -1368,7 +3442,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _laneWaypoints.add(point);
       _waypointTypes[point] = selectedType;
       _waypointNames[point] = waypointName;
-      _activeLaneEndpoint = point;
+      _activeLaneEndpoint = selectedType == '설비' ? null : point;
       _stage = MapStage.lanes;
       _isDeployed = false;
       _vertexLabelRevision++;
@@ -1388,7 +3462,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   List<Offset> _outgoingWaypoints(Offset point) {
-    final result = <Offset>[];
+    final result = <Offset>{};
     final loadedMap = _robotDeployedMap;
     final lanes = loadedMap?.lanes ?? _recommendedLanes;
     for (final lane in lanes) {
@@ -1402,31 +3476,44 @@ class _ControlDashboardState extends State<ControlDashboard> {
         result.add(lane.$1);
       }
     }
-    return result;
+    return result.toList();
   }
 
   List<Offset>? _shortestRobotPath(Offset start, Offset destination) {
-    final points = <Offset>{start, destination};
+    const mergeTolerance = .1;
+    final canonicalPoints = <Offset>[];
+    Offset canonical(Offset point) {
+      for (final existing in canonicalPoints) {
+        if ((existing - point).distance <= mergeTolerance) return existing;
+      }
+      canonicalPoints.add(point);
+      return point;
+    }
+
     final edges = <Offset, List<(Offset, double)>>{};
     final loadedMap = _robotDeployedMap;
     final lanes = loadedMap?.lanes ?? _recommendedLanes;
     for (final lane in lanes) {
-      points.addAll([lane.$1, lane.$2]);
+      final from = canonical(lane.$1);
+      final to = canonical(lane.$2);
       final direction = loadedMap == null
           ? _laneDirections[lane] ?? '양방향'
           : '양방향';
-      final distance = (lane.$1 - lane.$2).distance;
+      final distance = (from - to).distance;
       if (direction != '역방향') {
-        edges.putIfAbsent(lane.$1, () => []).add((lane.$2, distance));
+        edges.putIfAbsent(from, () => []).add((to, distance));
       }
       if (direction != '정방향') {
-        edges.putIfAbsent(lane.$2, () => []).add((lane.$1, distance));
+        edges.putIfAbsent(to, () => []).add((from, distance));
       }
     }
+    final routeStart = canonical(start);
+    final routeDestination = canonical(destination);
+    final points = canonicalPoints.toSet();
     final distances = {for (final point in points) point: double.infinity};
     final previous = <Offset, Offset>{};
     final unvisited = points.toSet();
-    distances[start] = 0;
+    distances[routeStart] = 0;
     while (unvisited.isNotEmpty) {
       Offset? current;
       var best = double.infinity;
@@ -1439,7 +3526,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       if (current == null || best == double.infinity) break;
       unvisited.remove(current);
-      if (current == destination) break;
+      if (current == routeDestination) break;
       for (final edge in edges[current] ?? const []) {
         final candidate = best + edge.$2;
         if (candidate < distances[edge.$1]!) {
@@ -1448,9 +3535,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
         }
       }
     }
-    if (start != destination && !previous.containsKey(destination)) return null;
-    final path = <Offset>[destination];
-    while (path.last != start) {
+    if (routeStart != routeDestination &&
+        !previous.containsKey(routeDestination)) {
+      return null;
+    }
+    final path = <Offset>[routeDestination];
+    while (path.last != routeStart) {
       final parent = previous[path.last];
       if (parent == null) return null;
       path.add(parent);
@@ -1465,9 +3555,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (task != null && task.status == _MockTaskStatus.active) {
       task.status = _MockTaskStatus.completed;
       task.completedAt = DateTime.now();
+      unawaited(_saveMockTasks());
     }
     robot.activeTaskId = null;
     robot.moving = false;
+    _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
   }
 
   void _failRobotTask(_MockRobot robot, _MockTask task, String reason) {
@@ -1483,6 +3575,82 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ..moving = false
       ..targetWaypoint = null
       ..assignedRoute.clear();
+    _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+    unawaited(_saveMockTasks());
+  }
+
+  Map<Offset, String> get _homeWaypoints {
+    final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    return {
+      for (final entry in names.entries)
+        if (entry.value.trim().toLowerCase().startsWith('홈') ||
+            entry.value.trim().toLowerCase().startsWith('home'))
+          entry.key: entry.value.trim(),
+    };
+  }
+
+  List<Offset> get _mobileRuntimeWaypoints {
+    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final lanes = _robotDeployedMap?.lanes ?? _recommendedLanes;
+    return waypoints
+        .where(
+          (point) => lanes.any(
+            (lane) =>
+                (lane.$1 - point).distance <= .01 ||
+                (lane.$2 - point).distance <= .01,
+          ),
+        )
+        .toSet()
+        .toList();
+  }
+
+  bool _assignHome(_MockRobot robot, _MockTaskStep step) {
+    final homes = _homeWaypoints;
+    if (homes.isEmpty) return false;
+    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    if (waypoints.isEmpty) return false;
+    final start = waypoints.reduce(
+      (a, b) => (a - robot.position).distance <= (b - robot.position).distance
+          ? a
+          : b,
+    );
+    Offset? selected;
+    List<Offset>? selectedPath;
+    var selectedDistance = double.infinity;
+    for (final home in homes.keys) {
+      final reservedBy = _homeReservations[home];
+      if (reservedBy != null && reservedBy != robot.id) continue;
+      final occupied = _mockRobots.any(
+        (other) =>
+            other.id != robot.id && (other.position - home).distance <= 18,
+      );
+      if (occupied) continue;
+      final path = _shortestRobotPath(start, home);
+      if (path == null) continue;
+      var distance = 0.0;
+      for (var index = 1; index < path.length; index++) {
+        distance += (path[index] - path[index - 1]).distance;
+      }
+      if (distance < selectedDistance) {
+        selected = home;
+        selectedPath = path;
+        selectedDistance = distance;
+      }
+    }
+    if (selected == null || selectedPath == null) return false;
+    _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+    _homeReservations[selected] = robot.id;
+    step
+      ..destination = selected
+      ..destinationName = homes[selected]
+      ..status = _TaskStepStatus.active;
+    robot
+      ..targetWaypoint = null
+      ..assignedRoute.clear()
+      ..assignedRoute.addAll(selectedPath.skip(1))
+      ..moving = true;
+    unawaited(_saveMockTasks());
+    return true;
   }
 
   void _startTaskStep(_MockRobot robot, _MockTask task) {
@@ -1493,7 +3661,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     step.status = _TaskStepStatus.active;
     step.remainingSeconds = step.durationSeconds;
-    if (step.type != _TaskStepType.navigate) {
+    if (step.type == _TaskStepType.returnHome) {
+      if (_homeWaypoints.isEmpty) {
+        _failRobotTask(robot, task, '홈 Waypoint가 없습니다. 홈1, 홈2처럼 이름을 지정해 주세요.');
+      } else if (!_assignHome(robot, step)) {
+        step.status = _TaskStepStatus.pending;
+        robot.moving = false;
+      }
+      return;
+    }
+    if (!step.type.isMovement) {
       robot.moving = true;
       return;
     }
@@ -1531,6 +3708,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } else {
       _startTaskStep(robot, task);
     }
+    unawaited(_saveMockTasks());
   }
 
   void _startMockRobotTimer() {
@@ -1546,16 +3724,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       var changed = false;
       for (final robot in _mockRobots) {
-        if (!robot.moving) continue;
         final task = robot.activeTaskId == null
             ? null
             : _mockTasks
                   .where((item) => item.id == robot.activeTaskId)
                   .firstOrNull;
         final activeStep = task?.currentStep;
-        if (task != null &&
-            activeStep != null &&
-            activeStep.type != _TaskStepType.navigate) {
+        if (!robot.moving) {
+          if (task != null &&
+              activeStep?.type == _TaskStepType.returnHome &&
+              activeStep?.status == _TaskStepStatus.pending) {
+            _startTaskStep(robot, task);
+            changed = robot.moving || changed;
+          }
+          continue;
+        }
+        if (task != null && activeStep != null && !activeStep.type.isMovement) {
           activeStep.remainingSeconds = math.max(
             0,
             activeStep.remainingSeconds - .1,
@@ -1602,18 +3786,43 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _spawnMockRobot() async {
-    final runtimeWaypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final runtimeWaypoints = (_robotDeployedMap?.waypoints ?? _laneWaypoints)
+        .toSet()
+        .toList();
+    final runtimeLanes = _robotDeployedMap?.lanes ?? _recommendedLanes;
     final runtimeNames = _robotDeployedMap?.waypointNames ?? _waypointNames;
     if (runtimeWaypoints.isEmpty) {
       _showProcessingWarning('Mock 로봇 Spawn', '먼저 Lane과 Waypoint를 만들어 주세요.');
       return;
     }
     var kind = _RobotKind.mockMobile;
+    bool isLaneConnected(Offset point) => runtimeLanes.any(
+      (lane) =>
+          (lane.$1 - point).distance <= .01 ||
+          (lane.$2 - point).distance <= .01,
+    );
+    List<Offset> candidatesFor(_RobotKind robotKind) {
+      if (robotKind == _RobotKind.omxManipulator) {
+        final equipment = runtimeWaypoints
+            .where(
+              (point) => _robotDeployedMap == null
+                  ? _waypointTypes[point] == '설비'
+                  : !isLaneConnected(point),
+            )
+            .toList();
+        return equipment.isEmpty ? runtimeWaypoints : equipment;
+      }
+      return runtimeWaypoints.where(isLaneConnected).toList();
+    }
+
     final controller = TextEditingController(
       text: 'mock-${_mockRobots.length + 1}',
     );
-    var start = runtimeWaypoints.first;
-    final result = await showDialog<(String, Offset, _RobotKind)>(
+    var start = candidatesFor(kind).firstOrNull ?? runtimeWaypoints.first;
+    Uint8List? selectedImageBytes;
+    ui.Image? selectedImage;
+    String? selectedImageName;
+    final result = await showDialog<_RobotSpawnSelection>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1643,8 +3852,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         _RobotKind.pinky => 'pinky',
                         _RobotKind.omxManipulator => 'omx',
                         _RobotKind.mockHumanoid => 'humanoid',
+                        _RobotKind.human => 'human',
                       };
                       controller.text = '$prefix-${_mockRobots.length + 1}';
+                      final candidates = candidatesFor(value);
+                      if (candidates.isNotEmpty) start = candidates.first;
                     });
                   },
                 ),
@@ -1657,20 +3869,134 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   ),
                 ),
                 const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Container(
+                      width: 54,
+                      height: 54,
+                      clipBehavior: Clip.antiAlias,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFCBD5E1)),
+                      ),
+                      child: selectedImageBytes == null
+                          ? Icon(
+                              kind == _RobotKind.human
+                                  ? Icons.person
+                                  : kind == _RobotKind.mockHumanoid
+                                  ? Icons.accessibility_new
+                                  : Icons.smart_toy_outlined,
+                              color: const Color(0xFF475569),
+                              size: 30,
+                            )
+                          : Image.memory(
+                              selectedImageBytes!,
+                              fit: BoxFit.cover,
+                            ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () async {
+                              final picked = await FilePicker.platform
+                                  .pickFiles(
+                                    type: FileType.custom,
+                                    allowedExtensions: const [
+                                      'png',
+                                      'jpg',
+                                      'jpeg',
+                                      'webp',
+                                    ],
+                                    withData: true,
+                                  );
+                              if (picked == null || picked.files.isEmpty) {
+                                return;
+                              }
+                              final file = picked.files.single;
+                              if (file.bytes == null) return;
+                              try {
+                                final codec = await ui.instantiateImageCodec(
+                                  file.bytes!,
+                                );
+                                final frame = await codec.getNextFrame();
+                                codec.dispose();
+                                if (!dialogContext.mounted) {
+                                  frame.image.dispose();
+                                  return;
+                                }
+                                selectedImage?.dispose();
+                                setDialogState(() {
+                                  selectedImageBytes = file.bytes;
+                                  selectedImage = frame.image;
+                                  selectedImageName = file.name;
+                                });
+                              } catch (_) {
+                                if (!dialogContext.mounted) return;
+                                ScaffoldMessenger.of(
+                                  dialogContext,
+                                ).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('선택한 이미지를 읽을 수 없습니다.'),
+                                  ),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.image_outlined),
+                            label: const Text('캐릭터 이미지 선택'),
+                          ),
+                          Text(
+                            selectedImageName ?? '선택하지 않으면 기본 아이콘을 사용합니다.',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (selectedImageBytes != null)
+                      IconButton(
+                        onPressed: () {
+                          selectedImage?.dispose();
+                          setDialogState(() {
+                            selectedImageBytes = null;
+                            selectedImage = null;
+                            selectedImageName = null;
+                          });
+                        },
+                        tooltip: '기본 아이콘 사용',
+                        icon: const Icon(Icons.close),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
                 DropdownButtonFormField<Offset>(
-                  initialValue: start,
+                  key: ValueKey(kind),
+                  initialValue: candidatesFor(kind).contains(start)
+                      ? start
+                      : null,
                   decoration: InputDecoration(
                     labelText: kind.isMobile ? '시작 Waypoint' : '고정 설치 Waypoint',
+                    helperText: candidatesFor(kind).isEmpty
+                        ? kind.isMobile
+                              ? 'Lane에 연결된 이동 Waypoint가 없습니다.'
+                              : '설비 Waypoint가 없습니다.'
+                        : kind == _RobotKind.omxManipulator
+                        ? 'Lane이 없는 설비 Waypoint를 우선 표시합니다.'
+                        : null,
                     border: OutlineInputBorder(),
                   ),
                   items: [
-                    for (final point in runtimeWaypoints)
+                    for (final point in candidatesFor(kind))
                       DropdownMenuItem(
                         value: point,
                         child: Text(
                           (runtimeNames[point] ?? '').trim().isEmpty
                               ? 'Waypoint ${runtimeWaypoints.indexOf(point) + 1}'
-                              : runtimeNames[point]!,
+                              : '${runtimeNames[point]!}${kind == _RobotKind.omxManipulator ? ' · 설비' : ''}',
                         ),
                       ),
                   ],
@@ -1689,8 +4015,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
             FilledButton.icon(
               onPressed: () {
                 final name = controller.text.trim();
-                if (name.isNotEmpty) {
-                  Navigator.pop(dialogContext, (name, start, kind));
+                if (name.isNotEmpty && candidatesFor(kind).contains(start)) {
+                  Navigator.pop(
+                    dialogContext,
+                    _RobotSpawnSelection(
+                      name: name,
+                      position: start,
+                      kind: kind,
+                      imageBytes: selectedImageBytes,
+                      image: selectedImage,
+                    ),
+                  );
                 }
               },
               icon: const Icon(Icons.add, size: 18),
@@ -1701,11 +4036,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ),
     );
     controller.dispose();
-    if (result == null || !mounted) return;
-    if (_mockRobots.any((robot) => robot.id == result.$1)) {
+    if (result == null || !mounted) {
+      selectedImage?.dispose();
+      return;
+    }
+    if (_mockRobots.any((robot) => robot.id == result.name)) {
+      result.image?.dispose();
       _showProcessingWarning(
         'Mock 로봇 Spawn',
-        '같은 이름의 로봇이 이미 있습니다: ${result.$1}',
+        '같은 이름의 로봇이 이미 있습니다: ${result.name}',
       );
       return;
     }
@@ -1719,10 +4058,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
     setState(() {
       _mockRobots.add(
         _MockRobot(
-          id: result.$1,
-          position: result.$2,
+          id: result.name,
+          position: result.position,
           color: colors[_mockRobots.length % colors.length],
-          kind: result.$3,
+          kind: result.kind,
+          imageBytes: result.imageBytes,
+          image: result.image,
         ),
       );
     });
@@ -1746,15 +4087,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       _mockRobots.remove(robot);
     });
+    robot.image?.dispose();
+    _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+    unawaited(_saveMockTasks());
   }
 
   Future<void> _createMockTask() async {
-    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final waypoints = _mobileRuntimeWaypoints;
     final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
     final taskRobots = _mockRobots
         .where((robot) => robot.kind.canCarry)
         .toList();
-    if (taskRobots.isEmpty || waypoints.isEmpty) {
+    if (waypoints.isEmpty) {
       final action = await showDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -1798,6 +4142,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
       builder: (_) => _SequentialTaskEditorDialog(
         initialName: '연속 작업 ${_mockTasks.length + 1}',
         robots: taskRobots,
+        drawing: _robotRuntimeDrawing,
+        lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
         waypoints: waypoints,
         waypointNames: names,
       ),
@@ -1806,11 +4152,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final available = taskRobots
         .where((robot) => robot.activeTaskId == null)
         .toList();
-    final robot = result.robotId == '__auto__'
+    final robot = !result.startImmediately
+        ? null
+        : result.robotId == '__auto__'
         ? (available..sort((a, b) => b.battery.compareTo(a.battery)))
               .firstOrNull
-        : taskRobots.where((item) => item.id == result.robotId).firstOrNull;
-    if (robot == null || robot.activeTaskId != null) {
+        : available.where((item) => item.id == result.robotId).firstOrNull;
+    if (result.startImmediately && robot == null) {
       _showProcessingWarning('작업 생성', '현재 작업을 수행할 수 있는 로봇이 없습니다.');
       return;
     }
@@ -1831,19 +4179,196 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
     }).toList();
     final task = _MockTask(
-      id: 'TASK-${(_mockTasks.length + 1).toString().padLeft(3, '0')}',
+      id: _nextTaskId(),
       name: result.name,
       description: result.description,
       type: '연속 작업',
-      robotId: robot.id,
+      robotId: robot?.id ?? result.robotId,
       steps: steps,
+      trigger: result.trigger,
     );
     setState(() {
-      task.status = _MockTaskStatus.active;
+      task.status = result.startImmediately
+          ? _MockTaskStatus.active
+          : _MockTaskStatus.queued;
       _mockTasks.insert(0, task);
+      if (robot != null) {
+        robot.activeTaskId = task.id;
+        _startTaskStep(robot, task);
+      }
+    });
+    await _saveMockTasks();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.startImmediately
+              ? '${task.name} 작업을 MySQL에 저장하고 시작했습니다.'
+              : '${task.name} 작업을 MySQL에 저장했습니다.',
+        ),
+      ),
+    );
+    _startMockRobotTimer();
+  }
+
+  Future<void> _editMockTask(_MockTask task) async {
+    final waypoints = _mobileRuntimeWaypoints;
+    final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    final taskRobots = _mockRobots
+        .where((robot) => robot.kind.canCarry)
+        .toList();
+    if (waypoints.isEmpty) {
+      _showProcessingWarning('작업 수정', '운영 맵을 먼저 준비해 주세요.');
+      return;
+    }
+    final result = await showDialog<_TaskEditorResult>(
+      context: context,
+      builder: (_) => _SequentialTaskEditorDialog(
+        initialName: task.name,
+        initialDescription: task.description,
+        initialRobotId: task.robotId,
+        initialSteps: task.steps
+            .map(
+              (step) => _TaskStepDraft(
+                step.type,
+                destination: step.destination,
+                durationSeconds: step.durationSeconds,
+              ),
+            )
+            .toList(),
+        initialTrigger: task.trigger,
+        editing: true,
+        robots: taskRobots,
+        drawing: _robotRuntimeDrawing,
+        lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
+        waypoints: waypoints,
+        waypointNames: names,
+      ),
+    );
+    if (result == null || !mounted) return;
+    final available = taskRobots
+        .where(
+          (robot) =>
+              robot.activeTaskId == null || robot.activeTaskId == task.id,
+        )
+        .toList();
+    final nextRobot = !result.startImmediately
+        ? null
+        : result.robotId == '__auto__'
+        ? (available..sort((a, b) => b.battery.compareTo(a.battery)))
+              .firstOrNull
+        : available.where((robot) => robot.id == result.robotId).firstOrNull;
+    if (result.startImmediately && nextRobot == null) {
+      _showProcessingWarning('작업 수정', '선택한 로봇이 다른 작업을 수행 중입니다.');
+      return;
+    }
+    final nextSteps = result.steps.map((draft) {
+      final destination = draft.destination;
+      final destinationName = destination == null
+          ? null
+          : (names[destination] ?? '').trim().isEmpty
+          ? 'Waypoint ${waypoints.indexOf(destination) + 1}'
+          : names[destination]!;
+      return _MockTaskStep(
+        type: draft.type,
+        destination: destination,
+        destinationName: destinationName,
+        durationSeconds: draft.type == _TaskStepType.armLoad
+            ? 9.6
+            : draft.durationSeconds,
+      );
+    }).toList();
+    final previousRobot = _mockRobots
+        .where((robot) => robot.activeTaskId == task.id)
+        .firstOrNull;
+    setState(() {
+      if (previousRobot != null) {
+        previousRobot
+          ..activeTaskId = null
+          ..moving = false
+          ..targetWaypoint = null
+          ..assignedRoute.clear();
+        _homeReservations.removeWhere(
+          (_, robotId) => robotId == previousRobot.id,
+        );
+      }
+      task
+        ..name = result.name
+        ..description = result.description
+        ..trigger = result.trigger
+        ..robotId = nextRobot?.id ?? result.robotId
+        ..currentStepIndex = 0
+        ..status = result.startImmediately
+            ? _MockTaskStatus.active
+            : _MockTaskStatus.queued
+        ..completedAt = null
+        ..steps.clear()
+        ..steps.addAll(nextSteps);
+      if (nextRobot != null) {
+        nextRobot.activeTaskId = task.id;
+        _startTaskStep(nextRobot, task);
+      }
+    });
+    await _saveMockTasks();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.startImmediately
+              ? '${task.name} 작업을 수정하고 다시 시작했습니다.'
+              : '${task.name} 작업 수정 내용을 MySQL에 저장했습니다.',
+        ),
+      ),
+    );
+    _startMockRobotTimer();
+  }
+
+  Future<void> _runMockTask(_MockTask task) async {
+    if (task.status == _MockTaskStatus.active) {
+      _showProcessingWarning('작업 실행', '${task.name} 작업은 이미 실행 중입니다.');
+      return;
+    }
+    final waypoints = _mobileRuntimeWaypoints;
+    if (waypoints.isEmpty || task.steps.isEmpty) {
+      _showProcessingWarning('작업 실행', '운영 맵과 실행 단계를 먼저 준비해 주세요.');
+      return;
+    }
+    final available = _mockRobots
+        .where((robot) => robot.kind.canCarry && robot.activeTaskId == null)
+        .toList();
+    final robot = task.robotId == '__auto__'
+        ? (available..sort((a, b) => b.battery.compareTo(a.battery)))
+              .firstOrNull
+        : available.where((robot) => robot.id == task.robotId).firstOrNull;
+    if (robot == null) {
+      _showProcessingWarning(
+        '작업 실행',
+        task.robotId == '__auto__'
+            ? '현재 작업 가능한 로봇이 없습니다.'
+            : '${task.robotId} 로봇이 없거나 다른 작업을 수행 중입니다.',
+      );
+      return;
+    }
+    setState(() {
+      task
+        ..robotId = robot.id
+        ..status = _MockTaskStatus.active
+        ..currentStepIndex = 0
+        ..completedAt = null;
+      for (final step in task.steps) {
+        step
+          ..status = _TaskStepStatus.pending
+          ..remainingSeconds = 0
+          ..failureReason = null;
+      }
       robot.activeTaskId = task.id;
       _startTaskStep(robot, task);
     });
+    await _saveMockTasks();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${task.name} 작업을 ${robot.id}에 배정해 실행했습니다.')),
+    );
     _startMockRobotTimer();
   }
 
@@ -1871,8 +4396,55 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ..targetWaypoint = null
           ..moving = false
           ..assignedRoute.clear();
+        _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
       }
     });
+    unawaited(_saveMockTasks());
+  }
+
+  Future<void> _deleteMockTask(_MockTask task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(
+          Icons.delete_outline,
+          color: Color(0xFFDC2626),
+          size: 36,
+        ),
+        title: const Text('작업 삭제'),
+        content: Text('${task.name} 작업을 목록과 저장소에서 삭제할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.delete_outline, size: 18),
+            label: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final robot = _mockRobots
+        .where((item) => item.activeTaskId == task.id)
+        .firstOrNull;
+    setState(() {
+      if (robot != null) {
+        robot
+          ..activeTaskId = null
+          ..moving = false
+          ..targetWaypoint = null
+          ..assignedRoute.clear();
+        _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+      }
+      _mockTasks.remove(task);
+    });
+    await _saveMockTasks();
   }
 
   Future<void> _loadMapForRobots() async {
@@ -1965,11 +4537,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (selected == null) return;
       final loaded = await loadDeployedMap(selected);
       if (!mounted) return;
+      for (final robot in _mockRobots) {
+        robot.image?.dispose();
+      }
       setState(() {
         _robotDeployedMap = loaded;
         _mockRobots.clear();
-        _mockTasks.clear();
+        _homeReservations.clear();
+        for (final task in _mockTasks.where(
+          (task) =>
+              task.status == _MockTaskStatus.active ||
+              task.status == _MockTaskStatus.queued,
+        )) {
+          task
+            ..status = _MockTaskStatus.queued
+            ..currentStepIndex = 0
+            ..completedAt = null;
+          for (final step in task.steps) {
+            step
+              ..status = _TaskStepStatus.pending
+              ..remainingSeconds = 0
+              ..failureReason = null;
+          }
+        }
       });
+      unawaited(_saveMockTasks());
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${loaded.summary.name} 배포 맵을 불러왔습니다.')),
       );
@@ -2015,6 +4607,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
   @override
   void dispose() {
     _mockRobotTimer?.cancel();
+    _orderDispatchTimer?.cancel();
+    for (final robot in _mockRobots) {
+      robot.image?.dispose();
+    }
     _mapTransform.dispose();
     super.dispose();
   }
@@ -2510,6 +5106,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   String get _mapName {
+    final override = _mapNameOverride?.trim();
+    if (override != null && override.isNotEmpty) return override;
     final name = _drawing?.name.split('.').first.trim() ?? 'warehouse';
     return name.isEmpty ? 'warehouse' : name;
   }
@@ -2521,6 +5119,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   String get _deploymentMapName =>
       _mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+
+  String _fileNameFromPath(String path) => path.split(RegExp(r'[/\\]')).last;
+
+  String get _activeBuildingYamlName {
+    final loaded = _robotDeployedMap?.summary;
+    if (loaded != null && loaded.yamlPath.endsWith('.building.yaml')) {
+      return _fileNameFromPath(loaded.yamlPath);
+    }
+    final name = loaded?.name ?? _mapName;
+    final safeName = name.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+    return '$safeName.building.yaml';
+  }
+
+  String get _activeMapSourceName {
+    final loaded = _robotDeployedMap?.summary;
+    if (loaded != null) return _fileNameFromPath(loaded.yamlPath);
+    return _projectFileName ?? '저장 전 편집 작업';
+  }
 
   String _yamlEscape(String value) =>
       value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
@@ -2561,11 +5177,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
       (_decodeOffset((line as List<dynamic>)[0]), _decodeOffset(line[1])),
   ];
 
-  Map<String, dynamic> _buildProjectData() {
+  Map<String, dynamic> _encodeLaneProjectData((Offset, Offset) lane) {
+    final data = <String, dynamic>{
+      'start': _encodeOffset(lane.$1),
+      'end': _encodeOffset(lane.$2),
+      'direction': _laneDirections[lane] ?? '양방향',
+    };
+    final speed = _laneSpeedLimits[lane];
+    final orientation = _laneOrientations[lane];
+    final mutex = _laneMutexGroups[lane];
+    if (speed != null) data['speedLimit'] = speed;
+    if (orientation != null) data['orientation'] = orientation;
+    if (mutex != null) data['mutex'] = mutex;
+    return data;
+  }
+
+  Map<String, dynamic> _buildProjectData({String? mapName}) {
     final drawing = _drawing;
     return {
       'format': 'robosapiens-map-project',
       'version': 1,
+      'mapName': mapName ?? _mapName,
+      'mapScenarioSummary': _mapScenarioSummary,
+      'robotSafety': {
+        'widthMeters': _robotWidthMeters,
+        'turningRadiusMeters': _turningRadiusMeters,
+        'localizationMarginMeters': _localizationMarginMeters,
+      },
       'drawing': drawing == null
           ? null
           : {
@@ -2602,12 +5240,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       'frozenAutoWalls': _encodeLines(_frozenAutoWalls),
       'recommendedLanes': _encodeLines(_recommendedLanes),
       'laneDirections': [
-        for (final lane in _recommendedLanes)
-          {
-            'start': _encodeOffset(lane.$1),
-            'end': _encodeOffset(lane.$2),
-            'direction': _laneDirections[lane] ?? '양방향',
-          },
+        for (final lane in _recommendedLanes) _encodeLaneProjectData(lane),
       ],
       'waypoints': [
         for (final point in _laneWaypoints)
@@ -2623,32 +5256,96 @@ class _ControlDashboardState extends State<ControlDashboard> {
     };
   }
 
-  Future<void> _saveProject() async {
-    if (_drawing == null) return;
+  Future<bool> _writeProject({
+    required String mapName,
+    required String dialogTitle,
+  }) async {
+    if (_drawing == null) return false;
     try {
       final fileName =
-          '${_mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_')}.rmfproject';
+          '${mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_')}.rmfproject';
       final bytes = Uint8List.fromList(
-        utf8.encode(jsonEncode(_buildProjectData())),
+        utf8.encode(jsonEncode(_buildProjectData(mapName: mapName))),
       );
       final path = await FilePicker.platform.saveFile(
-        dialogTitle: '맵 작업 프로젝트 저장',
+        dialogTitle: dialogTitle,
         fileName: fileName,
         type: FileType.custom,
         allowedExtensions: const ['rmfproject'],
         bytes: bytes,
       );
-      if (!mounted || path == null) return;
+      if (!mounted || path == null) return false;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('$fileName 작업을 저장했습니다.')));
+      setState(() => _projectFileName = fileName);
+      return true;
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted) return false;
       _showProcessingWarning('작업 저장', error);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('작업을 저장하지 못했습니다: $error')));
+      return false;
     }
+  }
+
+  Future<void> _saveProject() async {
+    if (_drawing == null) return;
+    await _writeProject(mapName: _mapName, dialogTitle: '맵 작업 프로젝트 저장');
+  }
+
+  Future<void> _saveProjectAs() async {
+    if (_drawing == null) return;
+    final controller = TextEditingController(text: '$_mapName 복사본');
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.drive_file_rename_outline, size: 36),
+        title: const Text('다른 이름으로 저장'),
+        content: SizedBox(
+          width: 390,
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: '새 맵 이름',
+              helperText: '프로젝트 내부 이름과 파일명에 함께 적용됩니다.',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (value) {
+              final name = value.trim();
+              if (name.isNotEmpty) Navigator.pop(dialogContext, name);
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              final name = controller.text.trim();
+              if (name.isNotEmpty) Navigator.pop(dialogContext, name);
+            },
+            icon: const Icon(Icons.save_as_outlined, size: 18),
+            label: const Text('파일 위치 선택'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (newName == null || !mounted) return;
+    final saved = await _writeProject(
+      mapName: newName,
+      dialogTitle: '$newName 프로젝트를 다른 이름으로 저장',
+    );
+    if (!saved || !mounted) return;
+    setState(() {
+      _mapNameOverride = newName;
+      _isDeployed = false;
+    });
   }
 
   Future<void> _loadProject() async {
@@ -2667,6 +5364,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       final drawingData = data['drawing'] as Map<String, dynamic>?;
       final measurementData = data['measurement'] as Map<String, dynamic>?;
+      final safetyData = data['robotSafety'] as Map<String, dynamic>?;
       final waypointData = data['waypoints'] as List<dynamic>;
       final loadedWaypoints = <Offset>[];
       final loadedNames = <Offset, String>{};
@@ -2688,22 +5386,50 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       final loadedLanes = _decodeLines(data['recommendedLanes']);
       final loadedDirections = <(Offset, Offset), String>{};
+      final loadedSpeedLimits = <(Offset, Offset), double>{};
+      final loadedOrientations = <(Offset, Offset), String>{};
+      final loadedMutexGroups = <(Offset, Offset), String>{};
       for (final item
           in (data['laneDirections'] as List<dynamic>?) ?? const []) {
         final entry = item as Map<String, dynamic>;
-        loadedDirections[(
-              _decodeOffset(entry['start']),
-              _decodeOffset(entry['end']),
-            )] =
-            entry['direction'] as String? ?? '양방향';
+        final lane = (
+          _decodeOffset(entry['start']),
+          _decodeOffset(entry['end']),
+        );
+        loadedDirections[lane] = entry['direction'] as String? ?? '양방향';
+        if (entry['speedLimit'] case final num speed) {
+          loadedSpeedLimits[lane] = speed.toDouble();
+        }
+        if (entry['orientation'] case final String orientation) {
+          loadedOrientations[lane] = orientation;
+        }
+        if (entry['mutex'] case final String mutex when mutex.isNotEmpty) {
+          loadedMutexGroups[lane] = mutex;
+        }
       }
       for (final lane in loadedLanes) {
         loadedDirections.putIfAbsent(lane, () => '양방향');
       }
       if (!mounted) return;
+      final loadedMapName = (data['mapName'] as String?)?.trim();
+      final fallbackMapName = result.files.single.name.replaceFirst(
+        RegExp(r'\.rmfproject$'),
+        '',
+      );
       _recordUndo();
       _fitMapToScreen();
       setState(() {
+        _mapNameOverride = loadedMapName?.isNotEmpty == true
+            ? loadedMapName
+            : fallbackMapName;
+        _projectFileName = result.files.single.name;
+        _mapScenarioSummary = data['mapScenarioSummary'] as String?;
+        _robotWidthMeters =
+            (safetyData?['widthMeters'] as num?)?.toDouble() ?? .6;
+        _turningRadiusMeters =
+            (safetyData?['turningRadiusMeters'] as num?)?.toDouble() ?? .3;
+        _localizationMarginMeters =
+            (safetyData?['localizationMarginMeters'] as num?)?.toDouble() ?? .1;
         _drawing = drawingData == null
             ? null
             : UploadedDrawing(
@@ -2747,6 +5473,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _laneDirections
           ..clear()
           ..addAll(loadedDirections);
+        _laneSpeedLimits
+          ..clear()
+          ..addAll(loadedSpeedLimits);
+        _laneOrientations
+          ..clear()
+          ..addAll(loadedOrientations);
+        _laneMutexGroups
+          ..clear()
+          ..addAll(loadedMutexGroups);
         _laneWaypoints
           ..clear()
           ..addAll(loadedWaypoints);
@@ -3133,13 +5868,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
       buffer.writeln('      []');
     } else {
       for (final lane in laneIndices) {
+        final sourceLane = _recommendedLanes[laneIndices.indexOf(lane)];
         final reverse = lane.$3 == '역방향';
         final start = reverse ? lane.$2 : lane.$1;
         final end = reverse ? lane.$1 : lane.$2;
         final bidirectional = lane.$3 == '양방향';
-        buffer.writeln(
-          '      - [$start, $end, {bidirectional: [4, $bidirectional], graph_idx: [2, 0]}]',
-        );
+        final properties = <String>[
+          'bidirectional: [4, $bidirectional]',
+          'graph_idx: [2, 0]',
+          if (_laneSpeedLimits[sourceLane] case final speed?)
+            'speed_limit: [3, ${speed.toStringAsFixed(3)}]',
+          if (_laneOrientations[sourceLane] case final orientation?)
+            'orientation: [1, $orientation]',
+          if (_laneMutexGroups[sourceLane] case final mutex?)
+            'mutex: [1, "${_yamlEscape(mutex)}"]',
+        ];
+        buffer.writeln('      - [$start, $end, {${properties.join(', ')}}]');
       }
     }
     buffer.writeln('    measurements:');
@@ -3172,9 +5916,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
           '일반' => 'is_holding_point',
           _ => null,
         };
-        final properties = trafficEditorProperty == null
+        final waypointProperties = <String>[
+          if (trafficEditorProperty != null)
+            '$trafficEditorProperty: [4, true]',
+          if (waypointType == '픽업' && waypointName?.trim().isNotEmpty == true)
+            'pickup_dispenser: [1, "${_yamlEscape(waypointName!.trim())}"]',
+          if (waypointType == '드랍오프' && waypointName?.trim().isNotEmpty == true)
+            'dropoff_ingestor: [1, "${_yamlEscape(waypointName!.trim())}"]',
+          if (waypointType == '설비') 'robosapiens_equipment: [4, true]',
+        ];
+        final properties = waypointProperties.isEmpty
             ? ''
-            : ', {$trafficEditorProperty: [4, true]}';
+            : ', {${waypointProperties.join(', ')}}';
         buffer.writeln(
           '      - [${point.dx.toStringAsFixed(3)}, ${point.dy.toStringAsFixed(3)}, 0.0, "${_yamlEscape(name)}"$properties]',
         );
@@ -3198,6 +5951,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _downloadBuildingYaml() async {
     if (_drawing == null) return;
+    if (_showMapValidationWarnings()) return;
     try {
       final yaml = _buildBuildingYaml();
       final path = await FilePicker.platform.saveFile(
@@ -3224,6 +5978,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _copyBuildingYaml() async {
     if (_drawing == null) return;
+    if (_showMapValidationWarnings()) return;
     try {
       await Clipboard.setData(ClipboardData(text: _buildBuildingYaml()));
       if (!mounted) return;
@@ -3534,8 +6289,72 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                         onDownload: _downloadBuildingYaml,
                                         onCopy: _copyBuildingYaml,
                                         onSaveProject: _saveProject,
+                                        onSaveProjectAs: _saveProjectAs,
                                         onLoadProject: _loadProject,
                                       ),
+                                      const SizedBox(height: 14),
+                                      _MapFileStatus(
+                                        sourceLabel: '현재 작업',
+                                        sourceName:
+                                            _projectFileName ?? '저장 전 편집 작업',
+                                        buildingYamlName: _yamlFileName,
+                                        pendingDeployment: !_isDeployed,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerRight,
+                                        child: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: [
+                                            OutlinedButton.icon(
+                                              onPressed:
+                                                  _showScenarioMapAssistant,
+                                              icon: const Icon(
+                                                Icons.auto_awesome_outlined,
+                                                size: 18,
+                                              ),
+                                              label: const Text('시나리오 맵 자동 완성'),
+                                            ),
+                                            OutlinedButton.icon(
+                                              onPressed:
+                                                  _showRobotSafetySettings,
+                                              icon: const Icon(
+                                                Icons
+                                                    .health_and_safety_outlined,
+                                                size: 18,
+                                              ),
+                                              label: const Text('로봇 안전 기준'),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      if (_mapScenarioSummary != null) ...[
+                                        const SizedBox(height: 8),
+                                        Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 13,
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF5F3FF),
+                                            borderRadius: BorderRadius.circular(
+                                              9,
+                                            ),
+                                            border: Border.all(
+                                              color: const Color(0xFFDDD6FE),
+                                            ),
+                                          ),
+                                          child: Text(
+                                            '적용된 운영 시나리오 · $_mapScenarioSummary',
+                                            style: const TextStyle(
+                                              color: Color(0xFF5B21B6),
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
                                       const SizedBox(height: 24),
                                       _StageBar(activeStage: _stage),
                                       const SizedBox(height: 24),
@@ -3578,6 +6397,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                                   onAddWaypoint:
                                                       _addLaneWaypoint,
                                                   onEditWaypoint: _editWaypoint,
+                                                  onMoveWaypoint: _moveWaypoint,
+                                                  waypointDropIssue:
+                                                      _waypointDropIssue,
                                                   onSelectLane:
                                                       _selectLaneForDeletion,
                                                   isWallConnectMode:
@@ -3719,6 +6541,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                                   onAddWaypoint:
                                                       _addLaneWaypoint,
                                                   onEditWaypoint: _editWaypoint,
+                                                  onMoveWaypoint: _moveWaypoint,
+                                                  waypointDropIssue:
+                                                      _waypointDropIssue,
                                                   onSelectLane:
                                                       _selectLaneForDeletion,
                                                   isWallConnectMode:
@@ -3841,8 +6666,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           : _selectedMenu == 2
                           ? _RobotManagementPage(
                               drawing: _robotRuntimeDrawing,
-                              activeMapName:
-                                  _robotDeployedMap?.summary.name ?? _mapName,
+                              activeMapSourceName: _activeMapSourceName,
+                              activeBuildingYamlName: _activeBuildingYamlName,
+                              pendingDeployment:
+                                  _robotDeployedMap?.summary.yamlPath.endsWith(
+                                    '.rmfproject',
+                                  ) ??
+                                  !_isDeployed,
                               lanes:
                                   _robotDeployedMap?.lanes ?? _recommendedLanes,
                               waypoints:
@@ -3861,8 +6691,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           ? _TaskManagementPage(
                               tasks: _mockTasks,
                               robots: _mockRobots,
+                              drawing: _robotRuntimeDrawing,
+                              lanes:
+                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
+                              waypoints:
+                                  _robotDeployedMap?.waypoints ??
+                                  _laneWaypoints,
+                              waypointNames:
+                                  _robotDeployedMap?.waypointNames ??
+                                  _waypointNames,
                               activeMapName:
                                   _robotDeployedMap?.summary.name ?? _mapName,
+                              activeMapSourceName: _activeMapSourceName,
+                              activeBuildingYamlName: _activeBuildingYamlName,
+                              pendingDeployment:
+                                  _robotDeployedMap?.summary.yamlPath.endsWith(
+                                    '.rmfproject',
+                                  ) ??
+                                  !_isDeployed,
                               mapReady:
                                   (_robotDeployedMap?.waypoints ??
                                           _laneWaypoints)
@@ -3871,6 +6717,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onOpenRobots: () =>
                                   setState(() => _selectedMenu = 2),
                               onCreate: _createMockTask,
+                              onRun: _runMockTask,
+                              onEdit: _editMockTask,
+                              onDelete: _deleteMockTask,
                               onCancel: _cancelMockTask,
                             )
                           : _ComingSoonPage(
@@ -3897,13 +6746,27 @@ class _ControlDashboardState extends State<ControlDashboard> {
 class _SequentialTaskEditorDialog extends StatefulWidget {
   const _SequentialTaskEditorDialog({
     required this.initialName,
+    this.initialDescription = '',
+    this.initialRobotId = '__auto__',
+    this.initialSteps,
+    this.initialTrigger = _OrderTrigger.manual,
+    this.editing = false,
     required this.robots,
+    required this.drawing,
+    required this.lanes,
     required this.waypoints,
     required this.waypointNames,
   });
 
   final String initialName;
+  final String initialDescription;
+  final String initialRobotId;
+  final List<_TaskStepDraft>? initialSteps;
+  final _OrderTrigger initialTrigger;
+  final bool editing;
   final List<_MockRobot> robots;
+  final UploadedDrawing? drawing;
+  final List<(Offset, Offset)> lanes;
   final List<Offset> waypoints;
   final Map<Offset, String> waypointNames;
 
@@ -3917,23 +6780,46 @@ class _SequentialTaskEditorDialogState
   late final TextEditingController _name;
   final _description = TextEditingController();
   String _robotId = '__auto__';
+  late _OrderTrigger _trigger;
   late final List<_TaskStepDraft> _steps;
+  int _selectedStepIndex = 0;
+
+  Offset? _normalizedDestination(Offset? destination) {
+    if (destination == null || widget.waypoints.isEmpty) return null;
+    return widget.waypoints.reduce(
+      (a, b) =>
+          (a - destination).distance <= (b - destination).distance ? a : b,
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     _name = TextEditingController(text: widget.initialName);
-    _steps = [
-      _TaskStepDraft(
-        _TaskStepType.navigate,
-        destination: widget.waypoints.first,
-      ),
-      _TaskStepDraft(_TaskStepType.armLoad),
-      _TaskStepDraft(
-        _TaskStepType.navigate,
-        destination: widget.waypoints.first,
-      ),
-    ];
+    _description.text = widget.initialDescription;
+    _robotId = widget.initialRobotId;
+    _trigger = widget.initialTrigger;
+    _steps = widget.initialSteps?.isNotEmpty == true
+        ? widget.initialSteps!
+              .map(
+                (step) => _TaskStepDraft(
+                  step.type,
+                  destination: _normalizedDestination(step.destination),
+                  durationSeconds: step.durationSeconds,
+                ),
+              )
+              .toList()
+        : [
+            _TaskStepDraft(
+              _TaskStepType.navigate,
+              destination: widget.waypoints.first,
+            ),
+            _TaskStepDraft(_TaskStepType.armLoad),
+            _TaskStepDraft(
+              _TaskStepType.navigate,
+              destination: widget.waypoints.first,
+            ),
+          ];
   }
 
   @override
@@ -3958,184 +6844,312 @@ class _SequentialTaskEditorDialogState
             step.type != _TaskStepType.navigate || step.destination != null,
       );
 
+  void _submit({required bool startImmediately}) {
+    Navigator.pop(
+      context,
+      _TaskEditorResult(
+        name: _name.text.trim(),
+        description: _description.text.trim(),
+        robotId: _robotId,
+        steps: _steps,
+        startImmediately: startImmediately,
+        trigger: _trigger,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => AlertDialog(
     icon: const Icon(Icons.account_tree_outlined, size: 36),
     title: const Text('연속 작업 편집기'),
     content: SizedBox(
-      width: 650,
-      height: 560,
-      child: Column(
+      width: 1100,
+      height: 650,
+      child: Row(
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _name,
+          Expanded(
+            flex: 3,
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _name,
+                        decoration: const InputDecoration(
+                          labelText: '작업 이름 *',
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: (_) => setState(() {}),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _robotId,
+                        decoration: const InputDecoration(
+                          labelText: 'Pinky 배정',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          const DropdownMenuItem(
+                            value: '__auto__',
+                            child: Text('자동 배정'),
+                          ),
+                          if (_robotId != '__auto__' &&
+                              !widget.robots.any(
+                                (robot) => robot.id == _robotId,
+                              ))
+                            DropdownMenuItem(
+                              value: _robotId,
+                              child: Text('$_robotId (미접속)'),
+                            ),
+                          for (final robot in widget.robots)
+                            DropdownMenuItem(
+                              value: robot.id,
+                              child: Text(robot.id),
+                            ),
+                        ],
+                        onChanged: (value) => setState(() => _robotId = value!),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _description,
+                  maxLines: 2,
                   decoration: const InputDecoration(
-                    labelText: '작업 이름 *',
+                    labelText: '상세 지시',
                     border: OutlineInputBorder(),
                   ),
-                  onChanged: (_) => setState(() {}),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  initialValue: _robotId,
+                const SizedBox(height: 12),
+                DropdownButtonFormField<_OrderTrigger>(
+                  initialValue: _trigger,
                   decoration: const InputDecoration(
-                    labelText: 'Pinky 배정',
+                    labelText: '주문 자동 분류 규칙',
+                    helperText: '일치하는 MySQL 주문이 들어오면 이 작업을 자동 생성합니다.',
                     border: OutlineInputBorder(),
                   ),
                   items: [
-                    const DropdownMenuItem(
-                      value: '__auto__',
-                      child: Text('자동 배정'),
-                    ),
-                    for (final robot in widget.robots)
-                      DropdownMenuItem(value: robot.id, child: Text(robot.id)),
+                    for (final trigger in _OrderTrigger.values)
+                      DropdownMenuItem(
+                        value: trigger,
+                        child: Text(trigger.label),
+                      ),
                   ],
-                  onChanged: (value) => setState(() => _robotId = value!),
+                  onChanged: (value) => setState(() => _trigger = value!),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _description,
-            maxLines: 2,
-            decoration: const InputDecoration(
-              labelText: '상세 지시',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  '실행 단계',
-                  style: TextStyle(fontWeight: FontWeight.w800),
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: () => setState(
-                  () => _steps.add(
-                    _TaskStepDraft(
-                      _TaskStepType.navigate,
-                      destination: widget.waypoints.first,
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        '실행 단계',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
                     ),
-                  ),
-                ),
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('단계 추가'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: ReorderableListView.builder(
-              itemCount: _steps.length,
-              onReorderItem: (oldIndex, newIndex) => setState(() {
-                _steps.insert(newIndex, _steps.removeAt(oldIndex));
-              }),
-              itemBuilder: (context, index) {
-                final step = _steps[index];
-                return Card(
-                  key: ObjectKey(step),
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Row(
-                      children: [
-                        CircleAvatar(radius: 15, child: Text('${index + 1}')),
-                        const SizedBox(width: 10),
-                        SizedBox(
-                          width: 165,
-                          child: DropdownButtonFormField<_TaskStepType>(
-                            initialValue: step.type,
-                            decoration: const InputDecoration(
-                              labelText: '동작',
-                              isDense: true,
-                              border: OutlineInputBorder(),
-                            ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: _TaskStepType.navigate,
-                                child: Text('Pinky 이동'),
-                              ),
-                              DropdownMenuItem(
-                                value: _TaskStepType.armLoad,
-                                child: Text('OMX-AI 픽업'),
-                              ),
-                              DropdownMenuItem(
-                                value: _TaskStepType.wait,
-                                child: Text('대기'),
-                              ),
-                            ],
-                            onChanged: (value) => setState(() {
-                              step.type = value!;
-                              if (value == _TaskStepType.navigate) {
-                                step.destination ??= widget.waypoints.first;
-                              }
-                            }),
+                    OutlinedButton.icon(
+                      onPressed: () => setState(() {
+                        _steps.add(
+                          _TaskStepDraft(
+                            _TaskStepType.navigate,
+                            destination: widget.waypoints.first,
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: step.type == _TaskStepType.navigate
-                              ? DropdownButtonFormField<Offset>(
-                                  initialValue: step.destination,
+                        );
+                        _selectedStepIndex = _steps.length - 1;
+                      }),
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('단계 추가'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ReorderableListView.builder(
+                    itemCount: _steps.length,
+                    onReorderItem: (oldIndex, newIndex) => setState(() {
+                      final selectedStep = _steps[_selectedStepIndex];
+                      _steps.insert(newIndex, _steps.removeAt(oldIndex));
+                      _selectedStepIndex = _steps.indexOf(selectedStep);
+                    }),
+                    itemBuilder: (context, index) {
+                      final step = _steps[index];
+                      return Card(
+                        key: ObjectKey(step),
+                        color:
+                            index == _selectedStepIndex &&
+                                step.type == _TaskStepType.navigate
+                            ? const Color(0xFFEFF6FF)
+                            : null,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 15,
+                                child: Text('${index + 1}'),
+                              ),
+                              const SizedBox(width: 10),
+                              SizedBox(
+                                width: 165,
+                                child: DropdownButtonFormField<_TaskStepType>(
+                                  initialValue: step.type,
                                   decoration: const InputDecoration(
-                                    labelText: '목적지 Waypoint',
+                                    labelText: '동작',
                                     isDense: true,
                                     border: OutlineInputBorder(),
                                   ),
-                                  items: [
-                                    for (final point in widget.waypoints)
-                                      DropdownMenuItem(
-                                        value: point,
-                                        child: Text(_waypointLabel(point)),
-                                      ),
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: _TaskStepType.navigate,
+                                      child: Text('Pinky 이동'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: _TaskStepType.returnHome,
+                                      child: Text('홈 복귀(자동)'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: _TaskStepType.armLoad,
+                                      child: Text('OMX-AI 픽업'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: _TaskStepType.wait,
+                                      child: Text('대기'),
+                                    ),
                                   ],
-                                  onChanged: (value) =>
-                                      setState(() => step.destination = value),
-                                )
-                              : step.type == _TaskStepType.wait
-                              ? DropdownButtonFormField<double>(
-                                  initialValue: step.durationSeconds,
-                                  decoration: const InputDecoration(
-                                    labelText: '대기 시간',
-                                    isDense: true,
-                                    border: OutlineInputBorder(),
-                                  ),
-                                  items: const [3, 5, 10, 30, 60]
-                                      .map(
-                                        (seconds) => DropdownMenuItem(
-                                          value: seconds.toDouble(),
-                                          child: Text('$seconds초'),
+                                  onChanged: (value) => setState(() {
+                                    _selectedStepIndex = index;
+                                    step.type = value!;
+                                    if (value == _TaskStepType.navigate) {
+                                      step.destination ??=
+                                          widget.waypoints.first;
+                                    } else if (value ==
+                                        _TaskStepType.returnHome) {
+                                      step.destination = null;
+                                    }
+                                  }),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: step.type == _TaskStepType.navigate
+                                    ? DropdownButtonFormField<Offset>(
+                                        initialValue: step.destination,
+                                        decoration: const InputDecoration(
+                                          labelText: '목적지 Waypoint',
+                                          isDense: true,
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: [
+                                          for (final point in widget.waypoints)
+                                            DropdownMenuItem(
+                                              value: point,
+                                              child: Text(
+                                                _waypointLabel(point),
+                                              ),
+                                            ),
+                                        ],
+                                        onChanged: (value) => setState(() {
+                                          _selectedStepIndex = index;
+                                          step.destination = value;
+                                        }),
+                                      )
+                                    : step.type == _TaskStepType.wait
+                                    ? DropdownButtonFormField<double>(
+                                        initialValue: step.durationSeconds,
+                                        decoration: const InputDecoration(
+                                          labelText: '대기 시간',
+                                          isDense: true,
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: const [3, 5, 10, 30, 60]
+                                            .map(
+                                              (seconds) => DropdownMenuItem(
+                                                value: seconds.toDouble(),
+                                                child: Text('$seconds초'),
+                                              ),
+                                            )
+                                            .toList(),
+                                        onChanged: (value) => setState(
+                                          () => step.durationSeconds = value!,
                                         ),
                                       )
-                                      .toList(),
-                                  onChanged: (value) => setState(
-                                    () => step.durationSeconds = value!,
+                                    : step.type == _TaskStepType.returnHome
+                                    ? const Text(
+                                        '비어 있고 도달 가능한 가장 가까운 홈을 자동 예약',
+                                        style: TextStyle(
+                                          color: Color(0xFF0F766E),
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      )
+                                    : const Text(
+                                        '현재 위치에서 화물을 집어 Pinky 데크에 적재',
+                                        style: TextStyle(
+                                          color: Color(0xFF475569),
+                                        ),
+                                      ),
+                              ),
+                              if (step.type == _TaskStepType.navigate)
+                                IconButton(
+                                  tooltip: '지도에서 이 단계 목적지 지정',
+                                  onPressed: () => setState(
+                                    () => _selectedStepIndex = index,
                                   ),
-                                )
-                              : const Text(
-                                  '현재 위치에서 화물을 집어 Pinky 데크에 적재',
-                                  style: TextStyle(color: Color(0xFF475569)),
+                                  icon: Icon(
+                                    Icons.add_location_alt_outlined,
+                                    color: index == _selectedStepIndex
+                                        ? const Color(0xFF2563EB)
+                                        : null,
+                                  ),
                                 ),
+                              IconButton(
+                                tooltip: '단계 삭제',
+                                onPressed: () => setState(() {
+                                  _steps.remove(step);
+                                  if (_steps.isEmpty) {
+                                    _selectedStepIndex = 0;
+                                  } else {
+                                    _selectedStepIndex = _selectedStepIndex
+                                        .clamp(0, _steps.length - 1);
+                                  }
+                                }),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                              const Icon(Icons.drag_handle),
+                            ],
+                          ),
                         ),
-                        IconButton(
-                          tooltip: '단계 삭제',
-                          onPressed: () => setState(() => _steps.remove(step)),
-                          icon: const Icon(Icons.delete_outline),
-                        ),
-                        const Icon(Icons.drag_handle),
-                      ],
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 18),
+          Expanded(
+            flex: 2,
+            child: _TaskWaypointSelector(
+              drawing: widget.drawing,
+              lanes: widget.lanes,
+              waypoints: widget.waypoints,
+              waypointNames: widget.waypointNames,
+              steps: _steps,
+              selectedStepIndex: _selectedStepIndex,
+              onWaypointSelected: (point) => setState(() {
+                var targetIndex = _selectedStepIndex;
+                if (targetIndex >= _steps.length ||
+                    _steps[targetIndex].type != _TaskStepType.navigate) {
+                  targetIndex = _steps.indexWhere(
+                    (step) => step.type == _TaskStepType.navigate,
+                  );
+                }
+                if (targetIndex < 0) return;
+                _selectedStepIndex = targetIndex;
+                _steps[targetIndex].destination = point;
+              }),
             ),
           ),
         ],
@@ -4146,44 +7160,306 @@ class _SequentialTaskEditorDialogState
         onPressed: () => Navigator.pop(context),
         child: const Text('취소'),
       ),
+      OutlinedButton.icon(
+        onPressed: !_valid ? null : () => _submit(startImmediately: false),
+        icon: const Icon(Icons.save_outlined, size: 18),
+        label: const Text('저장'),
+      ),
       FilledButton.icon(
-        onPressed: !_valid
-            ? null
-            : () => Navigator.pop(
-                context,
-                _TaskEditorResult(
-                  name: _name.text.trim(),
-                  description: _description.text.trim(),
-                  robotId: _robotId,
-                  steps: _steps,
-                ),
-              ),
+        onPressed: !_valid ? null : () => _submit(startImmediately: true),
         icon: const Icon(Icons.play_arrow, size: 18),
-        label: const Text('연속 작업 시작'),
+        label: Text(widget.editing ? '저장 후 재시작' : '저장 후 시작'),
       ),
     ],
   );
+}
+
+class _TaskWaypointSelector extends StatelessWidget {
+  const _TaskWaypointSelector({
+    required this.drawing,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.steps,
+    required this.selectedStepIndex,
+    required this.onWaypointSelected,
+  });
+
+  final UploadedDrawing? drawing;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_TaskStepDraft> steps;
+  final int selectedStepIndex;
+  final ValueChanged<Offset> onWaypointSelected;
+
+  Size get _sourceSize {
+    final width = drawing?.pixelWidth;
+    final height = drawing?.pixelHeight;
+    if (width != null && height != null && width > 0 && height > 0) {
+      return Size(width.toDouble(), height.toDouble());
+    }
+    final maxX = waypoints.fold<double>(1, (value, p) => math.max(value, p.dx));
+    final maxY = waypoints.fold<double>(1, (value, p) => math.max(value, p.dy));
+    return Size(maxX + 24, maxY + 24);
+  }
+
+  Offset _toCanvas(Offset point, Size canvasSize) {
+    final fitted = applyBoxFit(
+      BoxFit.contain,
+      _sourceSize,
+      canvasSize,
+    ).destination;
+    final target = Alignment.center.inscribe(fitted, Offset.zero & canvasSize);
+    return Offset(
+      target.left + point.dx * target.width / _sourceSize.width,
+      target.top + point.dy * target.height / _sourceSize.height,
+    );
+  }
+
+  void _selectNearest(TapDownDetails details, Size canvasSize) {
+    Offset? nearest;
+    var distance = 24.0;
+    for (final waypoint in waypoints) {
+      final candidateDistance =
+          (_toCanvas(waypoint, canvasSize) - details.localPosition).distance;
+      if (candidateDistance <= distance) {
+        nearest = waypoint;
+        distance = candidateDistance;
+      }
+    }
+    if (nearest != null) onWaypointSelected(nearest);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final activeStep =
+        selectedStepIndex >= 0 && selectedStepIndex < steps.length
+        ? steps[selectedStepIndex]
+        : null;
+    final canSelect = activeStep?.type == _TaskStepType.navigate;
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFCBD5E1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.map_outlined,
+                      size: 19,
+                      color: Color(0xFF2563EB),
+                    ),
+                    const SizedBox(width: 7),
+                    const Expanded(
+                      child: Text(
+                        '지도에서 Waypoint 지정',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    if (canSelect)
+                      Chip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text('${selectedStepIndex + 1}단계'),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  canSelect
+                      ? '목적지 Waypoint를 지도에서 직접 누르세요.'
+                      : '왼쪽에서 이동 단계의 지도 핀 버튼을 선택하세요.',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final canvasSize = constraints.biggest;
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapDown: canSelect
+                      ? (details) => _selectNearest(details, canvasSize)
+                      : null,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (drawing?.isImage == true && drawing!.bytes != null)
+                        Image.memory(drawing!.bytes!, fit: BoxFit.contain),
+                      CustomPaint(
+                        painter: _TaskWaypointPainter(
+                          sourceSize: _sourceSize,
+                          lanes: lanes,
+                          waypoints: waypoints,
+                          waypointNames: waypointNames,
+                          steps: steps,
+                          selectedStepIndex: selectedStepIndex,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.all(10),
+            child: Row(
+              children: [
+                Icon(Icons.touch_app_outlined, size: 17),
+                SizedBox(width: 6),
+                Expanded(child: Text('파란 원: 선택 단계 · 숫자: 이동 단계 순서')),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TaskWaypointPainter extends CustomPainter {
+  const _TaskWaypointPainter({
+    required this.sourceSize,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
+    required this.steps,
+    required this.selectedStepIndex,
+  });
+
+  final Size sourceSize;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
+  final List<_TaskStepDraft> steps;
+  final int selectedStepIndex;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fitted = applyBoxFit(BoxFit.contain, sourceSize, size).destination;
+    final target = Alignment.center.inscribe(fitted, Offset.zero & size);
+    Offset convert(Offset point) => Offset(
+      target.left + point.dx * target.width / sourceSize.width,
+      target.top + point.dy * target.height / sourceSize.height,
+    );
+    final lanePaint = Paint()
+      ..color = const Color(0xCC0891B2)
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    for (final lane in lanes) {
+      canvas.drawLine(convert(lane.$1), convert(lane.$2), lanePaint);
+    }
+    for (final waypoint in waypoints) {
+      final center = convert(waypoint);
+      canvas.drawCircle(center, 7, Paint()..color = Colors.white);
+      canvas.drawCircle(center, 4, Paint()..color = const Color(0xFF0F766E));
+      final name = waypointNames[waypoint]?.trim() ?? '';
+      if (name.isNotEmpty) {
+        final label = TextPainter(
+          text: TextSpan(
+            text: name,
+            style: const TextStyle(
+              color: Color(0xFF0F172A),
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              backgroundColor: Color(0xDDFFFFFF),
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+          maxLines: 1,
+          ellipsis: '…',
+        )..layout(maxWidth: 100);
+        label.paint(canvas, center + const Offset(7, -18));
+      }
+    }
+    for (var index = 0; index < steps.length; index++) {
+      final step = steps[index];
+      if (step.type != _TaskStepType.navigate || step.destination == null) {
+        continue;
+      }
+      final center = convert(step.destination!);
+      final active = index == selectedStepIndex;
+      canvas.drawCircle(
+        center,
+        active ? 14 : 11,
+        Paint()
+          ..color = active ? const Color(0xFF2563EB) : const Color(0xFF7C3AED),
+      );
+      final number = TextPainter(
+        text: TextSpan(
+          text: '${index + 1}',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      number.paint(
+        canvas,
+        center - Offset(number.width / 2, number.height / 2),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TaskWaypointPainter oldDelegate) => true;
 }
 
 class _TaskManagementPage extends StatelessWidget {
   const _TaskManagementPage({
     required this.tasks,
     required this.robots,
+    required this.drawing,
+    required this.lanes,
+    required this.waypoints,
+    required this.waypointNames,
     required this.activeMapName,
+    required this.activeMapSourceName,
+    required this.activeBuildingYamlName,
+    required this.pendingDeployment,
     required this.mapReady,
     required this.onLoadMap,
     required this.onOpenRobots,
     required this.onCreate,
+    required this.onRun,
+    required this.onEdit,
+    required this.onDelete,
     required this.onCancel,
   });
 
   final List<_MockTask> tasks;
   final List<_MockRobot> robots;
+  final UploadedDrawing? drawing;
+  final List<(Offset, Offset)> lanes;
+  final List<Offset> waypoints;
+  final Map<Offset, String> waypointNames;
   final String activeMapName;
+  final String activeMapSourceName;
+  final String activeBuildingYamlName;
+  final bool pendingDeployment;
   final bool mapReady;
   final VoidCallback onLoadMap;
   final VoidCallback onOpenRobots;
   final VoidCallback onCreate;
+  final ValueChanged<_MockTask> onRun;
+  final ValueChanged<_MockTask> onEdit;
+  final ValueChanged<_MockTask> onDelete;
   final ValueChanged<_MockTask> onCancel;
 
   String _statusLabel(_MockTaskStatus status) => switch (status) {
@@ -4237,6 +7513,11 @@ class _TaskManagementPage extends StatelessWidget {
                   ],
                 ),
               ),
+              const Chip(
+                avatar: Icon(Icons.sync, size: 17),
+                label: Text('MySQL 주문 자동화 · 5초'),
+              ),
+              const SizedBox(width: 10),
               OutlinedButton.icon(
                 onPressed: () =>
                     _showUsageGuide(context, _UsageGuideTopic.task),
@@ -4258,6 +7539,13 @@ class _TaskManagementPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 14),
+          _MapFileStatus(
+            sourceLabel: '불러온 맵',
+            sourceName: activeMapSourceName,
+            buildingYamlName: activeBuildingYamlName,
+            pendingDeployment: pendingDeployment,
+          ),
+          const SizedBox(height: 12),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(13),
@@ -4338,120 +7626,203 @@ class _TaskManagementPage extends StatelessWidget {
           ),
           const SizedBox(height: 18),
           Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFFE2E8F0)),
-              ),
-              child: tasks.isEmpty
-                  ? const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 2,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
                         children: [
                           Icon(
-                            Icons.assignment_outlined,
-                            size: 52,
-                            color: Color(0xFF94A3B8),
+                            Icons.map_outlined,
+                            size: 19,
+                            color: Color(0xFF2563EB),
                           ),
-                          SizedBox(height: 12),
-                          Text('생성된 작업이 없습니다.'),
+                          SizedBox(width: 7),
+                          Text(
+                            '현재 운영 맵',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
                         ],
                       ),
-                    )
-                  : ListView.separated(
-                      itemCount: tasks.length,
-                      separatorBuilder: (_, _) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final task = tasks[index];
-                        final color = _statusColor(task.status);
-                        return ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 9,
-                          ),
-                          leading: Container(
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              color: color.withValues(alpha: .12),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Icon(Icons.route_outlined, color: color),
-                          ),
-                          title: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  task.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                task.id,
-                                style: const TextStyle(
-                                  color: Color(0xFF64748B),
-                                  fontSize: 12,
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 3,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: color.withValues(alpha: .12),
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: Text(
-                                  _statusLabel(task.status),
-                                  style: TextStyle(
-                                    color: color,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          subtitle: Padding(
-                            padding: const EdgeInsets.only(top: 5),
-                            child: Text(
-                              '${task.type} · ${task.robotId} · ${task.currentStepIndex}/${task.steps.length}단계 완료 · 생성 ${_time(task.createdAt)}'
-                              '\n${task.steps.map((step) => step.label).join(' → ')}'
-                              '${task.description.isEmpty ? '' : '\n${task.description}'}',
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          trailing:
-                              task.status == _MockTaskStatus.active ||
-                                  task.status == _MockTaskStatus.queued
-                              ? OutlinedButton.icon(
-                                  onPressed: () => onCancel(task),
-                                  icon: const Icon(
-                                    Icons.cancel_outlined,
-                                    size: 17,
-                                  ),
-                                  label: const Text('취소'),
-                                )
-                              : task.completedAt == null
-                              ? null
-                              : Text(
-                                  _time(task.completedAt!),
-                                  style: const TextStyle(
-                                    color: Color(0xFF64748B),
-                                  ),
-                                ),
-                        );
-                      },
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: _RobotMapCard(
+                          drawing: drawing,
+                          lanes: lanes,
+                          waypoints: waypoints,
+                          waypointNames: waypointNames,
+                          robots: robots,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 18),
+                Expanded(
+                  flex: 3,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
                     ),
+                    child: tasks.isEmpty
+                        ? const Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.assignment_outlined,
+                                  size: 52,
+                                  color: Color(0xFF94A3B8),
+                                ),
+                                SizedBox(height: 12),
+                                Text('생성된 작업이 없습니다.'),
+                              ],
+                            ),
+                          )
+                        : ListView.separated(
+                            itemCount: tasks.length,
+                            separatorBuilder: (_, _) =>
+                                const Divider(height: 1),
+                            itemBuilder: (context, index) {
+                              final task = tasks[index];
+                              final color = _statusColor(task.status);
+                              return ListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 9,
+                                ),
+                                leading: Container(
+                                  width: 44,
+                                  height: 44,
+                                  decoration: BoxDecoration(
+                                    color: color.withValues(alpha: .12),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Icon(
+                                    Icons.route_outlined,
+                                    color: color,
+                                  ),
+                                ),
+                                title: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        task.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      onPressed:
+                                          task.status == _MockTaskStatus.active
+                                          ? null
+                                          : () => onRun(task),
+                                      tooltip:
+                                          task.status == _MockTaskStatus.active
+                                          ? '현재 실행 중'
+                                          : '작업 실행',
+                                      visualDensity: VisualDensity.compact,
+                                      icon: const Icon(
+                                        Icons.play_circle_outline,
+                                        size: 19,
+                                        color: Color(0xFF15803D),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      onPressed: () => onEdit(task),
+                                      tooltip: '작업 수정',
+                                      visualDensity: VisualDensity.compact,
+                                      icon: const Icon(
+                                        Icons.edit_outlined,
+                                        size: 18,
+                                        color: Color(0xFF2563EB),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      onPressed: () => onDelete(task),
+                                      tooltip: '작업 삭제',
+                                      visualDensity: VisualDensity.compact,
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        size: 18,
+                                        color: Color(0xFFDC2626),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      task.id,
+                                      style: const TextStyle(
+                                        color: Color(0xFF64748B),
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: color.withValues(alpha: .12),
+                                        borderRadius: BorderRadius.circular(20),
+                                      ),
+                                      child: Text(
+                                        _statusLabel(task.status),
+                                        style: TextStyle(
+                                          color: color,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                subtitle: Padding(
+                                  padding: const EdgeInsets.only(top: 5),
+                                  child: Text(
+                                    '${task.orderId != null
+                                        ? '주문 ${task.orderId} · '
+                                        : task.trigger != _OrderTrigger.manual
+                                        ? '자동화 ${task.trigger.label} · '
+                                        : ''}'
+                                    '${task.type} · ${task.robotId} · ${task.currentStepIndex}/${task.steps.length}단계 완료 · 생성 ${_time(task.createdAt)}'
+                                    '\n${task.steps.map((step) => step.label).join(' → ')}'
+                                    '${task.description.isEmpty ? '' : '\n${task.description}'}',
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                trailing: task.status == _MockTaskStatus.active
+                                    ? OutlinedButton.icon(
+                                        onPressed: () => onCancel(task),
+                                        icon: const Icon(
+                                          Icons.cancel_outlined,
+                                          size: 17,
+                                        ),
+                                        label: const Text('취소'),
+                                      )
+                                    : task.completedAt == null
+                                    ? null
+                                    : Text(
+                                        _time(task.completedAt!),
+                                        style: const TextStyle(
+                                          color: Color(0xFF64748B),
+                                        ),
+                                      ),
+                              );
+                            },
+                          ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -5068,10 +8439,89 @@ class _ComingSoonPage extends StatelessWidget {
       Center(child: Text('$title 화면은 준비 중입니다.'));
 }
 
+class _MapFileStatus extends StatelessWidget {
+  const _MapFileStatus({
+    required this.sourceLabel,
+    required this.sourceName,
+    required this.buildingYamlName,
+    required this.pendingDeployment,
+  });
+
+  final String sourceLabel;
+  final String sourceName;
+  final String buildingYamlName;
+  final bool pendingDeployment;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+    decoration: BoxDecoration(
+      color: pendingDeployment
+          ? const Color(0xFFFFFBEB)
+          : const Color(0xFFEFF6FF),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(
+        color: pendingDeployment
+            ? const Color(0xFFFCD34D)
+            : const Color(0xFFBFDBFE),
+      ),
+    ),
+    child: Wrap(
+      spacing: 20,
+      runSpacing: 7,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        _MapFileStatusItem(
+          icon: Icons.edit_document,
+          label: sourceLabel,
+          value: sourceName,
+        ),
+        _MapFileStatusItem(
+          icon: Icons.description_outlined,
+          label: 'building.yaml',
+          value: buildingYamlName,
+        ),
+        if (pendingDeployment)
+          const Chip(
+            visualDensity: VisualDensity.compact,
+            avatar: Icon(Icons.info_outline, size: 16),
+            label: Text('배포 전'),
+          ),
+      ],
+    ),
+  );
+}
+
+class _MapFileStatusItem extends StatelessWidget {
+  const _MapFileStatusItem({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 18, color: const Color(0xFF2563EB)),
+      const SizedBox(width: 7),
+      Text('$label: ', style: const TextStyle(color: Color(0xFF64748B))),
+      Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
+    ],
+  );
+}
+
 class _RobotManagementPage extends StatefulWidget {
   const _RobotManagementPage({
     required this.drawing,
-    required this.activeMapName,
+    required this.activeMapSourceName,
+    required this.activeBuildingYamlName,
+    required this.pendingDeployment,
     required this.lanes,
     required this.waypoints,
     required this.waypointNames,
@@ -5083,7 +8533,9 @@ class _RobotManagementPage extends StatefulWidget {
   });
 
   final UploadedDrawing? drawing;
-  final String activeMapName;
+  final String activeMapSourceName;
+  final String activeBuildingYamlName;
+  final bool pendingDeployment;
   final List<(Offset, Offset)> lanes;
   final List<Offset> waypoints;
   final Map<Offset, String> waypointNames;
@@ -5170,15 +8622,11 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
           ],
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
-            const Icon(Icons.map_outlined, size: 18, color: Color(0xFF2563EB)),
-            const SizedBox(width: 7),
-            Text(
-              '현재 운영 맵: ${widget.activeMapName}',
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ],
+        _MapFileStatus(
+          sourceLabel: '불러온 맵',
+          sourceName: widget.activeMapSourceName,
+          buildingYamlName: widget.activeBuildingYamlName,
+          pendingDeployment: widget.pendingDeployment,
         ),
         const SizedBox(height: 12),
         if (_runtimeMode != '앱 Mock')
@@ -5333,6 +8781,9 @@ class _RobotListCard extends StatelessWidget {
                     return ListTile(
                       leading: CircleAvatar(
                         backgroundColor: robot.color,
+                        foregroundImage: robot.imageBytes == null
+                            ? null
+                            : MemoryImage(robot.imageBytes!),
                         child: Icon(
                           switch (robot.kind) {
                             _RobotKind.mockMobile => Icons.smart_toy,
@@ -5340,6 +8791,7 @@ class _RobotListCard extends StatelessWidget {
                             _RobotKind.omxManipulator =>
                               Icons.precision_manufacturing,
                             _RobotKind.mockHumanoid => Icons.accessibility_new,
+                            _RobotKind.human => Icons.person,
                           },
                           color: Colors.white,
                           size: 19,
@@ -5509,49 +8961,97 @@ class _RobotOperationsPainter extends CustomPainter {
         ..color = robot.color
         ..strokeWidth = 3
         ..strokeCap = StrokeCap.round;
-      switch (robot.kind) {
-        case _RobotKind.omxManipulator:
-          canvas.drawRRect(
-            RRect.fromRectAndRadius(
-              Rect.fromCenter(center: center, width: 22, height: 22),
-              const Radius.circular(4),
-            ),
-            robotPaint,
-          );
-          canvas.drawLine(
-            center,
-            center + const Offset(7, -8),
-            Paint()
-              ..color = Colors.white
-              ..strokeWidth = 3,
-          );
-        case _RobotKind.mockHumanoid:
-          canvas.drawCircle(center - const Offset(0, 7), 5, robotPaint);
-          canvas.drawLine(
-            center - const Offset(0, 1),
-            center + const Offset(0, 8),
-            robotPaint,
-          );
-          canvas.drawLine(
-            center + const Offset(0, 2),
-            center + const Offset(-7, 5),
-            robotPaint,
-          );
-          canvas.drawLine(
-            center + const Offset(0, 2),
-            center + const Offset(7, 5),
-            robotPaint,
-          );
-        case _RobotKind.pinky:
-          canvas.drawRRect(
-            RRect.fromRectAndRadius(
-              Rect.fromCenter(center: center, width: 25, height: 18),
-              const Radius.circular(7),
-            ),
-            robotPaint,
-          );
-        case _RobotKind.mockMobile:
-          canvas.drawCircle(center, 12, robotPaint);
+      if (robot.image != null) {
+        final avatarRect = Rect.fromCircle(center: center, radius: 14);
+        canvas.save();
+        canvas.clipPath(Path()..addOval(avatarRect));
+        final image = robot.image!;
+        final side = math.min(image.width, image.height).toDouble();
+        final sourceRect = Rect.fromCenter(
+          center: Offset(image.width / 2, image.height / 2),
+          width: side,
+          height: side,
+        );
+        canvas.drawImageRect(image, sourceRect, avatarRect, Paint());
+        canvas.restore();
+        canvas.drawCircle(
+          center,
+          14,
+          Paint()
+            ..color = robot.color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2,
+        );
+      } else {
+        switch (robot.kind) {
+          case _RobotKind.omxManipulator:
+            canvas.drawRRect(
+              RRect.fromRectAndRadius(
+                Rect.fromCenter(center: center, width: 22, height: 22),
+                const Radius.circular(4),
+              ),
+              robotPaint,
+            );
+            canvas.drawLine(
+              center,
+              center + const Offset(7, -8),
+              Paint()
+                ..color = Colors.white
+                ..strokeWidth = 3,
+            );
+          case _RobotKind.mockHumanoid:
+            canvas.drawCircle(center - const Offset(0, 7), 5, robotPaint);
+            canvas.drawLine(
+              center - const Offset(0, 1),
+              center + const Offset(0, 8),
+              robotPaint,
+            );
+            canvas.drawLine(
+              center + const Offset(0, 2),
+              center + const Offset(-7, 5),
+              robotPaint,
+            );
+            canvas.drawLine(
+              center + const Offset(0, 2),
+              center + const Offset(7, 5),
+              robotPaint,
+            );
+          case _RobotKind.human:
+            canvas.drawCircle(
+              center - const Offset(0, 7),
+              5,
+              Paint()..color = const Color(0xFFF6C7A5),
+            );
+            canvas.drawRRect(
+              RRect.fromRectAndRadius(
+                Rect.fromCenter(
+                  center: center + const Offset(0, 3),
+                  width: 13,
+                  height: 17,
+                ),
+                const Radius.circular(5),
+              ),
+              robotPaint,
+            );
+            canvas.drawCircle(
+              center - const Offset(0, 9),
+              5,
+              Paint()
+                ..color = const Color(0xFF334155)
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 2,
+            );
+          case _RobotKind.pinky:
+            canvas.drawRRect(
+              RRect.fromRectAndRadius(
+                Rect.fromCenter(center: center, width: 25, height: 18),
+                const Radius.circular(7),
+              ),
+              robotPaint,
+            );
+          case _RobotKind.mockMobile:
+            canvas.drawCircle(center, 12, robotPaint);
+        }
       }
       final label = TextPainter(
         text: TextSpan(
@@ -5927,8 +9427,13 @@ Future<void> _showUsageGuide(
           actions: [
             'Lane 만들기를 켜고 통로 중앙에 Waypoint를 순서대로 놓습니다.',
             '교차로, 회전 전후, 픽업 위치와 하차 위치에는 별도 Waypoint를 만듭니다.',
+            'Waypoint를 클릭한 뒤 수정 창의 Waypoint 삭제를 누르면 해당 지점과 연결된 모든 Lane을 함께 제거할 수 있습니다.',
+            '일반은 경로상의 정지·통과 지점(holding point), 대기는 작업이 없을 때 로봇을 세워 두는 전용 주차 위치(parking spot)입니다.',
             'Lane을 양방향·정방향·역방향 중 실제 운영 규칙에 맞게 지정합니다.',
+            'Lane 설정에서 속도 제한, 정면·후진 자세 제약과 좁은 통로 Mutex 그룹을 필요에 따라 지정합니다.',
             '대기, 충전, 픽업, 드랍오프 Waypoint에 알아보기 쉬운 이름을 부여합니다.',
+            '고정 로봇팔이나 컨베이어 위치는 설비 Waypoint로 만들고 Lane에는 연결하지 않습니다.',
+            '시나리오 맵 자동 완성에서 로봇·Home·충전소·온도대별 픽업·드랍오프 수를 입력하면 기존 Lane 위에 운영 지점을 추천 배치할 수 있습니다.',
           ],
           doneWhen: '모든 운영 위치가 Lane으로 연결되고 이름만 보고 목적을 알 수 있으면 완료입니다.',
           caution: 'Waypoint끼리 Lane 없이 가깝게 놓아도 연결된 것으로 처리되지 않습니다.',
@@ -5938,6 +9443,7 @@ Future<void> _showUsageGuide(
           why: '화면상으로 자연스러워 보여도 단방향 설정이나 끊어진 Lane 때문에 도달할 수 없는 지점이 생길 수 있습니다.',
           actions: [
             '오류 검증을 눌러 고립된 Waypoint, 이름과 Lane 문제를 확인합니다.',
+            '검증은 단방향 왕복 가능성, 중복·벽 교차 Lane과 설정한 로봇 폭·회전 반경 기준도 확인합니다.',
             'Warning의 Waypoint를 찾아 실제로 왕복 가능한 경로가 있는지 확인합니다.',
             '경로 추천은 참고자료로 사용하고 벽, 회전 반경과 일방통행 규칙에 맞게 수정합니다.',
             '수정 후 오류 검증을 다시 실행합니다.',
@@ -5949,6 +9455,7 @@ Future<void> _showUsageGuide(
           why: '작업 저장은 편집을 보존하고, 배포는 RMF와 로봇이 사용할 운영 파일을 생성·설치하는 과정입니다.',
           actions: [
             '작업 저장으로 편집 가능한 프로젝트 파일을 먼저 보존합니다.',
+            '다른 이름으로 저장을 사용하면 현재 편집본을 새 맵 이름으로 복제하고 이후 내보내기와 배포에도 그 이름을 사용합니다.',
             '배포를 실행해 building.yaml, 이미지, nav graph와 world를 생성합니다.',
             '배포 로그에서 Map Server와 Fleet Adapter 재시작 및 새 지도 수신을 확인합니다.',
             '로봇 메뉴에서 배포 맵을 다시 불러와 Waypoint와 Lane이 보이는지 확인합니다.',
@@ -5993,8 +9500,11 @@ Future<void> _showUsageGuide(
           why: '장비 종류에 따라 이동 가능 여부와 수행할 수 있는 작업이 다르기 때문입니다.',
           actions: [
             'Mock 주행로봇, Pinky, OMX Manipulator 또는 Mock 휴머노이드를 선택합니다.',
+            'Human도 작업자 유형으로 선택할 수 있습니다.',
+            '캐릭터 이미지 선택으로 각 로봇이나 Human에 표시할 PNG, JPG 또는 WebP 이미지를 지정합니다.',
             '중복되지 않는 이름을 입력합니다.',
             '이동 로봇은 시작 Waypoint, OMX는 고정 설치 Waypoint를 선택합니다.',
+            'OMX의 고정 설치 위치에는 Lane이 없는 설비 Waypoint가 우선 표시됩니다.',
             'Spawn 후 선택한 위치에서 정지 상태인지 확인합니다.',
           ],
           doneWhen: '지도와 목록에 올바른 유형·이름·위치로 표시되고 정지 상태이면 완료입니다.',
@@ -6047,6 +9557,12 @@ Future<void> _showUsageGuide(
             '새 작업을 누르고 작업자가 구분할 수 있는 이름을 입력합니다.',
             '자동 배정 또는 특정 Pinky를 선택합니다.',
             '단계 추가로 Pinky 이동, OMX-AI 픽업과 대기를 구성합니다.',
+            '이동 단계의 지도 핀 버튼을 누른 뒤 오른쪽 운영 맵에서 목적지 Waypoint를 직접 선택합니다.',
+            '기존 작업 이름 옆 수정 버튼을 누르면 이름, 로봇과 실행 단계를 변경할 수 있습니다.',
+            '작업 이름 옆 삭제 버튼으로 필요 없는 저장 작업을 확인 후 삭제합니다.',
+            '작업 이름 옆 실행 버튼을 누르면 저장된 작업을 가용 로봇에 즉시 배정합니다.',
+            '생성·수정한 작업은 MySQL에 보존되며 앱을 다시 열어도 목록과 변경 이력을 확인할 수 있습니다.',
+            '편집기의 저장은 실행하지 않고 대기 작업으로 보존하며, 저장 후 시작은 즉시 로봇에 배정합니다.',
             '카드를 끌어 실제 실행 순서대로 배치하고 필요 없는 단계는 삭제합니다.',
           ],
           doneWhen: '작업 이름, 수행 로봇과 모든 단계의 목적지가 지정되면 시작할 수 있습니다.',
@@ -6250,6 +9766,7 @@ class _PageHeading extends StatelessWidget {
     required this.onDownload,
     required this.onCopy,
     required this.onSaveProject,
+    required this.onSaveProjectAs,
     required this.onLoadProject,
   });
   final VoidCallback onHelp;
@@ -6260,6 +9777,7 @@ class _PageHeading extends StatelessWidget {
   final VoidCallback onDownload;
   final VoidCallback onCopy;
   final VoidCallback onSaveProject;
+  final VoidCallback onSaveProjectAs;
   final VoidCallback onLoadProject;
   @override
   Widget build(BuildContext context) => Row(
@@ -6299,6 +9817,15 @@ class _PageHeading extends StatelessWidget {
         onPressed: exportEnabled ? onSaveProject : null,
         icon: const Icon(Icons.save_outlined, size: 18),
         label: const Text('작업 저장'),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
+        ),
+      ),
+      const SizedBox(width: 8),
+      OutlinedButton.icon(
+        onPressed: exportEnabled ? onSaveProjectAs : null,
+        icon: const Icon(Icons.save_as_outlined, size: 18),
+        label: const Text('다른 이름으로 저장'),
         style: OutlinedButton.styleFrom(
           padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
         ),
@@ -6520,6 +10047,8 @@ class _MapWorkspace extends StatelessWidget {
     required this.waypointMode,
     required this.onAddWaypoint,
     required this.onEditWaypoint,
+    required this.onMoveWaypoint,
+    required this.waypointDropIssue,
     required this.onSelectLane,
     required this.isWallConnectMode,
     required this.pendingWallVertex,
@@ -6568,6 +10097,9 @@ class _MapWorkspace extends StatelessWidget {
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
   final ValueChanged<Offset> onEditWaypoint;
+  final void Function(Offset original, Offset updated) onMoveWaypoint;
+  final WaypointMoveIssue? Function(Offset original, Offset updated)
+  waypointDropIssue;
   final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool isWallConnectMode;
   final Offset? pendingWallVertex;
@@ -6741,6 +10273,8 @@ class _MapWorkspace extends StatelessWidget {
                   waypointMode: waypointMode,
                   onAddWaypoint: onAddWaypoint,
                   onEditWaypoint: onEditWaypoint,
+                  onMoveWaypoint: onMoveWaypoint,
+                  waypointDropIssue: waypointDropIssue,
                   onSelectLane: onSelectLane,
                   wallConnectMode: isWallConnectMode,
                   pendingWallVertex: pendingWallVertex,
@@ -6881,6 +10415,8 @@ class _DrawingPreview extends StatelessWidget {
     required this.waypointMode,
     required this.onAddWaypoint,
     required this.onEditWaypoint,
+    required this.onMoveWaypoint,
+    required this.waypointDropIssue,
     required this.onSelectLane,
     required this.wallConnectMode,
     required this.pendingWallVertex,
@@ -6916,6 +10452,9 @@ class _DrawingPreview extends StatelessWidget {
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
   final ValueChanged<Offset> onEditWaypoint;
+  final void Function(Offset original, Offset updated) onMoveWaypoint;
+  final WaypointMoveIssue? Function(Offset original, Offset updated)
+  waypointDropIssue;
   final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool wallConnectMode;
   final Offset? pendingWallVertex;
@@ -6978,6 +10517,8 @@ class _DrawingPreview extends StatelessWidget {
                     waypointMode: waypointMode,
                     onAddWaypoint: onAddWaypoint,
                     onEditWaypoint: onEditWaypoint,
+                    onMoveWaypoint: onMoveWaypoint,
+                    waypointDropIssue: waypointDropIssue,
                     onSelectLane: onSelectLane,
                     wallConnectMode: wallConnectMode,
                     pendingWallVertex: pendingWallVertex,
@@ -7074,6 +10615,8 @@ class _WallEditorCanvas extends StatefulWidget {
     required this.waypointMode,
     required this.onAddWaypoint,
     required this.onEditWaypoint,
+    required this.onMoveWaypoint,
+    required this.waypointDropIssue,
     required this.onSelectLane,
     required this.wallConnectMode,
     required this.pendingWallVertex,
@@ -7108,6 +10651,9 @@ class _WallEditorCanvas extends StatefulWidget {
   final bool waypointMode;
   final ValueChanged<Offset> onAddWaypoint;
   final ValueChanged<Offset> onEditWaypoint;
+  final void Function(Offset original, Offset updated) onMoveWaypoint;
+  final WaypointMoveIssue? Function(Offset original, Offset updated)
+  waypointDropIssue;
   final ValueChanged<(Offset, Offset)> onSelectLane;
   final bool wallConnectMode;
   final Offset? pendingWallVertex;
@@ -7133,6 +10679,8 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
   Offset _measurementBadgeOffset = const Offset(12, 12);
   Offset? _movingWallVertex;
   Offset? _movingWallScreenPoint;
+  Offset? _movingWaypoint;
+  Offset? _movingWaypointScreenPoint;
   Offset? _waypointCursor;
   Offset? _hoveredWaypoint;
   Offset? _waypointHoverPosition;
@@ -7385,6 +10933,30 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
     });
   }
 
+  /// Whether the Waypoint being dragged could be dropped where it is now.
+  bool _waypointDropAllowed(Size canvasSize) {
+    final original = _movingWaypoint;
+    final screenPoint = _movingWaypointScreenPoint;
+    if (original == null || screenPoint == null) return true;
+    final updated = _screenToImage(screenPoint, canvasSize);
+    if (updated == null) return false;
+    return widget.waypointDropIssue(original, updated) == null;
+  }
+
+  void _finishWaypointMove(Size canvasSize) {
+    final original = _movingWaypoint;
+    final screenPoint = _movingWaypointScreenPoint;
+    if (original == null || screenPoint == null) return;
+    final updated = _screenToImage(screenPoint, canvasSize);
+    setState(() {
+      _movingWaypoint = null;
+      _movingWaypointScreenPoint = null;
+      _hoveredWaypoint = null;
+      _waypointHoverPosition = null;
+    });
+    if (updated != null) widget.onMoveWaypoint(original, updated);
+  }
+
   void _finishSelection(Size canvasSize) {
     final selection = _selection;
     final mask = widget.mask;
@@ -7496,6 +11068,7 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                   directions: widget.laneDirections,
                   waypoints: widget.laneWaypoints,
                   waypointNames: widget.waypointNames,
+                  waypointTypes: widget.waypointTypes,
                   activeEndpoint: widget.activeLaneEndpoint,
                   sourceSize: widget.sourceSize,
                 ),
@@ -7620,9 +11193,70 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                 },
               ),
             ),
+          if (!widget.measurementMode &&
+              !widget.eraseMode &&
+              !widget.waypointMode &&
+              !widget.wallConnectMode &&
+              !widget.wallEndpointEditMode)
+            for (final waypoint in widget.laneWaypoints)
+              Positioned(
+                left: _vertexToScreen(waypoint, size).dx - 18,
+                top: _vertexToScreen(waypoint, size).dy - 18,
+                width: 36,
+                height: 36,
+                child: MouseRegion(
+                  cursor: _movingWaypoint == null
+                      ? SystemMouseCursors.grab
+                      : SystemMouseCursors.grabbing,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    // Keeps the Waypoint under the cursor: with the default
+                    // behaviour the distance travelled before the drag is
+                    // recognised is never reported, so it lands short.
+                    dragStartBehavior: DragStartBehavior.down,
+                    onTap: () => widget.onEditWaypoint(waypoint),
+                    onPanStart: (_) => setState(() {
+                      _movingWaypoint = waypoint;
+                      _movingWaypointScreenPoint = _vertexToScreen(
+                        waypoint,
+                        size,
+                      );
+                    }),
+                    onPanUpdate: (details) => setState(() {
+                      final current = _movingWaypointScreenPoint;
+                      if (current != null) {
+                        _movingWaypointScreenPoint = current + details.delta;
+                      }
+                    }),
+                    onPanEnd: (_) => _finishWaypointMove(size),
+                    onPanCancel: () => setState(() {
+                      _movingWaypoint = null;
+                      _movingWaypointScreenPoint = null;
+                    }),
+                  ),
+                ),
+              ),
+          if (_movingWaypoint != null)
+            IgnorePointer(
+              child: CustomPaint(
+                painter: _WaypointDragPainter(
+                  original: _vertexToScreen(_movingWaypoint!, size),
+                  current: _movingWaypointScreenPoint,
+                  neighbors: [
+                    for (final lane in widget.recommendedLanes)
+                      if ((lane.$1 - _movingWaypoint!).distance <= .01)
+                        _vertexToScreen(lane.$2, size)
+                      else if ((lane.$2 - _movingWaypoint!).distance <= .01)
+                        _vertexToScreen(lane.$1, size),
+                  ],
+                  allowed: _waypointDropAllowed(size),
+                ),
+              ),
+            ),
           if (!widget.waypointMode &&
               _hoveredWaypoint != null &&
-              _waypointHoverPosition != null)
+              _waypointHoverPosition != null &&
+              _movingWaypoint == null)
             Positioned(
               left: _waypointHoverPosition!.dx + 210 <= size.width
                   ? _waypointHoverPosition!.dx + 16
@@ -8164,6 +11798,7 @@ class _LanePainter extends CustomPainter {
     required this.directions,
     required this.waypoints,
     required this.waypointNames,
+    required this.waypointTypes,
     required this.activeEndpoint,
     required this.sourceSize,
   });
@@ -8172,6 +11807,7 @@ class _LanePainter extends CustomPainter {
   final Map<(Offset, Offset), String> directions;
   final List<Offset> waypoints;
   final Map<Offset, String> waypointNames;
+  final Map<Offset, String> waypointTypes;
   final Offset? activeEndpoint;
   final Size sourceSize;
 
@@ -8226,8 +11862,28 @@ class _LanePainter extends CustomPainter {
     }
     for (var i = 0; i < waypoints.length; i++) {
       final point = convert(waypoints[i]);
-      canvas.drawCircle(point, 12, Paint()..color = const Color(0xFFFFFFFF));
-      canvas.drawCircle(point, 10, paint);
+      if (waypointTypes[waypoints[i]] == '설비') {
+        final equipmentRect = Rect.fromCenter(
+          center: point,
+          width: 22,
+          height: 22,
+        );
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            equipmentRect.inflate(2),
+            const Radius.circular(6),
+          ),
+          Paint()..color = const Color(0xFFFFFFFF),
+        );
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(equipmentRect, const Radius.circular(5)),
+          Paint()..color = const Color(0xFF7C3AED),
+        );
+        canvas.drawCircle(point, 4, Paint()..color = const Color(0xFFFFFFFF));
+      } else {
+        canvas.drawCircle(point, 12, Paint()..color = const Color(0xFFFFFFFF));
+        canvas.drawCircle(point, 10, paint);
+      }
     }
     final waypointObstacles = [
       for (final waypoint in waypoints)
@@ -8334,6 +11990,7 @@ class _LanePainter extends CustomPainter {
       oldDelegate.directions != directions ||
       oldDelegate.waypoints != waypoints ||
       oldDelegate.waypointNames != waypointNames ||
+      oldDelegate.waypointTypes != waypointTypes ||
       oldDelegate.activeEndpoint != activeEndpoint ||
       oldDelegate.sourceSize != sourceSize;
 }
@@ -8450,6 +12107,68 @@ class _EndpointMovePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _EndpointMovePainter oldDelegate) =>
       oldDelegate.original != original || oldDelegate.current != current;
+}
+
+/// Preview drawn while a Waypoint is being dragged: the Lanes that follow it
+/// rubber-band to the pointer, and the marker turns red as soon as the drop
+/// would be refused, so the verdict is visible before the button is released.
+class _WaypointDragPainter extends CustomPainter {
+  const _WaypointDragPainter({
+    required this.original,
+    required this.current,
+    required this.neighbors,
+    required this.allowed,
+  });
+
+  final Offset original;
+  final Offset? current;
+  final List<Offset> neighbors;
+  final bool allowed;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final target = current;
+    if (target == null) return;
+    final color = allowed ? const Color(0xFF16A34A) : const Color(0xFFEF4444);
+    for (final neighbor in neighbors) {
+      canvas.drawLine(
+        neighbor,
+        target,
+        Paint()
+          ..color = color.withValues(alpha: .75)
+          ..strokeWidth = 2.4
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+    canvas.drawCircle(
+      original,
+      6,
+      Paint()..color = const Color(0x33475569),
+    );
+    canvas.drawLine(
+      original,
+      target,
+      Paint()
+        ..color = const Color(0x66475569)
+        ..strokeWidth = 1.4,
+    );
+    canvas.drawCircle(target, 11, Paint()..color = color.withValues(alpha: .2));
+    canvas.drawCircle(
+      target,
+      11,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _WaypointDragPainter oldDelegate) =>
+      oldDelegate.original != original ||
+      oldDelegate.current != current ||
+      oldDelegate.allowed != allowed ||
+      oldDelegate.neighbors.length != neighbors.length;
 }
 
 class _WallSelectionPainter extends CustomPainter {
