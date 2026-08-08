@@ -4006,6 +4006,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
     unawaited(_saveMockTasks());
   }
 
+  /// 작업과 담당 로봇의 상태를 실시간으로 보여 준다.
+  ///
+  /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
+  /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
+  /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
+  Future<void> _showTaskDetail(_MockTask task) => showMovableDialog<void>(
+    context: context,
+    builder: (_) => _TaskDetailDialog(
+      task: task,
+      robotOf: (id) => _mockRobots.where((robot) => robot.id == id).firstOrNull,
+      toFloor: _floorCoordinate,
+      metersPerPixel: _metersPerPixel,
+      waypointLabel: _waypointLabel,
+    ),
+  );
+
   /// 로봇을 최초 위치까지 데려갈 Lane 경로. 갈 길이 없으면 null.
   List<Offset>? _routeToSpawn(_MockRobot robot) {
     final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
@@ -7681,6 +7697,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   setState(() => _selectedMenu = 2),
                               onCreate: _createMockTask,
                               onReturnRobots: _returnRobotsToSpawn,
+                              onShowDetail: _showTaskDetail,
                               onRun: _runMockTask,
                               onEdit: _editMockTask,
                               onDelete: _deleteMockTask,
@@ -8402,6 +8419,7 @@ class _TaskManagementPage extends StatelessWidget {
     required this.onOpenRobots,
     required this.onCreate,
     required this.onReturnRobots,
+    required this.onShowDetail,
     required this.onRun,
     required this.onEdit,
     required this.onDelete,
@@ -8425,6 +8443,9 @@ class _TaskManagementPage extends StatelessWidget {
 
   /// 이동 로봇을 Spawn 위치로 되돌린다.
   final VoidCallback onReturnRobots;
+
+  /// 작업과 담당 로봇의 실시간 상태를 보여 준다.
+  final ValueChanged<_MockTask> onShowDetail;
   final ValueChanged<_MockTask> onRun;
   final ValueChanged<_MockTask> onEdit;
   final ValueChanged<_MockTask> onDelete;
@@ -8693,6 +8714,20 @@ class _TaskManagementPage extends StatelessWidget {
                                         overflow: TextOverflow.ellipsis,
                                         style: const TextStyle(
                                           fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ),
+                                    TextButton.icon(
+                                      onPressed: () => onShowDetail(task),
+                                      icon: const Icon(
+                                        Icons.monitor_heart_outlined,
+                                        size: 17,
+                                      ),
+                                      label: const Text('상세내용'),
+                                      style: TextButton.styleFrom(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
                                         ),
                                       ),
                                     ),
@@ -10561,6 +10596,7 @@ Future<void> _showUsageGuide(
             'Pinky 또는 Mock 주행로봇이 Spawn되어 정지 중인지 확인합니다.',
             '실제 적재 작업이면 담당 OMX-AI와 픽업 스테이션의 연결 상태를 확인합니다.',
             '로봇이 엉뚱한 곳에 흩어져 있으면 상단 `로봇 원위치`로 Spawn 할 때 고른 Waypoint로 되돌립니다. 진행 중이던 작업은 대기로 돌아가 다시 배차됩니다.',
+            '작업 이름 옆 `상세내용`을 누르면 담당 로봇의 현재 위치·주행 여부·배터리와 단계 진행을 실시간으로 볼 수 있습니다. `복사`로 지금 상태를 그대로 가져갈 수 있습니다.',
           ],
           doneWhen: '상단에 작업 준비 완료와 가용 로봇 수가 표시되면 완료입니다.',
         ),
@@ -11000,6 +11036,241 @@ class _PageHeading extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// 작업과 담당 로봇의 상태를 실시간으로 보여 주는 팝업.
+///
+/// 부모 화면이 다시 그려져도 팝업은 따라 그려지지 않으므로 자기 타이머로
+/// 갱신한다. 작업·로봇 객체는 제자리에서 값이 바뀌므로 매번 읽으면 최신이다.
+class _TaskDetailDialog extends StatefulWidget {
+  const _TaskDetailDialog({
+    required this.task,
+    required this.robotOf,
+    required this.toFloor,
+    required this.metersPerPixel,
+    required this.waypointLabel,
+  });
+
+  final _MockTask task;
+  final _MockRobot? Function(String robotId) robotOf;
+  final Offset Function(Offset point) toFloor;
+  final double? metersPerPixel;
+  final String Function(Offset point) waypointLabel;
+
+  @override
+  State<_TaskDetailDialog> createState() => _TaskDetailDialogState();
+}
+
+class _TaskDetailDialogState extends State<_TaskDetailDialog> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 로봇 주행은 100ms 주기로 움직인다. 그보다 조금 느리게 읽어도 흐름을
+    // 보는 데는 충분하고 다시 그리는 비용이 줄어든다.
+    _timer = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => setState(() {}),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _point(Offset point) {
+    final floor = widget.toFloor(point);
+    final pixels =
+        'X ${floor.dx.toStringAsFixed(1)} · Y ${floor.dy.toStringAsFixed(1)} px';
+    final scale = widget.metersPerPixel;
+    if (scale == null || scale <= 0) return pixels;
+    return '$pixels  ('
+        '${(floor.dx * scale).toStringAsFixed(2)} · '
+        '${(floor.dy * scale).toStringAsFixed(2)} m)';
+  }
+
+  String _stepLabel(_MockTaskStep step) => switch (step.type) {
+    _TaskStepType.navigate => '이동',
+    _TaskStepType.returnHome => '홈 복귀',
+    _TaskStepType.armLoad => '로봇팔 적재',
+    _TaskStepType.wait => '대기',
+  };
+
+  String _stepStatus(_TaskStepStatus status) => switch (status) {
+    _TaskStepStatus.pending => '대기',
+    _TaskStepStatus.active => '진행 중',
+    _TaskStepStatus.completed => '완료',
+    _TaskStepStatus.failed => '실패',
+    _TaskStepStatus.cancelled => '취소',
+  };
+
+  /// 화면에 뿌리는 것과 같은 내용을 글로 만든다. 복사해서 붙일 수 있어야 한다.
+  String _asText(_MockRobot? robot) {
+    final task = widget.task;
+    final lines = <String>[
+      '작업 ${task.name} (${task.id})',
+      '상태 ${task.status.name} · 긴급도 ${task.urgency.label} · '
+          '단계 ${task.currentStepIndex}/${task.steps.length}',
+      '담당 로봇 ${task.robotId}',
+      if (robot == null)
+        '로봇 상태를 읽을 수 없습니다 (Spawn 되지 않았거나 이름이 다릅니다).'
+      else ...[
+        '위치 ${_point(robot.position)}',
+        '이동 ${robot.moving ? '주행 중' : '정지'} · 배터리 '
+            '${robot.battery.toStringAsFixed(1)}%',
+        '목표 ${robot.targetWaypoint == null ? '없음' : widget.waypointLabel(robot.targetWaypoint!)}',
+        '남은 경로 ${robot.assignedRoute.length}개 지점',
+      ],
+      '',
+      for (var i = 0; i < task.steps.length; i++)
+        '${i + 1}. ${_stepLabel(task.steps[i])} '
+            '${task.steps[i].destinationName ?? '-'} · '
+            '${_stepStatus(task.steps[i].status)}'
+            '${task.steps[i].type.isMovement ? '' : ' · 남은 ${task.steps[i].remainingSeconds.toStringAsFixed(1)}s'}'
+            '${task.steps[i].failureReason == null ? '' : ' · ${task.steps[i].failureReason}'}',
+    ];
+    return lines.join('\n');
+  }
+
+  Widget _row(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 92,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(child: SelectableText(value)),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final task = widget.task;
+    final robot = widget.robotOf(task.robotId);
+    final step = task.currentStep;
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.monitor_heart_outlined, color: Color(0xFF2563EB)),
+          const SizedBox(width: 10),
+          Expanded(child: Text('${task.name} 상세')),
+        ],
+      ),
+      content: SizedBox(
+        width: 520,
+        height: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _row('작업 상태', '${task.status.name} · 긴급도 ${task.urgency.label}'),
+              _row('진행', '${task.currentStepIndex}/${task.steps.length} 단계'),
+              _row(
+                '현재 단계',
+                step == null
+                    ? '없음'
+                    : '${_stepLabel(step)} ${step.destinationName ?? ''} · '
+                          '${_stepStatus(step.status)}'
+                          '${step.type.isMovement ? '' : ' · 남은 ${step.remainingSeconds.toStringAsFixed(1)}s'}',
+              ),
+              const Divider(height: 22),
+              _row('로봇', task.robotId),
+              if (robot == null)
+                _row('상태', 'Spawn 되지 않았거나 이름이 다릅니다.')
+              else ...[
+                _row('현재 위치', _point(robot.position)),
+                _row('주행', robot.moving ? '주행 중' : '정지'),
+                _row('배터리', '${robot.battery.toStringAsFixed(1)}%'),
+                _row(
+                  '목표 지점',
+                  robot.targetWaypoint == null
+                      ? '없음'
+                      : widget.waypointLabel(robot.targetWaypoint!),
+                ),
+                _row('남은 경로', '${robot.assignedRoute.length}개 지점'),
+              ],
+              const Divider(height: 22),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '단계 진행',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(height: 6),
+              for (var i = 0; i < task.steps.length; i++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Icon(
+                        switch (task.steps[i].status) {
+                          _TaskStepStatus.completed => Icons.check_circle,
+                          _TaskStepStatus.active => Icons.play_circle_fill,
+                          _TaskStepStatus.failed => Icons.error,
+                          _ => Icons.radio_button_unchecked,
+                        },
+                        size: 16,
+                        color: switch (task.steps[i].status) {
+                          _TaskStepStatus.completed => const Color(0xFF15803D),
+                          _TaskStepStatus.active => const Color(0xFF2563EB),
+                          _TaskStepStatus.failed => const Color(0xFFDC2626),
+                          _ => const Color(0xFF94A3B8),
+                        },
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${i + 1}. ${_stepLabel(task.steps[i])} '
+                          '${task.steps[i].destinationName ?? '-'}'
+                          '${task.steps[i].failureReason == null ? '' : ' · ${task.steps[i].failureReason}'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Text(
+                '앱 Mock 주행이 계산한 값입니다. 실제 로봇의 ROS 토픽은 아직 연결되지 않았습니다.',
+                style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: _asText(robot)));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('현재 상태를 클립보드에 복사했습니다.')),
+            );
+          },
+          icon: const Icon(Icons.content_copy_outlined, size: 18),
+          label: const Text('복사'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('닫기'),
+        ),
+      ],
+    );
+  }
 }
 
 /// Waypoint를 찍다 생긴 오류를 복사·크기 조절이 되는 팝업으로 보여 준다.
