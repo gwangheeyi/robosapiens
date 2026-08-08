@@ -128,4 +128,73 @@ void main() {
       expect(restored.linearVelocity, .5);
     });
   });
+
+  group('프로젝트 launch', () {
+    test('경로가 전부 이 프로젝트 것으로 박힌다', () {
+      final xml = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/home/gyi/robosapiens/rmf_maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+      );
+      // 맵마다 building.yaml 도 nav graph 도 플릿 설정도 다르다. 하나라도
+      // 데모 것을 가리키면 지난번처럼 tinyRobot 설정으로 돌아간다.
+      expect(
+        xml,
+        contains(
+          '<arg name="map_dir" default='
+          '"/home/gyi/robosapiens/rmf_maps/gwanghee"/>',
+        ),
+      );
+      expect(
+        xml,
+        contains(
+          r'<arg name="config_file" value="$(var map_dir)'
+          '/gwanghee.building.yaml"/>',
+        ),
+      );
+      expect(
+        xml,
+        contains(
+          r'<arg name="config_file" value="$(var map_dir)'
+          '/gwanghee_pinky_config.yaml"/>',
+        ),
+      );
+      expect(
+        xml,
+        contains(
+          r'<arg name="nav_graph_file" value="$(var map_dir)'
+          '/nav_graphs/0.yaml"/>',
+        ),
+      );
+      expect(xml, isNot(contains('tinyRobot')));
+      expect(xml, isNot(contains('office')));
+    });
+
+    test('RMF core 와 fleet adapter 를 함께 띄운다', () {
+      final xml = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+      );
+      // core 가 먼저 떠야 fleet adapter 가 붙는다. 지난 실패가 그것이었다.
+      expect(xml, contains('rmf_demos)/common.launch.xml'));
+      expect(xml, contains('rmf_demos_fleet_adapter'));
+      expect(
+        xml.indexOf('common.launch.xml'),
+        lessThan(xml.indexOf('rmf_demos_fleet_adapter')),
+      );
+    });
+
+    test('rmf-web 주소를 넘긴다', () {
+      final xml = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'f',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'b.yaml',
+      );
+      expect(xml, contains('ws://127.0.0.1:8000/_internal'));
+    });
+  });
 }

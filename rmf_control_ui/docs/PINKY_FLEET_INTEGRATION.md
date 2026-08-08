@@ -24,7 +24,7 @@ Gazebo Pinky ──odom/scan──▶ [Nav2] ──▶ [RMF Fleet Adapter] ─�
 |---|---|---|
 | 1 | `pinky_pro` 빌드 · Gazebo 가상 Pinky 기동 · `/odom` `/cmd_vel` 확인 | **완료** |
 | 2 | RMF core(schedule node, building map server)를 gwanghee 맵으로 기동 | 예정 |
-| 3 | Pinky용 Fleet Adapter 설정 작성 · gwanghee 통합 launch | **설정 생성·저장 완료**, launch 남음 |
+| 3 | 프로젝트별 Fleet Adapter 설정 · 통합 launch 생성 | **완료** (실행 확인 남음) |
 | 4 | `rmf_control_ui`를 rmf-web에 연결해 `실제 로봇` 모드에서 fleet state 표시 | 예정 |
 
 ## 4. 사전 준비
@@ -206,10 +206,38 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | `<맵이름>.building.yaml` | `building` | Open-RMF 건물 맵 |
 | `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. `robots[].charger`에 충전 Waypoint 이름이 들어감 |
 | `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
+| `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
 
 `nav_graphs/0.yaml`은 배포 스크립트가 `building.yaml`에서 만듭니다.
 
-### 6.4 앱에서 설정하기
+launch는 경로를 전부 이 프로젝트 것으로 박습니다. 하나라도 데모 것을 가리키면
+지난번처럼 tinyRobot 설정으로 돌아갑니다.
+
+```xml
+<arg name="map_dir" default="…/rmf_maps/gwanghee"/>
+<arg name="config_file" value="$(var map_dir)/gwanghee.building.yaml"/>
+<arg name="config_file" value="$(var map_dir)/gwanghee_pinky_config.yaml"/>
+<arg name="nav_graph_file" value="$(var map_dir)/nav_graphs/0.yaml"/>
+```
+
+### 6.4 디스크로 내보내기
+
+설정의 원장은 MySQL이지만 **`ros2 launch`는 파일만 읽습니다.** 실행하기 전에
+`RMF 설정` → `설정 파일` 탭 → `디스크로 내보내기`를 한 번 누르세요.
+
+`rmf_maps/<맵이름>/`에 풀립니다. 배포 산출물(`nav_graphs/0.yaml`, `*.world`)이
+이미 그 디렉터리에 있으므로 launch가 한 경로만 가리키면 됩니다. 맵마다 디렉터리가
+따로이므로 프로젝트를 바꿔도 서로 덮어쓰지 않습니다.
+
+내보낸 뒤 실행:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source $HOME/rmf_ws/install/setup.bash
+ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
+```
+
+### 6.5 앱에서 설정하기
 
 맵 관리 상단 `RMF 설정`에서 두 가지를 봅니다.
 
@@ -226,7 +254,7 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 `프로젝트 저장`을 누르면 이 로봇 목록으로 설정 파일이 다시 만들어집니다. 로봇을
 고쳤으면 저장해야 반영됩니다.
 
-### 6.5 SQL로 직접 보기
+### 6.6 SQL로 직접 보기
 
 ```sql
 -- 프로젝트의 설정 파일 목록
@@ -296,15 +324,20 @@ ros2 node list
 이제 **맵 프로젝트마다** 설정을 만들어 MySQL에 보관합니다. 6절을 참고하세요.
 남은 것은 이 설정을 물려 실제로 fleet adapter를 띄우는 launch입니다.
 
-### 8.2 gwanghee용 통합 launch (없음)
+### 8.2 통합 launch — 생성 완료, 실행 확인 남음
 
-`openrmf/launch/office_web.launch.xml`은 office 데모 전용입니다. 다음을 한 번에
-띄우는 launch가 필요합니다.
+프로젝트마다 `<맵이름>.launch.xml`이 만들어집니다. RMF core(schedule·blockade·
+building map server·supervisor·dispatcher)와 이 프로젝트의 fleet adapter를 함께
+띄웁니다. ROS가 파싱하는 것까지 확인했습니다(`ros2 launch --print-description`).
 
-- RMF schedule node · traffic 관련 노드
-- building map server (배포한 `building.yaml`)
-- Pinky fleet adapter (7.1의 설정 + `nav_graphs/0.yaml`)
-- Gazebo (배포한 `*.world`, 로봇 3대)
+아직 실제로 띄워 확인하지 않았습니다. 확인 전에 필요한 것:
+
+- 맵에 **충전 카테고리 Waypoint**가 있어야 로봇이 만들어집니다
+- `디스크로 내보내기`를 한 번 눌러야 파일이 생깁니다
+- 이전 세션의 RMF 노드가 남아 있으면 먼저 정리해야 합니다(7절)
+
+Gazebo는 아직 이 launch에 없습니다. 지금은 `pinky_gz_sim`을 따로 띄웁니다.
+로봇 3대를 각각 네임스페이스로 올리는 것과 배포한 `*.world`를 쓰는 것이 남았습니다.
 
 ### 8.3 앱과 rmf-web 연결 (없음)
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -14,6 +15,7 @@ import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
+import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
@@ -5989,6 +5991,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 이 프로젝트의 배포 디렉터리. launch 가 가리킬 경로다.
+  ///
+  /// 맵마다 따로이므로 프로젝트를 바꿔도 서로 덮어쓰지 않는다.
+  String _mapDirectoryFor(String mapName) {
+    final root =
+        Platform.environment['RMF_ROOT'] ??
+        '${Platform.environment['HOME'] ?? '~'}/robosapiens';
+    return '$root/rmf_maps/${safeMapDirectoryName(mapName)}';
+  }
+
   /// 지도 이름에서 만든 기본 플릿 이름. YAML 식별자로 쓸 수 있게 다듬는다.
   String _fleetNameFor(String mapName) {
     final safe = mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
@@ -6042,6 +6054,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
         fileName: 'fleet.yaml',
         kind: 'fleet_sim',
         content: buildFleetSimYaml(robots: _fleetRobots, mapName: mapName),
+        generatedAt: DateTime.now(),
+      ),
+      MapProjectFile(
+        fileName: '$mapName.launch.xml',
+        kind: 'launch',
+        content: buildProjectLaunchXml(
+          mapName: mapName,
+          fleetName: fleet.fleetName,
+          mapDirectory: _mapDirectoryFor(mapName),
+          buildingYamlName: _yamlFileNameFor(mapName),
+        ),
         generatedAt: DateTime.now(),
       ),
     ]);
@@ -6567,6 +6590,69 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
     }
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${files.length}개 · MySQL 보관',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: () => unawaited(_exportRmfConfig(project, files)),
+                icon: const Icon(Icons.drive_file_move_outline, size: 18),
+                label: const Text('디스크로 내보내기'),
+              ),
+            ],
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 8),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'ros2 launch 는 파일만 읽습니다. 실행하기 전에 한 번 내보내세요.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+          ),
+        ),
+        Expanded(child: _fleetFileList(files)),
+      ],
+    );
+  }
+
+  /// MySQL 에 있는 설정을 배포 디렉터리로 풀어 놓는다.
+  ///
+  /// 설정의 원장은 MySQL 이지만 `ros2 launch` 는 파일만 읽는다. 실행 직전에
+  /// 이 프로젝트의 파일을 디스크에 내려 두어야 한다.
+  Future<void> _exportRmfConfig(
+    String mapName,
+    List<MapProjectFile> files,
+  ) async {
+    final result = await exportProjectConfigFiles(
+      mapName: mapName,
+      files: files,
+    );
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: result.success ? '설정 내보내기 완료' : '설정 내보내기 실패',
+      message: result.success
+          ? '${result.message}\n\n'
+                '${result.written.join('\n')}\n\n'
+                '실행:\n'
+                '  source /opt/ros/jazzy/setup.bash\n'
+                '  source \$HOME/rmf_ws/install/setup.bash\n'
+                '  ros2 launch ${result.directory}/$mapName.launch.xml'
+          : result.message,
+    );
+  }
+
+  Widget _fleetFileList(List<MapProjectFile> files) {
     return ListView.separated(
       itemCount: files.length,
       separatorBuilder: (_, _) => const Divider(height: 1),

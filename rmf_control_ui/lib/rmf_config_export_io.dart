@@ -1,0 +1,112 @@
+/// 프로젝트의 설정 파일을 디스크로 내보낸다.
+///
+/// 설정은 MySQL 이 원장이지만 `ros2 launch` 는 파일만 읽는다. 실행 직전에 그
+/// 프로젝트의 파일을 배포 디렉터리로 풀어 놓아야 한다.
+///
+/// 맵마다 디렉터리가 따로이므로(`rmf_maps/<맵이름>`) 프로젝트를 바꿔도 서로
+/// 덮어쓰지 않는다.
+library;
+
+import 'dart:io';
+
+import 'map_project_models.dart';
+
+class RmfConfigExportResult {
+  const RmfConfigExportResult({
+    required this.success,
+    required this.directory,
+    required this.written,
+    required this.message,
+  });
+
+  final bool success;
+
+  /// 실제로 쓴 디렉터리. 실패하면 빈 문자열.
+  final String directory;
+
+  /// 쓴 파일 이름.
+  final List<String> written;
+  final String message;
+}
+
+Directory? _findProjectRoot() {
+  final configuredRoot = Platform.environment['RMF_ROOT'];
+  if (configuredRoot != null && configuredRoot.isNotEmpty) {
+    final directory = Directory(configuredRoot).absolute;
+    if (Directory('${directory.path}/rmf_maps').existsSync()) return directory;
+  }
+  var directory = Directory.current.absolute;
+  for (var i = 0; i < 8; i++) {
+    if (Directory('${directory.path}/rmf_maps').existsSync()) return directory;
+    final parent = directory.parent;
+    if (parent.path == directory.path) break;
+    directory = parent;
+  }
+  return null;
+}
+
+/// 파일 이름으로 쓸 수 없는 글자를 걷어낸다. 지도 이름에 공백이나 슬래시가
+/// 들어가면 디렉터리가 엉뚱한 곳에 생긴다.
+String safeMapDirectoryName(String mapName) {
+  final safe = mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+  return safe.isEmpty ? 'map' : safe;
+}
+
+/// [files] 를 `rmf_maps/<맵이름>/` 아래에 쓴다.
+///
+/// 배포 산출물(`nav_graphs/0.yaml`, `*.world`)이 이미 그 디렉터리에 있으므로
+/// 설정도 같은 곳에 두면 launch 가 한 경로만 가리키면 된다.
+Future<RmfConfigExportResult> exportProjectConfigFiles({
+  required String mapName,
+  required List<MapProjectFile> files,
+}) async {
+  if (files.isEmpty) {
+    return const RmfConfigExportResult(
+      success: false,
+      directory: '',
+      written: [],
+      message: '내보낼 설정 파일이 없습니다. 먼저 프로젝트를 저장하세요.',
+    );
+  }
+  final root = _findProjectRoot();
+  if (root == null) {
+    return const RmfConfigExportResult(
+      success: false,
+      directory: '',
+      written: [],
+      message:
+          'rmf_maps 디렉터리를 찾을 수 없습니다. '
+          'RMF_ROOT 환경 변수로 프로젝트 위치를 지정하세요.',
+    );
+  }
+  final target = Directory(
+    '${root.path}/rmf_maps/${safeMapDirectoryName(mapName)}',
+  );
+  try {
+    await target.create(recursive: true);
+    final written = <String>[];
+    for (final file in files) {
+      // 파일 이름에 경로 구분자가 섞여 들어오면 디렉터리 밖으로 나갈 수 있다.
+      final name = file.fileName.split(RegExp(r'[/\\]')).last;
+      if (name.isEmpty || name == '.' || name == '..') continue;
+      await File(
+        '${target.path}/$name',
+      ).writeAsString(file.content, flush: true);
+      written.add(name);
+    }
+    written.sort();
+    return RmfConfigExportResult(
+      success: true,
+      directory: target.path,
+      written: written,
+      message: '${written.length}개 파일을 ${target.path} 에 썼습니다.',
+    );
+  } catch (error) {
+    return RmfConfigExportResult(
+      success: false,
+      directory: target.path,
+      written: const [],
+      message: '$error',
+    );
+  }
+}

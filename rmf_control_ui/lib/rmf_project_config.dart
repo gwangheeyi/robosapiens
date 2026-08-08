@@ -319,3 +319,69 @@ String buildFleetSimYaml({
   }
   return buffer.toString();
 }
+
+/// 프로젝트를 통째로 띄우는 launch 파일.
+///
+/// RMF core(schedule·blockade·building map server·supervisor·dispatcher)와 이
+/// 프로젝트의 fleet adapter 를 함께 띄운다. 경로는 전부 이 프로젝트 것으로
+/// 박아 둔다 — 맵마다 building.yaml 도 nav graph 도 플릿 설정도 다르다.
+///
+/// [mapDirectory] 는 배포 산출물이 있는 곳(`rmf_maps/<맵이름>`)이다. 설정
+/// 파일도 같은 곳에 내보내므로 한 디렉터리만 가리키면 된다.
+String buildProjectLaunchXml({
+  required String mapName,
+  required String fleetName,
+  required String mapDirectory,
+  required String buildingYamlName,
+  bool useSimTime = true,
+  String serverUri = 'ws://127.0.0.1:8000/_internal',
+}) {
+  final buffer = StringBuffer()
+    ..writeln("<?xml version='1.0' ?>")
+    ..writeln('<!--')
+    ..writeln('  $mapName 프로젝트 실행 launch.')
+    ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면')
+    ..writeln('  다음 저장 때 덮어써진다.')
+    ..writeln('')
+    ..writeln('  실행:')
+    ..writeln('    source /opt/ros/jazzy/setup.bash')
+    ..writeln('    source \$HOME/rmf_ws/install/setup.bash')
+    ..writeln('    ros2 launch $mapDirectory/$mapName.launch.xml')
+    ..writeln('-->')
+    ..writeln('<launch>')
+    ..writeln('  <arg name="use_sim_time" default="$useSimTime"/>')
+    ..writeln('  <arg name="headless" default="true"/>')
+    ..writeln('  <arg name="server_uri" default="$serverUri"/>')
+    ..writeln('  <arg name="map_dir" default="$mapDirectory"/>')
+    ..writeln('')
+    ..writeln('  <!-- RMF core. 이것이 먼저 떠야 fleet adapter 가 붙는다. -->')
+    ..writeln(
+      '  <include file="\$(find-pkg-share rmf_demos)/common.launch.xml">',
+    )
+    ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('    <arg name="headless" value="\$(var headless)"/>')
+    ..writeln(
+      '    <arg name="config_file" value="\$(var map_dir)/$buildingYamlName"/>',
+    )
+    ..writeln('    <arg name="server_uri" value="\$(var server_uri)"/>')
+    ..writeln('  </include>')
+    ..writeln('')
+    ..writeln('  <!-- 이 프로젝트의 플릿. 설정과 nav graph 모두 이 맵의 것이다. -->')
+    ..writeln(
+      '  <include file="\$(find-pkg-share rmf_demos_fleet_adapter)'
+      '/launch/fleet_adapter.launch.xml">',
+    )
+    ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln(
+      '    <arg name="config_file" value="\$(var map_dir)'
+      '/${fleetName}_config.yaml"/>',
+    )
+    ..writeln(
+      '    <arg name="nav_graph_file" '
+      'value="\$(var map_dir)/nav_graphs/0.yaml"/>',
+    )
+    ..writeln('    <arg name="server_uri" value="\$(var server_uri)"/>')
+    ..writeln('  </include>')
+    ..writeln('</launch>');
+  return buffer.toString();
+}
