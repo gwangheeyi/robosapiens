@@ -356,11 +356,16 @@ CREATE TABLE IF NOT EXISTS `map_project_robots` (
   `seq`              INT          NOT NULL,
   `display_name`     VARCHAR(128) NOT NULL,
   `model`            VARCHAR(64)  NOT NULL,
+  -- 'mobile' 이면 돌아다니는 로봇, 'workcell' 이면 설비 자리에 고정된 설치 로봇.
+  -- 설치 로봇은 fleet adapter 의 robots 에 들어가지 않는다. 배차 대상이 아니다.
+  `kind`             VARCHAR(16)  NOT NULL DEFAULT 'mobile',
   -- Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(/<gz_name>/odom).
   `gz_name`          VARCHAR(64)  NOT NULL,
   -- TempZone.name 을 콤마로 이어 붙인 값. 예: 'ambient,chilled'
   `zones`            VARCHAR(64)  NOT NULL,
-  -- 충전 Waypoint 이름. fleet adapter 의 robots[].charger 로 나간다.
+  -- 이 로봇이 서 있는 Waypoint 이름.
+  -- 이동 로봇이면 충전 Waypoint 로 fleet adapter 의 robots[].charger 가 되고,
+  -- 설치 로봇이면 설비 Waypoint 로 그 자리에 고정 설치된다.
   `charger_waypoint` VARCHAR(128) NULL,
   `spawn_x`          DOUBLE       NULL,
   `spawn_y`          DOUBLE       NULL,
@@ -475,6 +480,8 @@ CREATE TABLE IF NOT EXISTS `counters` (
 --     map_project_files 추가. v5 는 db/migrate_v5_to_v6.sql 을 적용한다.
 -- v7: 설정 파일에 설명과 실행 권한 표시 추가.
 --     v6 은 db/migrate_v6_to_v7.sql 을 적용한다.
+-- v8: 로봇에 종류(이동/설치) 추가. 설치 로봇은 설비 Waypoint 에 고정되고
+--     fleet adapter 에 들어가지 않는다. v7 은 db/migrate_v7_to_v8.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 7, NOW(6))
+VALUES (1, 8, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

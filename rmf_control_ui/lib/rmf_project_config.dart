@@ -6,6 +6,30 @@
 /// 여기서 만든 결과는 `map_project_files` 에 프로젝트별로 보관한다.
 library;
 
+/// 로봇이 돌아다니는지 한자리에 붙어 있는지.
+///
+/// 둘은 등록 정보도 실행 방법도 다르다. 이동 로봇은 충전소가 있어야 하고
+/// fleet adapter 가 배차한다. 설치 로봇은 설비 자리에 고정되고 fleet 에 들어가지
+/// 않는다 — Open-RMF 에서 이런 것은 플릿이 아니라 workcell 이다.
+enum RmfRobotKind {
+  /// 이동 로봇. Pinky 처럼 Lane 을 따라 다닌다.
+  mobile,
+
+  /// 설치 로봇. OpenMANIPULATOR 처럼 설비 자리에 고정된다.
+  workcell;
+
+  String get label => this == RmfRobotKind.mobile ? '이동 로봇' : '설치 로봇';
+
+  /// 이 로봇이 설 자리를 고를 Waypoint 카테고리.
+  String get waypointCategory => this == RmfRobotKind.mobile ? '충전' : '설비';
+
+  static RmfRobotKind parse(String? value) => value == 'workcell'
+      ? RmfRobotKind.workcell
+      : RmfRobotKind.mobile;
+
+  String get storageValue => name;
+}
+
 /// 프로젝트에 속한 로봇 한 대.
 class RmfProjectRobot {
   const RmfProjectRobot({
@@ -14,6 +38,7 @@ class RmfProjectRobot {
     required this.model,
     required this.gzName,
     required this.zones,
+    this.kind = RmfRobotKind.mobile,
     this.chargerWaypoint,
     this.spawnX,
     this.spawnY,
@@ -24,22 +49,32 @@ class RmfProjectRobot {
   final String displayName;
   final String model;
 
+  /// 돌아다니는 로봇인지 한자리에 붙은 설비인지.
+  final RmfRobotKind kind;
+
   /// Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(`/<gzName>/odom`).
   final String gzName;
 
-  /// TempZone.name 목록. 관제 배차의 입찰 자격이 된다.
+  /// TempZone.name 목록. 관제 배차의 입찰 자격이 된다. 설치 로봇은 배차를 받지
+  /// 않으므로 비어 있어도 된다.
   final List<String> zones;
 
-  /// 충전 Waypoint 이름. fleet adapter 의 `robots[].charger` 로 나간다.
+  /// 이 로봇이 서 있는 Waypoint 이름.
+  ///
+  /// 이동 로봇이면 충전 Waypoint 로, fleet adapter 의 `robots[].charger` 가 된다.
+  /// 설치 로봇이면 설비 Waypoint 로, 그 자리에 고정 설치된다.
   final String? chargerWaypoint;
   final double? spawnX;
   final double? spawnY;
   final double spawnHeading;
 
+  bool get isMobile => kind == RmfRobotKind.mobile;
+
   Map<String, Object?> toJson() => {
     'robotId': robotId,
     'displayName': displayName,
     'model': model,
+    'kind': kind.storageValue,
     'gzName': gzName,
     'zones': zones,
     'chargerWaypoint': chargerWaypoint,
@@ -52,6 +87,7 @@ class RmfProjectRobot {
     robotId: data['robotId'] as String,
     displayName: data['displayName'] as String? ?? data['robotId'] as String,
     model: data['model'] as String? ?? 'PINKY',
+    kind: RmfRobotKind.parse(data['kind'] as String?),
     gzName: data['gzName'] as String? ?? data['robotId'] as String,
     zones: [
       for (final zone in (data['zones'] as List<dynamic>? ?? const []))
@@ -63,6 +99,31 @@ class RmfProjectRobot {
     spawnHeading: (data['spawnHeading'] as num?)?.toDouble() ?? 0,
   );
 }
+
+/// 설치 로봇으로 고를 수 있는 OpenMANIPULATOR 모델과 그 컨트롤러.
+///
+/// `open_manipulator_description` 의 xacro 가 펼쳐지고 Gazebo 용 컨트롤러 설정이
+/// 있는 것만 넣는다. 고를 수 있는데 띄우면 죽는 항목은 없느니만 못하다.
+///
+/// 뺀 것들:
+/// - `omy_f3m` — `realsense2_description` 이 있어야 xacro 가 펼쳐진다
+/// - `omx_l`, `omy_l100` — 원격 조종의 leader 쪽이라 설비로 세울 것이 아니다
+///
+/// 모델마다 컨트롤러가 다르다. `omy_3m` 은 그리퍼가 없어서 있지도 않은
+/// `gripper_controller` 를 올리면 spawner 가 기다리다 실패한다.
+const Map<String, List<String>> openManipulatorControllers = {
+  'open_manipulator_x': [
+    'joint_state_broadcaster',
+    'arm_controller',
+    'gripper_controller',
+  ],
+  'omx_f': ['joint_state_broadcaster', 'arm_controller', 'gripper_controller'],
+  'omy_3m': ['joint_state_broadcaster', 'arm_controller'],
+};
+
+/// 설치 로봇으로 고를 수 있는 모델 이름.
+List<String> get openManipulatorModels =>
+    openManipulatorControllers.keys.toList();
 
 /// 프로젝트의 플릿 설정. Open-RMF fleet adapter 의 `rmf_fleet` 블록과 대응한다.
 class RmfFleetSettings {
@@ -265,13 +326,36 @@ String buildFleetAdapterYaml({
     ..writeln('  responsive_wait: True')
     ..writeln('  reassign_task_interval: 120')
     ..writeln('  robots:');
-  if (robots.isEmpty) {
-    buffer.writeln('    {} # 등록된 로봇이 없다.');
+  // 플릿은 돌아다니는 로봇의 모임이다. 한자리에 붙은 설치 로봇을 여기 넣으면
+  // fleet adapter 가 배차 대상으로 보고 갈 수 없는 곳으로 보내려 한다.
+  // Open-RMF 에서 그런 것은 플릿이 아니라 workcell 로 다룬다.
+  final mobile = [
+    for (final robot in robots)
+      if (robot.isMobile) robot,
+  ];
+  if (mobile.isEmpty) {
+    buffer.writeln('    {} # 등록된 이동 로봇이 없다.');
   } else {
-    for (final robot in robots) {
+    for (final robot in mobile) {
       buffer
         ..writeln('    ${robot.robotId}:')
         ..writeln('        charger: "${robot.chargerWaypoint ?? ''}"');
+    }
+  }
+  final workcells = [
+    for (final robot in robots)
+      if (!robot.isMobile) robot,
+  ];
+  if (workcells.isNotEmpty) {
+    buffer
+      ..writeln('')
+      ..writeln('# 설치 로봇은 플릿에 넣지 않는다. 배차 대상이 아니다.')
+      ..writeln('# 이 프로젝트의 설치 로봇:');
+    for (final robot in workcells) {
+      buffer.writeln(
+        '#   ${robot.robotId} · ${robot.displayName} '
+        '(${robot.model}) @ ${robot.chargerWaypoint ?? '자리 미지정'}',
+      );
     }
   }
   buffer
@@ -304,11 +388,16 @@ String buildFleetSimYaml({
     buffer
       ..writeln('  - id: ${robot.robotId}')
       ..writeln('    name: ${robot.displayName}')
+      ..writeln('    kind: ${robot.kind.storageValue} # ${robot.kind.label}')
       ..writeln('    model: ${robot.model}')
       ..writeln('    gz_name: ${robot.gzName}')
       ..writeln('    zones: [${robot.zones.join(', ')}]');
     if (robot.chargerWaypoint != null) {
-      buffer.writeln('    home_charger: ${robot.chargerWaypoint}');
+      buffer.writeln(
+        robot.isMobile
+            ? '    home_charger: ${robot.chargerWaypoint}'
+            : '    station: ${robot.chargerWaypoint}',
+      );
     }
     if (robot.spawnX != null && robot.spawnY != null) {
       buffer
@@ -445,7 +534,22 @@ String buildProjectGzBridgeYaml({
   }
   for (final robot in robots) {
     final ns = '/${robot.gzName}';
-    buffer.writeln('# ${robot.robotId} · ${robot.displayName}');
+    buffer.writeln(
+      '# ${robot.robotId} · ${robot.displayName} (${robot.kind.label})',
+    );
+    // 설치 로봇은 바퀴도 LiDAR 도 없다. 관절 상태만 오간다. 나머지는
+    // ros2_control 이 컨트롤러 인터페이스로 직접 주고받는다.
+    if (!robot.isMobile) {
+      entry(
+        buffer,
+        ros: '$ns/joint_states',
+        gz: '$ns/joint_states',
+        rosType: 'sensor_msgs/msg/JointState',
+        gzType: 'gz.msgs.Model',
+        direction: 'GZ_TO_ROS',
+      );
+      continue;
+    }
     entry(
       buffer,
       ros: '$ns/odom',
@@ -524,6 +628,7 @@ String buildProjectBringupXml({
     ..writeln('  <set_env name="GZ_SIM_RESOURCE_PATH"')
     ..writeln(
       '           value="\$(find-pkg-share pinky_description)/../:'
+      '\$(find-pkg-share open_manipulator_description)/../:'
       '\$(var map_dir)/generated_models:\$(env HOME)/.gazebo/models"/>',
     )
     ..writeln('')
@@ -551,6 +656,56 @@ String buildProjectBringupXml({
   for (final robot in robots) {
     final x = (robot.spawnX ?? 0).toStringAsFixed(3);
     final y = (robot.spawnY ?? 0).toStringAsFixed(3);
+    if (!robot.isMobile) {
+      // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
+      // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신
+      // ros2_control 컨트롤러를 올린다.
+      buffer
+        ..writeln('')
+        ..writeln(
+          '  <!-- ${robot.robotId} · ${robot.displayName} '
+          '· 설치 로봇 @ ${robot.chargerWaypoint ?? '자리 미지정'} -->',
+        )
+        ..writeln('  <group>')
+        // 여기서는 push-ros-namespace 를 쓴다. 아래 노드들에 네임스페이스를
+        // 따로 걸지 않으므로 두 겹이 되지 않는다. 이동 로봇 쪽은 include 하는
+        // launch 가 이미 namespace 인자를 받으므로 겹쳐 걸면 안 된다.
+        ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+        ..writeln('    <node pkg="robot_state_publisher"')
+        ..writeln('          exec="robot_state_publisher" output="screen">')
+        ..writeln('      <param name="use_sim_time" value="True"/>')
+        ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
+        ..writeln('      <param name="robot_description"')
+        ..writeln(
+          '             value="\$(command \'xacro '
+          '\$(find-pkg-share open_manipulator_description)'
+          '/urdf/${robot.model}/${robot.model}.urdf.xacro use_sim:=true\')"/>',
+        )
+        ..writeln('    </node>')
+        ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
+        ..writeln(
+          '          args="-name ${robot.gzName} '
+          '-topic robot_description '
+          '-x $x -y $y -z 0.0 '
+          '-Y ${robot.spawnHeading.toStringAsFixed(3)} '
+          '-allow_renaming true">',
+        )
+        ..writeln('      <param name="use_sim_time" value="True"/>')
+        ..writeln('    </node>')
+        ..writeln('    <!-- 팔은 ros2_control 컨트롤러가 움직인다. -->');
+      // 모델마다 컨트롤러가 다르다. 없는 것을 올리면 spawner 가 기다리다
+      // 실패한다 — 예를 들어 omy_3m 에는 그리퍼가 없다.
+      final controllers =
+          openManipulatorControllers[robot.model] ??
+          const ['joint_state_broadcaster', 'arm_controller'];
+      for (final controller in controllers) {
+        buffer
+          ..writeln('    <node pkg="controller_manager" exec="spawner"')
+          ..writeln('          args="$controller" output="screen"/>');
+      }
+      buffer.writeln('  </group>');
+      continue;
+    }
     buffer
       ..writeln('')
       ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')

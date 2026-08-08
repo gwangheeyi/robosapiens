@@ -256,6 +256,143 @@ void main() {
     });
   });
 
+  group('설치 로봇', () {
+    const workcell = RmfProjectRobot(
+      robotId: 'OMX-01',
+      displayName: '매니퓰레이터 1호',
+      model: 'open_manipulator_x',
+      kind: RmfRobotKind.workcell,
+      gzName: 'omx_01',
+      zones: [],
+      chargerWaypoint: 'OMX1',
+      spawnX: 5,
+      spawnY: 2,
+    );
+    const mixed = [...robots, workcell];
+
+    test('플릿에 넣지 않는다', () {
+      final yaml = buildFleetAdapterYaml(
+        fleet: const RmfFleetSettings(),
+        robots: mixed,
+        mapName: 'gwanghee',
+      );
+      // 넣으면 fleet adapter 가 배차 대상으로 보고 갈 수 없는 곳으로 보낸다.
+      expect(yaml, contains('    PK-01:'));
+      expect(yaml, contains('    PK-02:'));
+      expect(yaml, isNot(contains('    OMX-01:')));
+      // 그래도 어떤 설비가 있는지는 주석으로 남긴다.
+      expect(yaml, contains('# 설치 로봇은 플릿에 넣지 않는다'));
+      expect(yaml, contains('#   OMX-01 · 매니퓰레이터 1호'));
+    });
+
+    test('이동 로봇이 하나도 없으면 빈 플릿이 된다', () {
+      final yaml = buildFleetAdapterYaml(
+        fleet: const RmfFleetSettings(),
+        robots: const [workcell],
+        mapName: 'gwanghee',
+      );
+      expect(yaml, contains('{} # 등록된 이동 로봇이 없다.'));
+    });
+
+    test('bringup 은 open_manipulator 쪽 설명을 쓴다', () {
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: mixed,
+        mapDirectory: '/maps/gwanghee',
+      );
+      // pinky_description 의 xacro 로는 팔이 나오지 않는다.
+      expect(
+        xml,
+        contains(
+          r'$(find-pkg-share open_manipulator_description)'
+          '/urdf/open_manipulator_x/open_manipulator_x.urdf.xacro',
+        ),
+      );
+      expect(xml, contains('args="-name omx_01 -topic robot_description'));
+      // 팔은 바퀴가 아니라 컨트롤러가 움직인다.
+      expect(xml, contains('args="arm_controller"'));
+      expect(xml, contains('args="gripper_controller"'));
+      expect(xml, contains('args="joint_state_broadcaster"'));
+      // 이동 로봇 쪽은 그대로다.
+      expect(xml, contains('-topic /pinky_01/robot_description'));
+    });
+
+    test('그리퍼가 없는 모델에는 그리퍼 컨트롤러를 올리지 않는다', () {
+      // omy_3m 에는 그리퍼가 없다. 없는 컨트롤러를 올리면 spawner 가 기다리다
+      // 실패하고, 팔까지 함께 안 움직이는 것처럼 보인다.
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: const [
+          RmfProjectRobot(
+            robotId: 'OMY-01',
+            displayName: '팔 1호',
+            model: 'omy_3m',
+            kind: RmfRobotKind.workcell,
+            gzName: 'omy_01',
+            zones: [],
+            chargerWaypoint: 'OMX1',
+          ),
+        ],
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, contains('args="arm_controller"'));
+      expect(xml, contains('args="joint_state_broadcaster"'));
+      expect(xml, isNot(contains('args="gripper_controller"')));
+    });
+
+    test('고를 수 있는 모델은 모두 컨트롤러가 정의되어 있다', () {
+      // 고를 수 있는데 띄우면 죽는 항목은 없느니만 못하다.
+      for (final model in openManipulatorModels) {
+        expect(
+          openManipulatorControllers[model],
+          isNotEmpty,
+          reason: '$model 의 컨트롤러가 비어 있다',
+        );
+      }
+    });
+
+    test('메시를 찾도록 두 설명 패키지를 모두 경로에 넣는다', () {
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: mixed,
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, contains(r'$(find-pkg-share pinky_description)/../'));
+      expect(
+        xml,
+        contains(r'$(find-pkg-share open_manipulator_description)/../'),
+      );
+    });
+
+    test('다리는 관절 상태만 잇는다', () {
+      final yaml = buildProjectGzBridgeYaml(mapName: 'gwanghee', robots: mixed);
+      expect(yaml, contains('ros_topic_name: "/omx_01/joint_states"'));
+      // 바퀴도 LiDAR 도 없다. 있지도 않은 토픽에 다리를 놓으면 조용히 놀고 있다.
+      expect(yaml, isNot(contains('/omx_01/odom')));
+      expect(yaml, isNot(contains('/omx_01/cmd_vel')));
+      expect(yaml, isNot(contains('/omx_01/scan')));
+      // 이동 로봇은 그대로 다 잇는다.
+      expect(yaml, contains('ros_topic_name: "/pinky_01/odom"'));
+    });
+
+    test('종류가 JSON 을 오가도 유지된다', () {
+      final restored = RmfProjectRobot.fromJson(workcell.toJson());
+      expect(restored.kind, RmfRobotKind.workcell);
+      expect(restored.isMobile, isFalse);
+      expect(restored.chargerWaypoint, 'OMX1');
+    });
+
+    test('종류가 없는 옛 기록은 이동 로봇으로 읽는다', () {
+      // v8 이전에 저장된 로봇에는 kind 가 없다. 전부 이동 로봇이었다.
+      final restored = RmfProjectRobot.fromJson(const {
+        'robotId': 'PK-09',
+        'model': 'PINKY-GZ',
+        'gzName': 'pinky_09',
+      });
+      expect(restored.kind, RmfRobotKind.mobile);
+    });
+  });
+
   group('프로젝트 launch', () {
     test('경로가 전부 이 프로젝트 것으로 박힌다', () {
       final xml = buildProjectLaunchXml(

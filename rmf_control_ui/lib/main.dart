@@ -4457,18 +4457,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
     });
   }
 
-  /// 등록한 모델 이름에서 지도에 그릴 종류를 고른다.
+  /// 등록 정보에서 지도에 그릴 종류를 고른다.
   ///
-  /// 등록은 Open-RMF 쪽 정보(모델·gz 이름·충전 자리)를 담고, 지도 표시는 앱
-  /// 쪽 개념이다. 둘을 따로 물으면 같은 것을 두 번 적게 된다.
-  static _RobotKind _kindForModel(String model) {
-    final upper = model.toUpperCase();
-    if (upper.contains('OMX') || upper.contains('MANIPULATOR')) {
-      return _RobotKind.omxManipulator;
-    }
-    if (upper.contains('HUMANOID')) return _RobotKind.mockHumanoid;
-    if (upper.contains('PINKY')) return _RobotKind.pinky;
-    return _RobotKind.mockMobile;
+  /// 등록은 Open-RMF 쪽 정보(종류·모델·gz 이름·자리)를 담고, 지도 표시는 앱 쪽
+  /// 개념이다. 둘을 따로 물으면 같은 것을 두 번 적게 된다.
+  ///
+  /// 설치 로봇은 그대로 매니퓰레이터로 그린다. 이동 로봇은 모델 이름으로 Pinky
+  /// 인지만 가른다 — 어느 쪽이든 Lane 을 따라 다니는 것은 같다.
+  static _RobotKind _kindForRobot(RmfProjectRobot robot) {
+    if (!robot.isMobile) return _RobotKind.omxManipulator;
+    return robot.model.toUpperCase().contains('PINKY')
+        ? _RobotKind.pinky
+        : _RobotKind.mockMobile;
   }
 
   Future<void> _spawnMockRobot() async {
@@ -4512,7 +4512,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     RmfProjectRobot? registered = unspawned.firstOrNull;
     var kind = registered == null
         ? _RobotKind.mockHumanoid
-        : _kindForModel(registered.model);
+        : _kindForRobot(registered);
     bool isLaneConnected(Offset point) => runtimeLanes.any(
       (lane) =>
           (lane.$1 - point).distance <= .01 ||
@@ -4609,7 +4609,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       // 배치하는 것은 관제 대상이 아닌 사람·휴머노이드뿐이다.
                       kind = registered == null
                           ? _RobotKind.mockHumanoid
-                          : _kindForModel(registered!.model);
+                          : _kindForRobot(registered!);
                       controller.text =
                           registered?.robotId ??
                           '사람-${_mockRobots.length + 1}';
@@ -6388,10 +6388,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _fleetSettings = RmfFleetSettings.fromJson(
         stored['settings'] as Map<String, dynamic>,
       );
+      // JSON_ARRAYAGG 는 순서를 보장하지 않는다. 저장할 때 매긴 seq 로 되돌려
+      // 놓지 않으면 프로젝트를 다시 열 때마다 목록 차례가 뒤바뀐다.
+      final rows =
+          (stored['robots'] as List<dynamic>? ?? const [])
+              .cast<Map<String, dynamic>>()
+              .toList()
+            ..sort(
+              (a, b) => ((a['seq'] as num?) ?? 0).compareTo(
+                (b['seq'] as num?) ?? 0,
+              ),
+            );
       _fleetRobots = [
-        for (final row
-            in (stored['robots'] as List<dynamic>? ?? const [])
-                .cast<Map<String, dynamic>>())
+        for (final row in rows)
           RmfProjectRobot.fromJson({
             ...row,
             'zones': (row['zonesText'] as String? ?? '')
@@ -6456,43 +6465,68 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
-  /// 맵의 충전 Waypoint 이름 목록. 로봇의 charger 로 고를 후보다.
-  List<String> get _chargerWaypointNames => [
-    for (final entry in _waypointTypes.entries)
-      if (entry.value == '충전') (_waypointNames[entry.key] ?? '').trim() else '',
-  ].where((name) => name.isNotEmpty).toList()..sort();
-
-  /// 충전 Waypoint 하나마다 로봇 한 대를 만든다.
+  /// 로봇이 설 자리로 고를 수 있는 Waypoint 이름 목록.
   ///
-  /// 로봇을 손으로 하나씩 넣는 대신 맵에서 끌어온다. 충전소가 곧 그 로봇의
-  /// 자리이므로 spawn 좌표와 charger 를 한꺼번에 채울 수 있다.
+  /// 이동 로봇은 충전 Waypoint 에, 설치 로봇은 설비 Waypoint 에 선다. 맵에 있는
+  /// 것 중에서 고르므로 이름을 잘못 적을 일이 없다.
+  List<String> _stationWaypointNames(RmfRobotKind kind) =>
+      [
+        for (final entry in _waypointTypes.entries)
+          if (entry.value == kind.waypointCategory)
+            (_waypointNames[entry.key] ?? '').trim()
+          else
+            '',
+      ].where((name) => name.isNotEmpty).toList()..sort();
+
+  /// 자리 Waypoint 하나마다 로봇 한 대를 만든다.
+  ///
+  /// 로봇을 손으로 하나씩 넣는 대신 맵에서 끌어온다. 충전 Waypoint 는 이동
+  /// 로봇의 자리이고 설비 Waypoint 는 설치 로봇의 자리이므로, spawn 좌표와
+  /// 자리를 한꺼번에 채울 수 있다.
   List<RmfProjectRobot> _robotsFromChargers() {
-    final chargers = <Offset, String>{
-      for (final entry in _waypointTypes.entries)
-        if (entry.value == '충전' &&
-            (_waypointNames[entry.key] ?? '').trim().isNotEmpty)
-          entry.key: _waypointNames[entry.key]!.trim(),
-    };
     final metersPerPixel = _metersPerPixel;
-    var index = 0;
-    return [
-      for (final entry in chargers.entries)
-        () {
-          index++;
-          final floor = _floorCoordinate(entry.key);
-          final scale = metersPerPixel ?? 1;
-          return RmfProjectRobot(
-            robotId: 'PK-${index.toString().padLeft(2, '0')}',
-            displayName: '핑키 $index호',
-            model: 'PINKY-GZ',
-            gzName: 'pinky_${index.toString().padLeft(2, '0')}',
-            zones: const ['ambient', 'chilled', 'frozen'],
-            chargerWaypoint: entry.value,
-            spawnX: floor.dx * scale,
-            spawnY: floor.dy * scale,
-          );
-        }(),
-    ];
+    final scale = metersPerPixel ?? 1;
+    final robots = <RmfProjectRobot>[];
+    for (final kind in RmfRobotKind.values) {
+      final stations = <Offset, String>{
+        for (final entry in _waypointTypes.entries)
+          if (entry.value == kind.waypointCategory &&
+              (_waypointNames[entry.key] ?? '').trim().isNotEmpty)
+            entry.key: _waypointNames[entry.key]!.trim(),
+      };
+      var index = 0;
+      for (final entry in stations.entries) {
+        index++;
+        final serial = index.toString().padLeft(2, '0');
+        final floor = _floorCoordinate(entry.key);
+        robots.add(
+          kind == RmfRobotKind.mobile
+              ? RmfProjectRobot(
+                  robotId: 'PK-$serial',
+                  displayName: '핑키 $index호',
+                  model: 'PINKY-GZ',
+                  gzName: 'pinky_$serial',
+                  zones: const ['ambient', 'chilled', 'frozen'],
+                  chargerWaypoint: entry.value,
+                  spawnX: floor.dx * scale,
+                  spawnY: floor.dy * scale,
+                )
+              : RmfProjectRobot(
+                  robotId: 'OMX-$serial',
+                  displayName: '매니퓰레이터 $index호',
+                  model: openManipulatorModels.first,
+                  kind: RmfRobotKind.workcell,
+                  gzName: 'omx_$serial',
+                  // 설치 로봇은 배차를 받지 않으므로 구획 자격이 필요 없다.
+                  zones: const [],
+                  chargerWaypoint: entry.value,
+                  spawnX: floor.dx * scale,
+                  spawnY: floor.dy * scale,
+                ),
+        );
+      }
+    }
+    return robots;
   }
 
   /// 로봇 한 대를 추가하거나 고친다. 취소하면 null.
@@ -6510,163 +6544,273 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final gzController = TextEditingController(
       text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
     );
+    var kind = existing?.kind ?? RmfRobotKind.mobile;
     var charger = existing?.chargerWaypoint;
     var zones = {...?existing?.zones};
-    if (zones.isEmpty) zones = {'ambient', 'chilled', 'frozen'};
-    final chargers = _chargerWaypointNames;
-    if (charger != null && !chargers.contains(charger)) charger = null;
+    if (zones.isEmpty && kind == RmfRobotKind.mobile) {
+      zones = {'ambient', 'chilled', 'frozen'};
+    }
+    if (charger != null && !_stationWaypointNames(kind).contains(charger)) {
+      charger = null;
+    }
 
     final saved = await showMovableDialog<RmfProjectRobot>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          icon: const Icon(Icons.smart_toy_outlined, size: 32),
-          title: Text(existing == null ? '로봇 추가' : '로봇 수정'),
-          content: SizedBox(
-            width: 440,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: idController,
-                    decoration: const InputDecoration(
-                      labelText: '로봇 ID',
-                      helperText: 'fleet adapter 의 robots 항목 이름이 됩니다.',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: nameController,
-                    decoration: const InputDecoration(
-                      labelText: '표시 이름',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: modelController,
-                    decoration: const InputDecoration(
-                      labelText: '모델',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: gzController,
-                    decoration: const InputDecoration(
-                      labelText: 'Gazebo 모델 이름',
-                      helperText: '토픽 네임스페이스로도 쓰입니다 (/이름/odom).',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    initialValue: charger,
-                    isExpanded: true,
-                    decoration: InputDecoration(
-                      labelText: '충전 Waypoint',
-                      helperText: chargers.isEmpty
-                          ? '맵에 충전 카테고리 Waypoint가 없습니다.'
-                          : 'spawn 위치와 복귀 지점이 됩니다.',
-                      border: const OutlineInputBorder(),
-                    ),
-                    items: [
-                      for (final name in chargers)
-                        DropdownMenuItem(value: name, child: Text(name)),
-                    ],
-                    onChanged: (value) => setDialogState(() => charger = value),
-                  ),
-                  const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Wrap(
-                      spacing: 8,
-                      children: [
-                        for (final zone in const [
-                          'ambient',
-                          'chilled',
-                          'frozen',
-                        ])
-                          FilterChip(
-                            label: Text(zone),
-                            selected: zones.contains(zone),
-                            onSelected: (on) => setDialogState(() {
-                              if (on) {
-                                zones.add(zone);
-                              } else {
-                                zones.remove(zone);
-                              }
-                            }),
-                          ),
-                      ],
-                    ),
-                  ),
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Padding(
-                      padding: EdgeInsets.only(top: 6),
-                      child: Text(
-                        '진입 가능한 3온도 구획입니다. 관제 배차의 입찰 자격이 됩니다.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF64748B),
+        builder: (context, setDialogState) {
+          final stations = _stationWaypointNames(kind);
+          final isMobile = kind == RmfRobotKind.mobile;
+          return AlertDialog(
+            icon: Icon(
+              isMobile ? Icons.smart_toy_outlined : Icons.precision_manufacturing,
+              size: 32,
+            ),
+            title: Text(existing == null ? '로봇 등록' : '로봇 수정'),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 종류를 먼저 정한다. 자리를 고를 Waypoint 카테고리도,
+                    // 실행할 때 쓰는 설명 파일도, 플릿에 들어가는지 여부도
+                    // 여기서 갈린다.
+                    SegmentedButton<RmfRobotKind>(
+                      segments: const [
+                        ButtonSegment(
+                          value: RmfRobotKind.mobile,
+                          icon: Icon(Icons.smart_toy_outlined, size: 18),
+                          label: Text('이동 로봇'),
                         ),
+                        ButtonSegment(
+                          value: RmfRobotKind.workcell,
+                          icon: Icon(Icons.precision_manufacturing, size: 18),
+                          label: Text('설치 로봇'),
+                        ),
+                      ],
+                      selected: {kind},
+                      onSelectionChanged: (selected) => setDialogState(() {
+                        kind = selected.first;
+                        charger = null;
+                        if (kind == RmfRobotKind.mobile) {
+                          zones = {'ambient', 'chilled', 'frozen'};
+                          if (existing == null) {
+                            idController.text =
+                                'PK-${index.toString().padLeft(2, '0')}';
+                            nameController.text = '핑키 $index호';
+                            modelController.text = 'PINKY-GZ';
+                            gzController.text =
+                                'pinky_${index.toString().padLeft(2, '0')}';
+                          }
+                        } else {
+                          // 설치 로봇은 배차를 받지 않으므로 구획 자격이 없다.
+                          zones = {};
+                          if (existing == null) {
+                            idController.text =
+                                'OMX-${index.toString().padLeft(2, '0')}';
+                            nameController.text = '매니퓰레이터 $index호';
+                            modelController.text = openManipulatorModels.first;
+                            gzController.text =
+                                'omx_${index.toString().padLeft(2, '0')}';
+                          }
+                        }
+                      }),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      isMobile
+                          ? 'Lane 을 따라 다닙니다. fleet adapter 가 배차합니다.'
+                          : '설비 자리에 고정됩니다. 배차 대상이 아니라서 '
+                                'fleet adapter 에 들어가지 않습니다.',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF64748B),
                       ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: idController,
+                      decoration: InputDecoration(
+                        labelText: '로봇 ID',
+                        helperText: isMobile
+                            ? 'fleet adapter 의 robots 항목 이름이 됩니다.'
+                            : '작업에서 이 설비를 가리키는 이름이 됩니다.',
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: nameController,
+                      decoration: const InputDecoration(
+                        labelText: '표시 이름',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (isMobile)
+                      TextField(
+                        controller: modelController,
+                        decoration: const InputDecoration(
+                          labelText: '모델',
+                          border: OutlineInputBorder(),
+                        ),
+                      )
+                    else
+                      DropdownButtonFormField<String>(
+                        initialValue:
+                            openManipulatorModels.contains(modelController.text)
+                            ? modelController.text
+                            : openManipulatorModels.first,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: '모델',
+                          helperText:
+                              'open_manipulator_description 의 xacro 이름입니다.',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          for (final model in openManipulatorModels)
+                            DropdownMenuItem(value: model, child: Text(model)),
+                        ],
+                        onChanged: (value) => setDialogState(
+                          () => modelController.text = value ?? '',
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: gzController,
+                      decoration: InputDecoration(
+                        labelText: 'Gazebo 모델 이름',
+                        helperText: isMobile
+                            ? '토픽 네임스페이스로도 쓰입니다 (/이름/odom).'
+                            : '토픽 네임스페이스로도 쓰입니다 (/이름/joint_states).',
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey(kind),
+                      initialValue: stations.contains(charger) ? charger : null,
+                      isExpanded: true,
+                      decoration: InputDecoration(
+                        labelText: isMobile ? '충전 Waypoint' : '설비 Waypoint',
+                        helperText: stations.isEmpty
+                            ? '맵에 ${kind.waypointCategory} 카테고리 Waypoint가 없습니다.'
+                            : isMobile
+                            ? 'spawn 위치와 복귀 지점이 됩니다.'
+                            : '이 자리에 고정 설치됩니다.',
+                        border: const OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final name in stations)
+                          DropdownMenuItem(value: name, child: Text(name)),
+                      ],
+                      onChanged: (value) =>
+                          setDialogState(() => charger = value),
+                    ),
+                    const SizedBox(height: 12),
+                    if (isMobile)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final zone in const [
+                              'ambient',
+                              'chilled',
+                              'frozen',
+                            ])
+                              FilterChip(
+                                label: Text(zone),
+                                selected: zones.contains(zone),
+                                onSelected: (on) => setDialogState(() {
+                                  if (on) {
+                                    zones.add(zone);
+                                  } else {
+                                    zones.remove(zone);
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                      ),
+                    if (isMobile)
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: EdgeInsets.only(top: 6),
+                          child: Text(
+                            '진입 가능한 3온도 구획입니다. 관제 배차의 입찰 자격이 됩니다.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF64748B),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('취소'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final id = idController.text.trim();
-                if (id.isEmpty) return;
-                final source = charger == null
-                    ? null
-                    : _waypointTypes.entries
-                          .where(
-                            (entry) =>
-                                entry.value == '충전' &&
-                                (_waypointNames[entry.key] ?? '').trim() ==
-                                    charger,
-                          )
-                          .map((entry) => entry.key)
-                          .firstOrNull;
-                final scale = _metersPerPixel ?? 1;
-                final floor = source == null ? null : _floorCoordinate(source);
-                Navigator.pop(
-                  dialogContext,
-                  RmfProjectRobot(
-                    robotId: id,
-                    displayName: nameController.text.trim().isEmpty
-                        ? id
-                        : nameController.text.trim(),
-                    model: modelController.text.trim().isEmpty
-                        ? 'PINKY-GZ'
-                        : modelController.text.trim(),
-                    gzName: gzController.text.trim().isEmpty
-                        ? id.toLowerCase()
-                        : gzController.text.trim(),
-                    zones: zones.toList()..sort(),
-                    chargerWaypoint: charger,
-                    spawnX: floor == null ? existing?.spawnX : floor.dx * scale,
-                    spawnY: floor == null ? existing?.spawnY : floor.dy * scale,
-                    spawnHeading: existing?.spawnHeading ?? 0,
-                  ),
-                );
-              },
-              child: const Text('저장'),
-            ),
-          ],
-        ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('취소'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final id = idController.text.trim();
+                  if (id.isEmpty) return;
+                  // 자리는 종류에 맞는 카테고리에서만 찾는다. 이동 로봇이
+                  // 설비 자리에 서거나 그 반대가 되면 실행에서 어긋난다.
+                  final source = charger == null
+                      ? null
+                      : _waypointTypes.entries
+                            .where(
+                              (entry) =>
+                                  entry.value == kind.waypointCategory &&
+                                  (_waypointNames[entry.key] ?? '').trim() ==
+                                      charger,
+                            )
+                            .map((entry) => entry.key)
+                            .firstOrNull;
+                  final scale = _metersPerPixel ?? 1;
+                  final floor = source == null
+                      ? null
+                      : _floorCoordinate(source);
+                  Navigator.pop(
+                    dialogContext,
+                    RmfProjectRobot(
+                      robotId: id,
+                      displayName: nameController.text.trim().isEmpty
+                          ? id
+                          : nameController.text.trim(),
+                      model: modelController.text.trim().isEmpty
+                          ? (isMobile
+                                ? 'PINKY-GZ'
+                                : openManipulatorModels.first)
+                          : modelController.text.trim(),
+                      kind: kind,
+                      gzName: gzController.text.trim().isEmpty
+                          ? id.toLowerCase()
+                          : gzController.text.trim(),
+                      zones: zones.toList()..sort(),
+                      chargerWaypoint: charger,
+                      spawnX: floor == null
+                          ? existing?.spawnX
+                          : floor.dx * scale,
+                      spawnY: floor == null
+                          ? existing?.spawnY
+                          : floor.dy * scale,
+                      spawnHeading: existing?.spawnHeading ?? 0,
+                    ),
+                  );
+                },
+                child: const Text('저장'),
+              ),
+            ],
+          );
+        },
       ),
     );
     unawaited(
@@ -11035,8 +11179,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                '${robot.model} · ${robot.gzName}\n'
-                                '충전 ${robot.chargerWaypoint ?? '미지정'}'
+                                '${robot.kind.label} · ${robot.model} '
+                                '· ${robot.gzName}\n'
+                                '${robot.isMobile ? '충전' : '설비'} '
+                                '${robot.chargerWaypoint ?? '미지정'}'
                                 '${robot.spawnX == null
                                     ? ''
                                     : ' · spawn '

@@ -171,12 +171,12 @@ ros2 topic echo /odom --once --field pose.pose.position.x
 돌려 쓰면 프로젝트를 바꾸는 순간 spawn 좌표와 charger 이름이 어긋납니다.
 그래서 플릿 설정과 생성된 설정 파일을 **맵 프로젝트에 묶어 MySQL에 보관**합니다.
 
-### 6.1 저장 구조 (schema v6)
+### 6.1 저장 구조 (schema v8)
 
 | 표 | 내용 |
 |---|---|
 | `map_project_fleets` | 프로젝트당 1행. 플릿 이름과 `rmf_fleet` 블록에 대응하는 설정(JSON) |
-| `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, `gz_name`, 구획, charger Waypoint, spawn 좌표 |
+| `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, **종류(이동/설치)**, `gz_name`, 구획, 자리 Waypoint, spawn 좌표 |
 | `map_project_files` | 그 프로젝트에서 만들어진 설정 파일 전부 |
 
 `map_project_files`가 핵심입니다. `building.yaml`, fleet adapter 설정, Gazebo
@@ -205,10 +205,10 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | 파일 | kind | 용도 |
 |---|---|---|
 | `<맵이름>.building.yaml` | `building` | Open-RMF 건물 맵 |
-| `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. `robots[].charger`에 충전 Waypoint 이름이 들어감 |
+| `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. **이동 로봇만** 들어가고 `robots[].charger`에 충전 Waypoint 이름이 붙음 |
 | `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
 | `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
-| `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나눔 |
+| `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나누고, 종류에 따라 pinky/open_manipulator 설명을 씀 |
 | `<맵이름>_gz_bridge.yaml` | `bridge` | Gazebo↔ROS 토픽 다리. 로봇별 토픽을 절대 이름으로 나눔 |
 | `run_<맵이름>.sh` | `script` | 전체 실행. Gazebo를 먼저 띄운 뒤 Open-RMF를 올림 |
 | `stop_<맵이름>.sh` | `script` | 이 프로젝트로 띄운 프로세스만 정리 |
@@ -437,11 +437,47 @@ ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
 두 곳에 있고 같은 목록을 봅니다. 로봇을 다루러 온 사람이 먼저 찾는 곳은 로봇
 메뉴라서 거기에도 두었습니다.
 
-`충전 Waypoint에서 만들기`를 누르면 맵의 충전 카테고리 Waypoint마다 로봇 한
-대를 만들고 spawn 좌표와 charger를 한꺼번에 채웁니다. 로봇을 손으로 하나씩 넣는
-대신 맵에서 끌어옵니다. 개별 추가·수정도 됩니다. 충전 Waypoint는 맵에 있는 것
-중에서 고르므로 이름을 잘못 적을 일이 없습니다. 구획(ambient/chilled/frozen)은
-관제 배차의 입찰 자격이 됩니다.
+`충전 Waypoint에서 만들기`를 누르면 맵의 자리 Waypoint마다 로봇 한 대를 만들고
+spawn 좌표와 자리를 한꺼번에 채웁니다. 로봇을 손으로 하나씩 넣는 대신 맵에서
+끌어옵니다. 개별 추가·수정도 됩니다. 자리는 맵에 있는 것 중에서 고르므로 이름을
+잘못 적을 일이 없습니다.
+
+#### 이동 로봇과 설치 로봇
+
+등록할 때 **종류를 먼저 정합니다.** 여기서 나머지가 다 갈립니다.
+
+| | 이동 로봇 | 설치 로봇 |
+|---|---|---|
+| 예 | Pinky | OpenMANIPULATOR |
+| 자리 | **충전** Waypoint | **설비** Waypoint |
+| 구획 자격 | ambient/chilled/frozen | 없음 (배차 대상이 아님) |
+| fleet adapter | `robots` 에 들어감 | **안 들어감** |
+| Gazebo 설명 | `pinky_description` | `open_manipulator_description` |
+| 움직이는 방법 | diff drive · `cmd_vel` | ros2_control 컨트롤러 |
+| 다리 놓는 토픽 | odom · cmd_vel · scan · joint_states | joint_states 만 |
+
+**설치 로봇을 플릿에 넣으면 안 됩니다.** fleet adapter가 배차 대상으로 보고 갈
+수 없는 곳으로 보내려 합니다. Open-RMF에서 한자리에 붙은 것은 플릿이 아니라
+workcell입니다. 그래서 `<플릿이름>_config.yaml`의 `robots`에는 이동 로봇만
+들어가고, 설치 로봇은 어떤 것이 있는지만 주석으로 남습니다.
+
+고를 수 있는 설치 로봇 모델은 **xacro가 실제로 펼쳐지고 Gazebo용 컨트롤러
+설정이 있는 것만** 넣었습니다. 고를 수 있는데 띄우면 죽는 항목은 없느니만
+못합니다.
+
+| 모델 | 컨트롤러 |
+|---|---|
+| `open_manipulator_x` | joint_state_broadcaster · arm · gripper |
+| `omx_f` | joint_state_broadcaster · arm · gripper |
+| `omy_3m` | joint_state_broadcaster · arm (**그리퍼 없음**) |
+
+뺀 것: `omy_f3m`은 `realsense2_description`이 있어야 펼쳐지고, `omx_l`·
+`omy_l100`은 원격 조종의 leader 쪽이라 설비로 세울 것이 아닙니다.
+
+`omy_3m`에 없는 `gripper_controller`를 올리면 spawner가 기다리다 실패하고 팔까지
+안 움직이는 것처럼 보입니다. 그래서 모델마다 컨트롤러 목록을 따로 둡니다.
+
+구획(ambient/chilled/frozen)은 이동 로봇의 관제 배차 입찰 자격입니다.
 
 등록·수정·해제는 **누른 즉시 열린 프로젝트에 저장**됩니다. `프로젝트 저장`을
 따로 눌러야만 남는다면 저장했는데 왜 되돌아왔느냐는 혼란이 반복됩니다.
@@ -451,8 +487,8 @@ ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
 알립니다.
 
 스폰 창은 이름을 타자로 치는 칸 대신 **등록된 로봇을 고르는 칸**을 보여 줍니다.
-지도에 그릴 종류는 등록한 모델 이름에서 정합니다(`PINKY*` → Pinky, `OMX*` →
-매니퓰레이터). 출발 자리는 등록된 충전 Waypoint로 맞춰 둡니다.
+지도에 그릴 종류는 등록한 종류를 그대로 씁니다 — 설치 로봇은 매니퓰레이터로
+그립니다. 출발 자리는 등록된 자리 Waypoint로 맞춰 둡니다.
 
 관제 대상이 아닌 **사람·휴머노이드**만 `등록 없이 배치`로 올립니다. 이들은 RMF
 설정에 들어가지 않습니다.

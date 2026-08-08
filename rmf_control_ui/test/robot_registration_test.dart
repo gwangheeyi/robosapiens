@@ -68,7 +68,8 @@ void main() {
 
     await tester.tap(find.text('로봇 등록'));
     await tester.pumpAndSettle();
-    expect(find.text('로봇 추가'), findsOneWidget);
+    expect(find.text('이동 로봇'), findsOneWidget);
+    expect(find.text('설치 로봇'), findsOneWidget);
 
     // 기본값이 채워져 있으므로 그대로 저장한다.
     await tester.tap(find.text('저장'));
@@ -90,7 +91,7 @@ void main() {
 
   testWidgets('등록은 됐지만 맵이 없으면 무엇이 없는지 팝업으로 알린다', (tester) async {
     await openRobotMenu(tester);
-    await tester.tap(find.text('로봇 등록'));
+    await tester.tap(find.text('로봇 등록').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('저장'));
     await tester.pumpAndSettle();
@@ -108,7 +109,7 @@ void main() {
 
   testWidgets('등록을 지우면 무엇이 함께 사라지는지 알린다', (tester) async {
     await openRobotMenu(tester);
-    await tester.tap(find.text('로봇 등록'));
+    await tester.tap(find.text('로봇 등록').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('저장'));
     await tester.pumpAndSettle();
@@ -126,5 +127,44 @@ void main() {
     await tester.tap(find.text('등록 해제'));
     await tester.pumpAndSettle();
     expect(find.text('로봇 등록 · 0대'), findsOneWidget);
+  });
+
+  testWidgets('설치 로봇을 고르면 자리와 모델이 함께 바뀐다', (tester) async {
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+
+    // 이동 로봇일 때는 충전 Waypoint 에 서고 3온도 구획 자격이 있다.
+    expect(find.text('충전 Waypoint'), findsOneWidget);
+    expect(find.text('ambient'), findsOneWidget);
+
+    await tester.tap(find.text('설치 로봇'));
+    await tester.pumpAndSettle();
+
+    // 설치 로봇은 설비 자리에 붙고 배차를 받지 않는다.
+    expect(find.text('설비 Waypoint'), findsOneWidget);
+    expect(find.text('충전 Waypoint'), findsNothing);
+    expect(
+      find.text('ambient'),
+      findsNothing,
+      reason: '배차 대상이 아니므로 구획 자격이 필요 없다',
+    );
+    expect(find.textContaining('fleet adapter 에 들어가지 않습니다'), findsOneWidget);
+    // 모델은 open_manipulator_description 에 있는 것 중에서 고른다.
+    expect(find.text('open_manipulator_x'), findsOneWidget);
+  });
+
+  testWidgets('설치 로봇은 등록되어도 이동 로봇과 구분된다', (tester) async {
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('설치 로봇'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('로봇 등록 · 1대'), findsOneWidget);
+    expect(find.textContaining('OMX-01'), findsWidgets);
+    expect(find.textContaining('open_manipulator_x'), findsWidgets);
   });
 }
