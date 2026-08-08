@@ -2880,9 +2880,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ? 'Waypoint 선택'
             : _waypointNames[waypoint]!,
       ),
+      // 레인을 그리는 중(시작점이 잡힌 상태)에는 이 창을 띄우지 않는다. 그때
+      // 찍는 Waypoint는 끝점이므로 바로 잇는다.
       content: Text(
         '카테고리: ${_waypointTypes[waypoint] ?? '대기'}\n'
-        '이 Waypoint에서 수행할 작업을 선택하세요.',
+        '시작점으로 잡으면 다음에 찍는 Waypoint까지 Lane이 자동으로 연결됩니다.',
       ),
       actions: [
         TextButton(
@@ -3407,30 +3409,42 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     if (snappedWaypoint != null) {
       final snapped = snappedWaypoint;
-      final action = await _chooseWaypointAction(snapped);
-      if (!mounted || action == null) return;
-      if (action == 'delete') {
-        await _confirmDeleteWaypoint(snapped);
+      final start = _activeLaneEndpoint;
+      // 시작점이 정해져 있고 다른 Waypoint를 찍었다면 그건 끝점이다. 무엇을
+      // 할지 되묻지 않고 바로 잇는다 — 레인을 그리는 중에 원하는 동작은 그것
+      // 하나뿐이다. 삭제처럼 다른 일을 하려면 Esc로 레인을 끝낸 뒤 누른다.
+      if (start == null || (start - snapped).distance <= .01) {
+        final action = await _chooseWaypointAction(snapped);
+        if (!mounted || action == null) return;
+        if (action == 'delete') {
+          await _confirmDeleteWaypoint(snapped);
+          return;
+        }
+        _recordUndo();
+        setState(() {
+          _activeLaneEndpoint = snapped;
+          _stage = MapStage.lanes;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('이 Waypoint를 레인 시작점으로 잡았습니다. 다음 Waypoint를 찍으면 이어집니다.'),
+          ),
+        );
         return;
       }
-      final start = _activeLaneEndpoint;
-      if (start != null && (start - snapped).distance <= .01) return;
-      final crossed = start == null
-          ? null
-          : _firstCrossedWaypoint(start, snapped, snapTolerance);
+      final crossed = _firstCrossedWaypoint(start, snapped, snapTolerance);
       final laneStart = crossed ?? start;
       // Lane을 잇지 못해도 사용자가 고른 지점은 새 시작점으로 삼는다. 예전에는
       // 여기서 그냥 되돌아가 클릭이 통째로 무시된 것처럼 보였다.
-      final laneIssue = laneStart == null
-          ? null
-          : _laneCreationIssue(laneStart, snapped);
+      final laneIssue = _laneCreationIssue(laneStart, snapped);
       _recordUndo();
       setState(() {
-        if (laneStart != null && laneIssue == null) {
+        if (laneIssue == null) {
           final lane = (laneStart, snapped);
           _recommendedLanes.add(lane);
           _laneDirections[lane] = '양방향';
         }
+        // 이어 그릴 수 있도록 방금 찍은 지점이 다음 구간의 시작점이 된다.
         _activeLaneEndpoint = snapped;
         _stage = MapStage.lanes;
         _isDeployed = false;
@@ -3444,9 +3458,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           content: Text(
             crossed != null
                 ? '중간 Waypoint를 통과하여 해당 지점부터 레인을 연결했습니다.'
-                : start == null
-                ? '기존 Waypoint에 스냅했습니다. 새 레인의 시작점입니다.'
-                : '기존 Waypoint에 스냅하여 레인을 연결했습니다.',
+                : '기존 Waypoint까지 레인을 연결했습니다.',
           ),
         ),
       );
@@ -9999,7 +10011,8 @@ Future<void> _showUsageGuide(
           actions: [
             'Lane 만들기를 켜고 통로 중앙에 Waypoint를 순서대로 놓습니다.',
             '교차로, 회전 전후, 픽업 위치와 하차 위치에는 별도 Waypoint를 만듭니다.',
-            'Waypoint를 클릭한 뒤 수정 창의 Waypoint 삭제를 누르면 해당 지점과 연결된 모든 Lane을 함께 제거할 수 있습니다.',
+            '시작점을 잡은 뒤 다음 Waypoint를 찍으면 그 지점이 끝점이 되어 Lane이 이어집니다. 계속 찍으면 계속 이어집니다.',
+            'Esc를 누르면 현재 레인을 끝냅니다. Waypoint 삭제처럼 다른 작업은 레인을 끝낸 뒤 그 지점을 눌러 선택합니다.',
             '대기는 경로상의 정지·통과 지점(holding point), 주차는 작업이 없을 때 로봇을 세워 두는 전용 위치(parking spot)입니다.',
             'Lane을 양방향·정방향·역방향 중 실제 운영 규칙에 맞게 지정합니다.',
             'Lane 설정에서 속도 제한, 정면·후진 자세 제약과 좁은 통로 Mutex 그룹을 필요에 따라 지정합니다.',
