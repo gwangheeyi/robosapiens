@@ -34,3 +34,20 @@ enum MapProjectNameConflictChoice {
   /// 저장하지 않는다.
   cancel,
 }
+
+/// 프로젝트에 딸린 설정 파일 하나.
+class MapProjectFile {
+  const MapProjectFile({
+    required this.fileName,
+    required this.kind,
+    required this.content,
+    required this.generatedAt,
+  });
+
+  final String fileName;
+
+  /// building | nav_graph | fleet_adapter | fleet_sim | launch
+  final String kind;
+  final String content;
+  final DateTime generatedAt;
+}

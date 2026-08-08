@@ -24,7 +24,7 @@ Gazebo Pinky ──odom/scan──▶ [Nav2] ──▶ [RMF Fleet Adapter] ─�
 |---|---|---|
 | 1 | `pinky_pro` 빌드 · Gazebo 가상 Pinky 기동 · `/odom` `/cmd_vel` 확인 | **완료** |
 | 2 | RMF core(schedule node, building map server)를 gwanghee 맵으로 기동 | 예정 |
-| 3 | Pinky용 Fleet Adapter 설정 작성 · gwanghee 통합 launch | 예정 |
+| 3 | Pinky용 Fleet Adapter 설정 작성 · gwanghee 통합 launch | **설정 생성·저장 완료**, launch 남음 |
 | 4 | `rmf_control_ui`를 rmf-web에 연결해 `실제 로봇` 모드에서 fleet state 표시 | 예정 |
 
 ## 4. 사전 준비
@@ -164,7 +164,76 @@ ros2 topic echo /odom --once --field pose.pose.position.x
 
 두 가지 모두 3단계에서 통합 launch를 만들며 함께 처리합니다.
 
-## 6. 떠 있는 백엔드 정리
+## 6. RMF 설정은 프로젝트마다 만들어진다
+
+맵이 다르면 Waypoint 이름도 충전소 위치도 다릅니다. 전역 `fleet.yaml` 하나를
+돌려 쓰면 프로젝트를 바꾸는 순간 spawn 좌표와 charger 이름이 어긋납니다.
+그래서 플릿 설정과 생성된 설정 파일을 **맵 프로젝트에 묶어 MySQL에 보관**합니다.
+
+### 6.1 저장 구조 (schema v6)
+
+| 표 | 내용 |
+|---|---|
+| `map_project_fleets` | 프로젝트당 1행. 플릿 이름과 `rmf_fleet` 블록에 대응하는 설정(JSON) |
+| `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, `gz_name`, 구획, charger Waypoint, spawn 좌표 |
+| `map_project_files` | 그 프로젝트에서 만들어진 설정 파일 전부 |
+
+`map_project_files`가 핵심입니다. `building.yaml`, fleet adapter 설정, Gazebo
+spawn 목록, launch를 한자리에 모아 두므로 **프로젝트 하나만 열면 배포와 실행에
+필요한 것이 전부 보입니다.** 파일이 디스크 여기저기 흩어져 있으면 어느 것이 이
+맵의 것인지 알 수 없습니다.
+
+저장할 때마다 다시 만들어 넣으므로 맵과 어긋나지 않고, 지운 파일이 남아 도는
+일도 없습니다. 프로젝트를 지우면 설정도 함께 사라집니다(외래 키 CASCADE).
+
+### 6.2 프로필 반경은 로봇 안전 기준에서 가져온다
+
+fleet adapter의 `profile.footprint`와 `vicinity`는 맵 관리에서 이미 입력한
+로봇 안전 기준으로 계산합니다.
+
+```text
+footprint = 로봇 폭 / 2
+vicinity  = 로봇 폭 / 2 + 위치 오차 여유
+```
+
+같은 값을 두 곳에 따로 적으면 어긋납니다. 폭 0.2m · 여유 0.05m인 작은 로봇이면
+`footprint: 0.100`, `vicinity: 0.150`이 됩니다.
+
+### 6.3 만들어지는 파일
+
+| 파일 | kind | 용도 |
+|---|---|---|
+| `<맵이름>.building.yaml` | `building` | Open-RMF 건물 맵 |
+| `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. `robots[].charger`에 충전 Waypoint 이름이 들어감 |
+| `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
+
+`nav_graphs/0.yaml`은 배포 스크립트가 `building.yaml`에서 만듭니다.
+
+### 6.4 SQL로 직접 보기
+
+```sql
+-- 프로젝트의 설정 파일 목록
+SELECT f.file_name, f.kind, LENGTH(f.content) AS 크기, f.generated_at
+FROM map_project_files f
+JOIN map_projects p ON p.id = f.project_id
+WHERE p.map_name = 'gwanghee';
+
+-- fleet adapter 설정 내용
+SELECT f.content FROM map_project_files f
+JOIN map_projects p ON p.id = f.project_id
+WHERE p.map_name = 'gwanghee' AND f.kind = 'fleet_adapter';
+
+-- 프로젝트의 로봇
+SELECT r.robot_id, r.gz_name, r.zones, r.charger_waypoint, r.spawn_x, r.spawn_y
+FROM map_project_robots r
+JOIN map_projects p ON p.id = r.project_id
+WHERE p.map_name = 'gwanghee' ORDER BY r.seq;
+```
+
+v5 데이터베이스는 `db/migrate_v5_to_v6.sql`을 적용합니다. 기존에 보관하던
+`building.yaml`은 설정 파일 목록으로 함께 옮겨집니다.
+
+## 7. 떠 있는 백엔드 정리
 
 새 백엔드를 띄우기 전에 이전 세션의 노드가 남아 있는지 확인해야 합니다. 남은
 schedule node나 fleet adapter가 새로 뜨는 것과 부딪히면, 실제 원인과 무관한
@@ -199,17 +268,18 @@ ros2 node list
 ./openrmf/scripts/stop_office.sh
 ```
 
-## 7. 다음 단계에서 만들어야 하는 것
+## 8. 다음 단계에서 만들어야 하는 것
 
-### 7.1 Pinky용 Fleet Adapter 설정 (없음)
+### 8.1 Pinky용 Fleet Adapter 설정 — 완료
 
 지난 시도는 office 데모의 `tinyRobot_config.yaml`에 gwanghee nav graph를 물려
 실행했습니다. 로봇 이름·속도·회전 반경·배터리 파라미터가 모두 tinyRobot 값이라
-그대로는 맞지 않습니다.
+그대로는 맞지 않았습니다.
 
-Pinky의 실제 값과 `cmd_vel`/`odom` 토픽 이름에 맞춘 설정이 필요합니다.
+이제 **맵 프로젝트마다** 설정을 만들어 MySQL에 보관합니다. 6절을 참고하세요.
+남은 것은 이 설정을 물려 실제로 fleet adapter를 띄우는 launch입니다.
 
-### 7.2 gwanghee용 통합 launch (없음)
+### 8.2 gwanghee용 통합 launch (없음)
 
 `openrmf/launch/office_web.launch.xml`은 office 데모 전용입니다. 다음을 한 번에
 띄우는 launch가 필요합니다.
@@ -219,7 +289,7 @@ Pinky의 실제 값과 `cmd_vel`/`odom` 토픽 이름에 맞춘 설정이 필요
 - Pinky fleet adapter (7.1의 설정 + `nav_graphs/0.yaml`)
 - Gazebo (배포한 `*.world`, 로봇 3대)
 
-### 7.3 앱과 rmf-web 연결 (없음)
+### 8.3 앱과 rmf-web 연결 (없음)
 
 `rmf_control_ui`에는 ROS·rmf-web 연결이 없습니다. 로봇은 앱 안에서 계산하는
 Mock입니다(`docs/APP_MOCK_ROBOTS.md`).
@@ -236,7 +306,7 @@ rmf-web WebSocket ws://127.0.0.1:8000/_internal
 이 작업은 1~3단계와 독립적입니다. office 데모만으로도 검증할 수 있어 ROS 쪽
 진행과 무관하게 먼저 해도 됩니다.
 
-## 8. 관련 문서
+## 9. 관련 문서
 
 - [맵 작성 및 배포 가이드](MAP_AUTHORING_AND_DEPLOYMENT.md) — 맵을 만들고
   `nav_graphs/0.yaml`을 얻는 과정

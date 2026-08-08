@@ -279,3 +279,190 @@ SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
 DELETE FROM map_projects WHERE map_name = $_nameParam;
 ''');
 }
+
+/// 프로젝트에 딸린 설정 파일 전부를 저장한다. 기존 목록은 지우고 다시 넣는다.
+///
+/// 저장할 때마다 새로 만들어 넣으므로 맵과 어긋나지 않는다. 지운 파일이 남아
+/// 도는 일도 없다.
+Future<void> saveMapProjectFiles(
+  String mapName,
+  List<MapProjectFile> files,
+) async {
+  final rows = [
+    for (final file in files)
+      {'fileName': file.fileName, 'kind': file.kind, 'content': file.content},
+  ];
+  await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SET @project_id = (
+  SELECT id FROM map_projects WHERE map_name = $_nameParam
+);
+SET @files = CAST(
+  CONVERT(FROM_BASE64('${_encode(jsonEncode(rows))}') USING utf8mb4) AS JSON
+);
+START TRANSACTION;
+DELETE FROM map_project_files WHERE project_id = @project_id;
+INSERT INTO map_project_files
+  (project_id, file_name, kind, content, generated_at)
+SELECT @project_id, f.file_name, f.kind, f.content, NOW(6)
+FROM JSON_TABLE(
+  @files,
+  '\$[*]' COLUMNS (
+    file_name VARCHAR(255) PATH '\$.fileName',
+    kind      VARCHAR(32)  PATH '\$.kind',
+    content   LONGTEXT     PATH '\$.content'
+  )
+) AS f;
+COMMIT;
+''');
+}
+
+/// 프로젝트에 딸린 설정 파일 목록. 내용까지 함께 돌려준다.
+Future<List<MapProjectFile>> loadMapProjectFiles(String mapName) async {
+  final aggregate = '''CAST(
+  COALESCE(
+    JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'fileName', f.file_name,
+        'kind', f.kind,
+        'content', f.content,
+        'generatedAt', DATE_FORMAT(f.generated_at, '%Y-%m-%dT%H:%i:%s.%f')
+      )
+    ),
+    JSON_ARRAY()
+  ) AS CHAR
+)''';
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SELECT ${_toBase64(aggregate)}
+FROM map_project_files f
+JOIN map_projects p ON p.id = f.project_id
+WHERE p.map_name = $_nameParam;
+''');
+  final decoded = _decodeResult(output);
+  if (decoded.isEmpty) return const [];
+  final rows = jsonDecode(decoded) as List<dynamic>;
+  final files = [
+    for (final row in rows.cast<Map<String, dynamic>>())
+      MapProjectFile(
+        fileName: row['fileName'] as String,
+        kind: row['kind'] as String? ?? 'etc',
+        content: row['content'] as String? ?? '',
+        generatedAt:
+            DateTime.tryParse(row['generatedAt'] as String? ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+      ),
+  ];
+  // JSON_ARRAYAGG 는 순서를 보장하지 않는다. 이름순으로 세운다.
+  files.sort((a, b) => a.fileName.compareTo(b.fileName));
+  return files;
+}
+
+/// 프로젝트의 플릿 설정과 로봇 목록을 저장한다.
+///
+/// 로봇의 zones 는 콤마로 이어 붙인 문자열(`zonesText`)로 넘긴다. JSON_TABLE 로
+/// 배열을 한 칸에 담을 수 없기 때문이다.
+Future<void> saveMapProjectFleet(
+  String mapName, {
+  required Map<String, Object?> settings,
+  required List<Map<String, Object?>> robots,
+}) async {
+  await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SET @project_id = (
+  SELECT id FROM map_projects WHERE map_name = $_nameParam
+);
+SET @settings = CAST(
+  CONVERT(FROM_BASE64('${_encode(jsonEncode(settings))}') USING utf8mb4) AS JSON
+);
+SET @robots = CAST(
+  CONVERT(FROM_BASE64('${_encode(jsonEncode(robots))}') USING utf8mb4) AS JSON
+);
+START TRANSACTION;
+
+INSERT INTO map_project_fleets (project_id, fleet_name, settings, updated_at)
+VALUES (
+  @project_id,
+  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(@settings, '\$.fleetName')), 'pinky'),
+  @settings,
+  NOW(6)
+)
+ON DUPLICATE KEY UPDATE
+  fleet_name = VALUES(fleet_name),
+  settings   = VALUES(settings),
+  updated_at = NOW(6);
+
+DELETE FROM map_project_robots WHERE project_id = @project_id;
+INSERT INTO map_project_robots (
+  project_id, robot_id, seq, display_name, model, gz_name, zones,
+  charger_waypoint, spawn_x, spawn_y, spawn_heading
+)
+SELECT
+  @project_id, r.robot_id, r.seq, r.display_name, r.model, r.gz_name,
+  COALESCE(r.zones, ''), r.charger_waypoint, r.spawn_x, r.spawn_y,
+  COALESCE(r.spawn_heading, 0)
+FROM JSON_TABLE(
+  @robots,
+  '\$[*]' COLUMNS (
+    seq              FOR ORDINALITY,
+    robot_id         VARCHAR(64)  PATH '\$.robotId',
+    display_name     VARCHAR(128) PATH '\$.displayName',
+    model            VARCHAR(64)  PATH '\$.model',
+    gz_name          VARCHAR(64)  PATH '\$.gzName',
+    zones            VARCHAR(64)  PATH '\$.zonesText',
+    charger_waypoint VARCHAR(128) PATH '\$.chargerWaypoint',
+    spawn_x          DOUBLE       PATH '\$.spawnX',
+    spawn_y          DOUBLE       PATH '\$.spawnY',
+    spawn_heading    DOUBLE       PATH '\$.spawnHeading'
+  )
+) AS r
+WHERE r.robot_id IS NOT NULL;
+
+COMMIT;
+''');
+}
+
+/// 프로젝트의 플릿 설정과 로봇 목록. 설정이 없으면 null.
+Future<Map<String, dynamic>?> loadMapProjectFleet(String mapName) async {
+  final aggregate =
+      '''CAST(
+  JSON_OBJECT(
+    'settings', (
+      SELECT fl.settings FROM map_project_fleets fl
+      JOIN map_projects p2 ON p2.id = fl.project_id
+      WHERE p2.map_name = $_nameParam
+    ),
+    'robots', (
+      SELECT COALESCE(
+        JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'seq', r.seq,
+            'robotId', r.robot_id,
+            'displayName', r.display_name,
+            'model', r.model,
+            'gzName', r.gz_name,
+            'zonesText', r.zones,
+            'chargerWaypoint', r.charger_waypoint,
+            'spawnX', r.spawn_x,
+            'spawnY', r.spawn_y,
+            'spawnHeading', r.spawn_heading
+          )
+        ),
+        JSON_ARRAY()
+      )
+      FROM map_project_robots r
+      JOIN map_projects p3 ON p3.id = r.project_id
+      WHERE p3.map_name = $_nameParam
+    )
+  ) AS CHAR
+)''';
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SELECT ${_toBase64(aggregate)};
+''');
+  final decoded = _decodeResult(output);
+  if (decoded.isEmpty) return null;
+  final data = jsonDecode(decoded) as Map<String, dynamic>;
+  if (data['settings'] == null) return null;
+  return data;
+}

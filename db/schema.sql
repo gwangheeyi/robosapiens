@@ -330,6 +330,68 @@ CREATE TABLE IF NOT EXISTS `rmf_ui_task_history` (
     REFERENCES `map_projects` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 프로젝트별 RMF 플릿 설정 (프로젝트당 1행).
+--
+-- 맵이 다르면 Waypoint 이름도 충전소 위치도 다르므로 플릿 설정은 프로젝트를
+-- 따라가야 한다. 전역 fleet.yaml 하나를 돌려 쓰면 맵을 바꾸는 순간 spawn 좌표와
+-- charger 이름이 어긋난다.
+--
+-- `settings` 에는 Open-RMF fleet adapter 의 rmf_fleet 블록에 그대로 대응하는
+-- 값(속도·가속도 한계, 프로필 반경, 배터리·기구 계수, 재충전 임계값 등)을
+-- JSON 으로 담는다. 항목이 늘어도 DDL 을 바꾸지 않기 위해서다.
+CREATE TABLE IF NOT EXISTS `map_project_fleets` (
+  `project_id` BIGINT      NOT NULL,
+  `fleet_name` VARCHAR(64) NOT NULL,
+  `settings`   JSON        NOT NULL,
+  `updated_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`project_id`),
+  CONSTRAINT `fk_map_fleets_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 프로젝트별 로봇. Gazebo spawn 과 fleet adapter 의 robots 항목을 함께 만든다.
+CREATE TABLE IF NOT EXISTS `map_project_robots` (
+  `project_id`       BIGINT       NOT NULL,
+  `robot_id`         VARCHAR(64)  NOT NULL,
+  `seq`              INT          NOT NULL,
+  `display_name`     VARCHAR(128) NOT NULL,
+  `model`            VARCHAR(64)  NOT NULL,
+  -- Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(/<gz_name>/odom).
+  `gz_name`          VARCHAR(64)  NOT NULL,
+  -- TempZone.name 을 콤마로 이어 붙인 값. 예: 'ambient,chilled'
+  `zones`            VARCHAR(64)  NOT NULL,
+  -- 충전 Waypoint 이름. fleet adapter 의 robots[].charger 로 나간다.
+  `charger_waypoint` VARCHAR(128) NULL,
+  `spawn_x`          DOUBLE       NULL,
+  `spawn_y`          DOUBLE       NULL,
+  `spawn_heading`    DOUBLE       NOT NULL DEFAULT 0,
+  PRIMARY KEY (`project_id`, `robot_id`),
+  KEY `idx_map_robots_seq` (`project_id`, `seq`),
+  CONSTRAINT `fk_map_robots_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 프로젝트에서 만들어진 설정 파일 전부.
+--
+-- building.yaml, nav graph, fleet adapter 설정, Gazebo spawn 목록, launch 를
+-- 한자리에 모아 둔다. 배포와 실행에 필요한 것을 프로젝트 하나만 열어 전부 볼 수
+-- 있어야 한다 — 파일이 디스크 여기저기 흩어져 있으면 어느 것이 이 맵의 것인지
+-- 알 수 없다.
+--
+-- 프로젝트를 저장할 때마다 다시 만들어 넣으므로 payload 와 어긋나지 않는다.
+CREATE TABLE IF NOT EXISTS `map_project_files` (
+  `project_id`   BIGINT       NOT NULL,
+  `file_name`    VARCHAR(255) NOT NULL,
+  -- building | nav_graph | fleet_adapter | fleet_sim | launch | etc
+  `kind`         VARCHAR(32)  NOT NULL,
+  `content`      LONGTEXT     NOT NULL,
+  `generated_at` DATETIME(6)  NOT NULL,
+  PRIMARY KEY (`project_id`, `file_name`),
+  KEY `idx_map_files_kind` (`project_id`, `kind`),
+  CONSTRAINT `fk_map_files_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 프로젝트별 Lane 조회용 사본.
 CREATE TABLE IF NOT EXISTS `map_project_lanes` (
   `project_id`  BIGINT      NOT NULL,
@@ -404,6 +466,8 @@ CREATE TABLE IF NOT EXISTS `counters` (
 --     이미 v3 로 쓰던 데이터베이스는 db/migrate_v3_to_v4.sql 을 적용한다.
 -- v5: map_projects 에 도면 원본(drawing_bytes)과 building.yaml 을 함께 보관.
 --     v4 데이터베이스는 db/migrate_v4_to_v5.sql 을 적용한다.
+-- v6: RMF 설정을 프로젝트에 귀속. map_project_fleets / map_project_robots /
+--     map_project_files 추가. v5 는 db/migrate_v5_to_v6.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 5, NOW(6))
+VALUES (1, 6, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);
