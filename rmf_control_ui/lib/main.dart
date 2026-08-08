@@ -20,6 +20,8 @@ import 'rmf_project_config.dart';
 import 'operations_log.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
+import 'robot_telemetry_bridge.dart';
+import 'robot_telemetry_models.dart';
 import 'rmf_project_runner.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
@@ -493,6 +495,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 항목을 함께 만든다.
   List<RmfProjectRobot> _fleetRobots = const [];
 
+  /// Gazebo 에서 실제로 받아온 위치.
+  ///
+  /// 값이 들어오면 그 로봇은 앱 계산을 멈추고 이것을 쓴다. 출처를 Gazebo 로
+  /// 골라 놓고 앱이 계산한 숫자를 보여 주는 것이 지금까지의 문제였다.
+  RobotTelemetryStatus _telemetry = RobotTelemetryStatus.idle;
+  StreamSubscription<RobotTelemetryStatus>? _telemetrySubscription;
+
   /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
   ///
   /// 대시보드의 작업은 이 프로젝트에 속한다. 프로젝트를 저장하거나 열기 전에는
@@ -590,6 +599,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 사용자가 터미널에서 직접 띄운 것은 건드리지 않는다 — 앱이 띄운 것만
   /// runningProjectName 에 남아 있다.
   Future<ui.AppExitResponse> _handleExitRequest() async {
+    await RobotTelemetryBridge.instance.stop();
     final running = runningProjectName;
     if (running == null) return ui.AppExitResponse.exit;
     await stopProject(running);
@@ -3991,6 +4001,40 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
   }
 
+  /// 미터 좌표를 지도 픽셀로 되돌린다. [_floorCoordinate] 의 역이다.
+  ///
+  /// 토픽은 미터로 오고 화면은 픽셀로 그린다. 등록할 때 spawn 좌표를
+  /// `floor * scale` 로 만들었으므로 그대로 거꾸로 간다.
+  Offset? _pixelFromMeters(double xMeters, double yMeters) {
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return null;
+    final floorPoints = _floorMask?.points;
+    if (floorPoints == null || floorPoints.isEmpty) return null;
+    final bounds = _pointsBounds(floorPoints);
+    return Offset(
+      xMeters / scale + bounds.left,
+      bounds.bottom - yMeters / scale,
+    );
+  }
+
+  /// 등록된 Gazebo 로봇의 위치 토픽을 구독한다.
+  ///
+  /// 등록이 바뀔 때마다 부른다. 이미 붙어 있는 것은 그대로 두므로 자주 불러도
+  /// 값이 끊기지 않는다.
+  Future<void> _syncTelemetry() async {
+    _telemetrySubscription ??= RobotTelemetryBridge.instance.updates.listen((
+      status,
+    ) {
+      if (!mounted) return;
+      setState(() => _telemetry = status);
+    });
+    try {
+      await RobotTelemetryBridge.instance.sync(_fleetRobots);
+    } catch (_) {
+      // 토픽을 못 붙어도 앱은 계속 돌아야 한다. 못 받으면 앱 계산으로 돈다.
+    }
+  }
+
   Offset _floorCoordinate(Offset point) {
     final floorPoints = _floorMask?.points;
     if (floorPoints == null || floorPoints.isEmpty) return point;
@@ -4139,9 +4183,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       waypointLabel: _waypointLabel,
       // 출처는 로봇마다 다르다. 등록에 적힌 것을 그대로 쓴다.
       dataSource: registered?.dataSource ?? RobotDataSource.mock,
-      // 4단계(rmf-web 연결)가 아직이라 어떤 출처를 골라도 구독은 없다.
-      // 붙는 날 이 값만 바꾸면 띠가 따라온다.
-      topicsConnected: false,
+      // 실제로 값이 들어오고 있을 때만 참이다. 구독을 걸어 두기만 하고 값이
+      // 안 오는 것과 오는 것은 다르다.
+      topicsConnected: registered != null && _telemetry.isLive(registered.robotId),
       registeredRobot: registered,
       ),
     );
@@ -4416,7 +4460,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
             18,
       );
       var changed = false;
+      final now = DateTime.now();
       for (final robot in _mockRobots) {
+        // Gazebo 에서 값이 들어오는 로봇은 앱이 위치를 계산하지 않는다.
+        // 계산한 값을 덮어써 버리면 실제로 어디 있는지 알 수 없게 된다.
+        final live = _telemetry.isLive(robot.id, now: now);
+        if (live) {
+          final pose = _telemetry.poses[robot.id]!;
+          final pixel = _pixelFromMeters(pose.x, pose.y);
+          if (pixel != null && (pixel - robot.position).distance > .5) {
+            robot.position = pixel;
+            changed = true;
+          }
+        }
         final task = robot.activeTaskId == null
             ? null
             : _mockTasks
@@ -4473,12 +4529,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
           robot.targetWaypoint = target;
         }
         final delta = target - robot.position;
-        final step = baseSpeed * .1;
+        // 실제 로봇은 앱이 밀어 주지 않는다. 도착했는지만 본다.
+        final step = live
+            ? math.max(6.0, .2 / (_metersPerPixel ?? .05))
+            : baseSpeed * .1;
         if (delta.distance <= step) {
-          final arrived = target;
-          robot.position = arrived;
+          // 실제 위치로 도착을 판정할 때는 좌표를 Waypoint 로 끌어당기지
+          // 않는다. 그러면 토픽 값을 덮어써 버린다.
+          if (!live) robot.position = target;
           robot.targetWaypoint = null;
-        } else {
+        } else if (!live) {
           robot.position += delta / delta.distance * step;
         }
         robot.battery = math.max(0, robot.battery - .003);
@@ -5487,6 +5547,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _exitListener?.dispose();
     _mockRobotTimer?.cancel();
     _orderDispatchTimer?.cancel();
+    // 구독을 남기면 `ros2 topic echo` 가 앱보다 오래 산다.
+    unawaited(_telemetrySubscription?.cancel());
+    unawaited(RobotTelemetryBridge.instance.stop());
     for (final robot in _mockRobots) {
       robot.image?.dispose();
     }
@@ -6664,6 +6727,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           }),
       ];
     });
+    await _syncTelemetry();
   }
 
   /// 창에서 `저장`을 눌러 확정한 중간 설정을 곧바로 프로젝트에 남긴다.
@@ -7130,6 +7194,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       label: '로봇 등록',
       detail: '${robot.robotId} · ${robot.displayName}',
     );
+    await _syncTelemetry();
   }
 
   /// 등록된 로봇 하나를 고친다.
@@ -7146,6 +7211,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       label: '로봇 수정',
       detail: '${updated.robotId} · ${updated.displayName}',
     );
+    await _syncTelemetry();
   }
 
   /// 등록을 지운다. 이미 스폰해 둔 로봇이 있으면 함께 사라진다는 것을 먼저
@@ -7194,6 +7260,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       label: '로봇 등록 해제',
       detail: '${robot.robotId} · ${robot.displayName}',
     );
+    await _syncTelemetry();
   }
 
   /// 충전 Waypoint 마다 로봇을 한 대씩 만들어 등록한다. spawn 좌표와 charger 가
@@ -7219,6 +7286,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       label: '로봇 등록',
       detail: '충전 Waypoint에서 ${generated.length}대',
     );
+    await _syncTelemetry();
   }
 
   /// RMF 설정 창 — 로봇 목록과 생성된 설정 파일을 한자리에서 본다.
@@ -9257,6 +9325,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRegisterFromChargers: () =>
                                   unawaited(_registerRobotsFromChargers()),
                               onStartBackend: _startBackendForOpenProject,
+                              telemetry: _telemetry,
                             )
                           : _selectedMenu == 3
                           ? _TaskManagementPage(
@@ -11220,6 +11289,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onUnregisterRobot,
     required this.onRegisterFromChargers,
     required this.onStartBackend,
+    required this.telemetry,
   });
 
   final UploadedDrawing? drawing;
@@ -11249,6 +11319,9 @@ class _RobotManagementPage extends StatefulWidget {
 
   /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
   final Future<void> Function() onStartBackend;
+
+  /// Gazebo 에서 실제로 값을 받고 있는지.
+  final RobotTelemetryStatus telemetry;
 
   @override
   State<_RobotManagementPage> createState() => _RobotManagementPageState();
@@ -11566,7 +11639,20 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                                     ),
                                   ),
                                   const SizedBox(width: 6),
-                                  if (spawnedIds.contains(robot.robotId))
+                                  // 토픽이 실제로 들어오는지가 배치 여부보다
+                                  // 중요하다. 출처를 Gazebo 로 골라 놓고 값이
+                                  // 안 오면 화면 숫자는 앱이 계산한 것이다.
+                                  if (widget.telemetry.isLive(robot.robotId))
+                                    const _RegistrationBadge(
+                                      label: '토픽 수신',
+                                      color: Color(0xFFEA580C),
+                                    )
+                                  else if (robot.runsInGazebo)
+                                    const _RegistrationBadge(
+                                      label: '토픽 없음',
+                                      color: Color(0xFFDC2626),
+                                    )
+                                  else if (spawnedIds.contains(robot.robotId))
                                     const _RegistrationBadge(
                                       label: '배치됨',
                                       color: Color(0xFF16A34A),
