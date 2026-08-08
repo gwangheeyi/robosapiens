@@ -17,6 +17,7 @@ import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
+import 'robot_data_source.dart';
 import 'rmf_project_runner.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
@@ -209,6 +210,23 @@ class _ScenarioWaypointAssignment {
   final Offset point;
   final String category;
   final String name;
+}
+
+/// 출처를 화면에 어떻게 그릴지. 색과 아이콘은 화면 쪽 개념이라 규칙 라이브러리에
+/// 두지 않는다.
+extension _RobotDataSourceStyle on RobotDataSource {
+  Color get color => switch (this) {
+    // Mock 을 실물로 착각하는 것이 가장 위험하다. 붉게 세운다.
+    RobotDataSource.mock => const Color(0xFFDC2626),
+    RobotDataSource.gazebo => const Color(0xFFEA580C),
+    RobotDataSource.real => const Color(0xFF15803D),
+  };
+
+  IconData get icon => switch (this) {
+    RobotDataSource.mock => Icons.science_outlined,
+    RobotDataSource.gazebo => Icons.view_in_ar_outlined,
+    RobotDataSource.real => Icons.smart_toy,
+  };
 }
 
 enum _RobotKind { mockMobile, pinky, omxManipulator, mockHumanoid, human }
@@ -472,6 +490,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 열린 프로젝트에 등록된 로봇. Gazebo spawn 과 fleet adapter 의 robots
   /// 항목을 함께 만든다.
   List<RmfProjectRobot> _fleetRobots = const [];
+
+  /// 지금 보고 있는 로봇 값이 어디서 오는가.
+  ///
+  /// 로봇 화면의 `로봇 실행 방식` 에서 고른다. 작업 상세도 같은 값을 봐야
+  /// 하므로 화면 안에 두지 않고 여기에 둔다.
+  RobotDataSource _dataSource = RobotDataSource.mock;
 
   /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
   ///
@@ -4113,6 +4137,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
       toFloor: _floorCoordinate,
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
+      dataSource: _dataSource,
+      // 4단계(rmf-web 연결)가 아직이라 어떤 방식을 골라도 구독은 없다.
+      // 붙는 날 이 값만 바꾸면 띠가 따라온다.
+      topicsConnected: false,
+      registeredRobot: _fleetRobots
+          .where((robot) => robot.robotId == task.robotId)
+          .firstOrNull,
     ),
   );
 
@@ -8896,6 +8927,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               projectName: _openProjectName,
                               fleetName: _fleetSettings.fleetName,
                               registeredRobots: _fleetRobots,
+                              dataSource: _dataSource,
+                              onDataSourceChanged: (source) =>
+                                  setState(() => _dataSource = source),
                               onLoadMap: _loadMapForRobots,
                               onSpawn: _spawnMockRobot,
                               onToggle: _toggleMockRobot,
@@ -10860,6 +10894,8 @@ class _RobotManagementPage extends StatefulWidget {
     required this.projectName,
     required this.fleetName,
     required this.registeredRobots,
+    required this.dataSource,
+    required this.onDataSourceChanged,
     required this.onLoadMap,
     required this.onSpawn,
     required this.onToggle,
@@ -10885,6 +10921,10 @@ class _RobotManagementPage extends StatefulWidget {
 
   /// 프로젝트에 등록된 로봇. 스폰과 Gazebo bringup 이 이것을 본다.
   final List<RmfProjectRobot> registeredRobots;
+
+  /// 화면에 보이는 로봇 값이 어디서 오는가.
+  final RobotDataSource dataSource;
+  final ValueChanged<RobotDataSource> onDataSourceChanged;
   final VoidCallback onLoadMap;
   final VoidCallback onSpawn;
   final ValueChanged<_MockRobot> onToggle;
@@ -10899,7 +10939,6 @@ class _RobotManagementPage extends StatefulWidget {
 }
 
 class _RobotManagementPageState extends State<_RobotManagementPage> {
-  String _runtimeMode = '앱 Mock';
   RmfRuntimeStatus _rmfStatus = RmfRuntimeStatus.unknown;
   bool _rmfBusy = false;
 
@@ -11253,24 +11292,23 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
             const SizedBox(width: 10),
             SizedBox(
               width: 220,
-              child: DropdownButtonFormField<String>(
-                initialValue: _runtimeMode,
+              child: DropdownButtonFormField<RobotDataSource>(
+                initialValue: widget.dataSource,
                 isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: '로봇 실행 방식',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
-                items: const [
-                  DropdownMenuItem(value: '앱 Mock', child: Text('앱 Mock')),
-                  DropdownMenuItem(
-                    value: 'Headless Gazebo',
-                    child: Text('Headless Gazebo'),
-                  ),
-                  DropdownMenuItem(value: '실제 로봇', child: Text('실제 로봇')),
+                items: [
+                  for (final source in RobotDataSource.values)
+                    DropdownMenuItem(
+                      value: source,
+                      child: Text(source.shortLabel),
+                    ),
                 ],
                 onChanged: (value) {
-                  if (value != null) setState(() => _runtimeMode = value);
+                  if (value != null) widget.onDataSourceChanged(value);
                 },
               ),
             ),
@@ -11292,7 +11330,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                   : '등록된 로봇을 지도에 올립니다.',
               child: FilledButton.icon(
                 onPressed:
-                    _runtimeMode == '앱 Mock' &&
+                    widget.dataSource == RobotDataSource.mock &&
                         widget.registeredRobots.isNotEmpty
                     ? widget.onSpawn
                     : null,
@@ -11314,7 +11352,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
           pendingDeployment: widget.pendingDeployment,
         ),
         const SizedBox(height: 12),
-        if (_runtimeMode != '앱 Mock')
+        if (widget.dataSource != RobotDataSource.mock)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(10),
@@ -11323,7 +11361,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
-              '$_runtimeMode 모드는 외부 백엔드 연결용입니다. 이 화면의 Spawn은 앱 Mock 모드에서 사용하세요.',
+              '${widget.dataSource.label} 모드는 외부 백엔드 연결용입니다. '
+              '이 화면의 Spawn은 앱 Mock 모드에서 사용하세요.',
               style: const TextStyle(color: Color(0xFF1D4ED8)),
             ),
           ),
@@ -12703,6 +12742,9 @@ class _TaskDetailDialog extends StatefulWidget {
     required this.toFloor,
     required this.metersPerPixel,
     required this.waypointLabel,
+    required this.dataSource,
+    required this.topicsConnected,
+    required this.registeredRobot,
   });
 
   final _MockTask task;
@@ -12710,6 +12752,19 @@ class _TaskDetailDialog extends StatefulWidget {
   final Offset Function(Offset point) toFloor;
   final double? metersPerPixel;
   final String Function(Offset point) waypointLabel;
+
+  /// 고른 실행 방식. 이것을 모르면 Mock 을 실물로 착각한다.
+  final RobotDataSource dataSource;
+
+  /// 그 방식의 토픽을 실제로 구독하고 있는가.
+  ///
+  /// 방식을 고르는 것과 값이 실제로 들어오는 것은 다르다. Gazebo 를 골라 놓고
+  /// 구독은 아직 없으면, 화면의 숫자는 여전히 앱이 계산한 값이다. 그 사실을
+  /// 감추면 이 띠가 거짓말을 하게 된다.
+  final bool topicsConnected;
+
+  /// 이 작업을 맡은 로봇의 등록 정보. 토픽 이름을 여기서 가져온다.
+  final RmfProjectRobot? registeredRobot;
 
   @override
   State<_TaskDetailDialog> createState() => _TaskDetailDialogState();
@@ -12764,7 +12819,18 @@ class _TaskDetailDialogState extends State<_TaskDetailDialog> {
   /// 화면에 뿌리는 것과 같은 내용을 글로 만든다. 복사해서 붙일 수 있어야 한다.
   String _asText(_MockRobot? robot) {
     final task = widget.task;
+    final topics = robotTopics(widget.registeredRobot);
+    final source = _effectiveSource;
     final lines = <String>[
+      '[출처] ${source.label} — ${source.summary}',
+      if (source.usesTopics && topics.incoming.isNotEmpty)
+        '  받기 ${topics.incoming.join(', ')}',
+      if (source.usesTopics && topics.outgoing.isNotEmpty)
+        '  보내기 ${topics.outgoing.join(', ')}',
+      if (_sourceMismatch)
+        '  주의 실행 방식은 ${widget.dataSource.label}로 골랐지만 아직 그 토픽을 '
+            '구독하지 않습니다. 아래 값은 앱이 계산한 것입니다.',
+      '',
       '작업 ${task.name} (${task.id})',
       '상태 ${task.status.name} · 긴급도 ${task.urgency.label} · '
           '단계 ${task.currentStepIndex}/${task.steps.length}',
@@ -12788,6 +12854,137 @@ class _TaskDetailDialogState extends State<_TaskDetailDialog> {
     ];
     return lines.join('\n');
   }
+
+  /// 아래 숫자를 실제로 만들어 낸 곳.
+  ///
+  /// 방식을 Gazebo 로 골라도 구독이 없으면 값은 여전히 앱이 계산한 것이다.
+  RobotDataSource get _effectiveSource => effectiveDataSource(
+    selected: widget.dataSource,
+    topicsConnected: widget.topicsConnected,
+  );
+
+  /// 고른 방식과 실제 값의 출처가 어긋나 있는가.
+  bool get _sourceMismatch => dataSourceMismatch(
+    selected: widget.dataSource,
+    topicsConnected: widget.topicsConnected,
+  );
+
+  /// 값의 출처를 크게 세운 띠.
+  ///
+  /// 앱이 계산한 값과 실물에서 온 값이 같은 자리에 같은 모양으로 보인다.
+  /// 어느 쪽인지 한눈에 들어오지 않으면 Mock 주행을 실제 상태로 착각한다.
+  Widget _sourceBanner() {
+    final source = _effectiveSource;
+    final topics = robotTopics(widget.registeredRobot);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: source.color.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: source.color, width: 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(source.icon, color: source.color, size: 30),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  source.label,
+                  style: TextStyle(
+                    color: source.color,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            source.summary,
+            style: TextStyle(
+              color: source.color,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+            ),
+          ),
+          if (source.usesTopics) ...[
+            const SizedBox(height: 8),
+            if (widget.registeredRobot == null)
+              Text(
+                '이 로봇의 등록 정보가 없어 토픽 이름을 알 수 없습니다.',
+                style: TextStyle(color: source.color, fontSize: 12),
+              )
+            else ...[
+              _topicLine('받기', topics.incoming, source.color),
+              if (topics.outgoing.isNotEmpty)
+                _topicLine('보내기', topics.outgoing, source.color),
+            ],
+          ],
+          // 고른 방식과 실제 출처가 다르면 반드시 밝힌다. 감추면 이 띠가
+          // 거짓말이 된다.
+          if (_sourceMismatch) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: source.color.withValues(alpha: .14),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '실행 방식은 `${widget.dataSource.label}`로 골라 두었지만 '
+                '앱이 아직 그 토픽을 구독하지 않습니다.\n'
+                '지금 보이는 값은 앱이 계산한 것입니다.',
+                style: TextStyle(
+                  color: source.color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _topicLine(String label, List<String> topics, Color color) => Padding(
+    padding: const EdgeInsets.only(top: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 46,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            topics.join('  ·  '),
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _row(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 3),
@@ -12823,12 +13020,14 @@ class _TaskDetailDialogState extends State<_TaskDetailDialog> {
         ],
       ),
       content: SizedBox(
-        width: 520,
-        height: 420,
+        width: 560,
+        height: 520,
         child: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              _sourceBanner(),
+              const SizedBox(height: 14),
               _row('작업 상태', '${task.status.name} · 긴급도 ${task.urgency.label}'),
               _row('진행', '${task.currentStepIndex}/${task.steps.length} 단계'),
               _row(
@@ -12898,9 +13097,13 @@ class _TaskDetailDialogState extends State<_TaskDetailDialog> {
                   ),
                 ),
               const SizedBox(height: 12),
-              const Text(
-                '앱 Mock 주행이 계산한 값입니다. 실제 로봇의 ROS 토픽은 아직 연결되지 않았습니다.',
-                style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              Text(
+                widget.dataSource == RobotDataSource.mock
+                    ? '앱 Mock 주행이 계산한 값입니다. 실제 로봇의 ROS 토픽은 아직 '
+                          '연결되지 않았습니다.'
+                    : '${_effectiveSource.label}에서 오는 값입니다. '
+                          '토픽이 끊기면 값이 멈춘 채로 남습니다.',
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
               ),
             ],
           ),
