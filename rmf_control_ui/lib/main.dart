@@ -595,8 +595,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 주문이 먼저 나가고 기다리던 주문이 뒤로 밀린다.
     final queued = dispatchOrder(
       _mockTasks.where(
-        (task) =>
-            task.orderId != null && task.status == _MockTaskStatus.queued,
+        (task) => task.orderId != null && task.status == _MockTaskStatus.queued,
       ),
       (task) => task.createdAt,
       priority: (task) => task.urgency.weight,
@@ -794,8 +793,74 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return '${list.take(limit).join(', ')} 외 ${list.length - limit}개';
   }
 
+  /// 레인 위에 얹혀 있으면서 그 레인에 연결되지 않은 Waypoint.
+  ///
+  /// 눈으로는 선 위에 있으니 이어진 줄 알지만 그래프상 연결이 없어, 로봇이 그
+  /// 지점을 지나갈 수 없다. 작업 순서대로 가다가 엉뚱한 곳으로 되돌아가는 원인이
+  /// 된다. 이제 Waypoint 를 놓을 때 레인에 스냅되지만, 그 전에 만든 맵에는
+  /// 남아 있다.
+  Map<Offset, List<(Offset, Offset)>> _laneDetachedWaypoints() {
+    final tolerance = _waypointLaneSnapTolerance;
+    final result = <Offset, List<(Offset, Offset)>>{};
+    for (final point in _laneWaypoints) {
+      if (_waypointTypes[point] == '설비') continue;
+      final lanes = [
+        for (final lane in _recommendedLanes)
+          if ((lane.$1 - point).distance > .01 &&
+              (lane.$2 - point).distance > .01 &&
+              pointSegmentDistance(point, lane.$1, lane.$2) <= tolerance)
+            lane,
+      ];
+      if (lanes.isNotEmpty) result[point] = lanes;
+    }
+    return result;
+  }
+
+  /// 레인 위에 얹힌 Waypoint들을 그 레인에 끼워 넣는다.
+  ///
+  /// 스냅이 없던 때 만든 맵을 고치는 용도다. 실행 취소로 되돌릴 수 있다.
+  Future<void> _spliceDetachedWaypoints() async {
+    final detached = _laneDetachedWaypoints();
+    if (detached.isEmpty) return;
+    final tolerance = _waypointLaneSnapTolerance;
+    _recordUndo();
+    var splicedLanes = 0;
+    setState(() {
+      for (final point in detached.keys) {
+        splicedLanes += _spliceWaypointIntoLanes(point, tolerance);
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Waypoint ${detached.length}개를 레인에 끼워 넣었습니다 '
+          '(레인 $splicedLanes개를 나눠 이음). 실행 취소로 되돌릴 수 있습니다.',
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
+    await _saveSettingToOpenProject(
+      label: '레인 연결',
+      detail: 'Waypoint ${detached.length}개를 레인에 끼워 넣음',
+    );
+  }
+
   List<String> _validateMap() {
     final warnings = <String>[];
+    final detached = _laneDetachedWaypoints();
+    if (detached.isNotEmpty) {
+      warnings.add(
+        '레인 위에 있으나 그 레인에 연결되지 않은 Waypoint가 ${detached.length}개 있습니다: '
+        '${_summarize(detached.entries.map((entry) => '${_waypointLabel(entry.key)}'
+            '(${entry.value.map(_laneLabel).join(', ')} 위)'))}. '
+        '로봇이 이 지점을 지나갈 수 없어 먼 길로 돌아갑니다. '
+        '`레인에 끼워 넣기`를 누르면 해당 레인을 이 지점에서 나눠 잇습니다.',
+      );
+    }
     if (_measurement == null) {
       warnings.add('기준 길이(Measurement)가 없어 실제 축척을 계산할 수 없습니다.');
     }
@@ -2275,6 +2340,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ),
         ),
         actions: [
+          if (_laneDetachedWaypoints().isNotEmpty)
+            TextButton.icon(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                unawaited(_spliceDetachedWaypoints());
+              },
+              icon: const Icon(Icons.link, size: 18),
+              label: const Text('레인에 끼워 넣기'),
+            ),
           TextButton.icon(
             onPressed: () {
               Navigator.pop(dialogContext);
@@ -2536,7 +2610,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       for (var i = 0; i < recommendations.length; i++) i: '양방향',
     };
     final result =
-        await showMovableDialog<({Set<int> selected, Map<int, String> directions})>(
+        await showMovableDialog<
+          ({Set<int> selected, Map<int, String> directions})
+        >(
           context: context,
           builder: (dialogContext) => StatefulBuilder(
             builder: (context, setDialogState) => AlertDialog(
@@ -2959,39 +3035,100 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return crossed;
   }
 
-  Future<String?> _chooseWaypointAction(Offset waypoint) => showMovableDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: Text(
-        (_waypointNames[waypoint] ?? '').trim().isEmpty
-            ? 'Waypoint 선택'
-            : _waypointNames[waypoint]!,
-      ),
-      // 레인을 그리는 중(시작점이 잡힌 상태)에는 이 창을 띄우지 않는다. 그때
-      // 찍는 Waypoint는 끝점이므로 바로 잇는다.
-      content: Text(
-        '카테고리: ${_waypointTypes[waypoint] ?? '대기'}\n'
-        '시작점으로 잡으면 다음에 찍는 Waypoint까지 Lane이 자동으로 연결됩니다.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext),
-          child: const Text('취소'),
+  Future<String?> _chooseWaypointAction(Offset waypoint) =>
+      showMovableDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(
+            (_waypointNames[waypoint] ?? '').trim().isEmpty
+                ? 'Waypoint 선택'
+                : _waypointNames[waypoint]!,
+          ),
+          // 레인을 그리는 중(시작점이 잡힌 상태)에는 이 창을 띄우지 않는다. 그때
+          // 찍는 Waypoint는 끝점이므로 바로 잇는다.
+          content: Text(
+            '카테고리: ${_waypointTypes[waypoint] ?? '대기'}\n'
+            '시작점으로 잡으면 다음에 찍는 Waypoint까지 Lane이 자동으로 연결됩니다.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            TextButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'delete'),
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Waypoint 삭제'),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFDC2626),
+              ),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'connect'),
+              icon: const Icon(Icons.route, size: 18),
+              label: const Text('레인 시작점으로 사용'),
+            ),
+          ],
         ),
-        TextButton.icon(
-          onPressed: () => Navigator.pop(dialogContext, 'delete'),
-          icon: const Icon(Icons.delete_outline),
-          label: const Text('Waypoint 삭제'),
-          style: TextButton.styleFrom(foregroundColor: const Color(0xFFDC2626)),
-        ),
-        FilledButton.icon(
-          onPressed: () => Navigator.pop(dialogContext, 'connect'),
-          icon: const Icon(Icons.route, size: 18),
-          label: const Text('레인 시작점으로 사용'),
-        ),
-      ],
-    ),
-  );
+      );
+
+  /// [tolerance] 안에 레인이 있으면 그 선 위의 가장 가까운 점을 돌려준다.
+  ///
+  /// Waypoint 를 레인 근처에 놓으면 그 선 위에 얹으려는 뜻으로 본다. 몇 픽셀
+  /// 어긋난 채로 두면 눈에는 선 위인데 연결되지 않아, 로봇이 지나갈 수 없는
+  /// 외딴 지점이 된다.
+  Offset? _snapToLane(Offset point, double tolerance, {Offset? ignore}) {
+    Offset? best;
+    var bestDistance = tolerance;
+    for (final lane in _recommendedLanes) {
+      if (ignore != null &&
+          ((lane.$1 - ignore).distance <= .01 ||
+              (lane.$2 - ignore).distance <= .01)) {
+        continue;
+      }
+      final distance = pointSegmentDistance(point, lane.$1, lane.$2);
+      if (distance <= bestDistance) {
+        bestDistance = distance;
+        best = closestPointOnSegment(point, lane.$1, lane.$2);
+      }
+    }
+    return best;
+  }
+
+  /// 레인 위에 놓인 [point] 를 그 레인에 끼워 넣는다. 끼운 레인 수를 돌려준다.
+  ///
+  /// 레인을 그 지점에서 둘로 나눠 잇는다. 방향·속도 제한·자세 제약·Mutex 는
+  /// 원래 레인의 값을 두 조각이 그대로 물려받는다 — 일방통행이던 통로가 나뉘면서
+  /// 양방향으로 풀리면 로봇이 역주행한다.
+  ///
+  /// setState 안에서 부른다.
+  int _spliceWaypointIntoLanes(Offset point, double tolerance) {
+    final targets = [
+      for (final lane in _recommendedLanes)
+        if ((lane.$1 - point).distance > .01 &&
+            (lane.$2 - point).distance > .01 &&
+            pointSegmentDistance(point, lane.$1, lane.$2) <= tolerance)
+          lane,
+    ];
+    for (final lane in targets) {
+      final direction = _laneDirections[lane] ?? '양방향';
+      final speed = _laneSpeedLimits[lane];
+      final orientation = _laneOrientations[lane];
+      final mutex = _laneMutexGroups[lane];
+      _recommendedLanes.remove(lane);
+      _removeLaneProperties(lane);
+      for (final piece in [(lane.$1, point), (point, lane.$2)]) {
+        if ((piece.$1 - piece.$2).distance <= .01) continue;
+        if (_hasLane(piece.$1, piece.$2)) continue;
+        _recommendedLanes.add(piece);
+        _laneDirections[piece] = direction;
+        if (speed != null) _laneSpeedLimits[piece] = speed;
+        if (orientation != null) _laneOrientations[piece] = orientation;
+        if (mutex != null) _laneMutexGroups[piece] = mutex;
+      }
+    }
+    return targets.length;
+  }
 
   void _removeLaneProperties((Offset, Offset) lane) {
     _laneDirections.remove(lane);
@@ -3057,11 +3194,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
           '원래 위치를 유지합니다.',
   };
 
-  void _moveWaypoint(Offset original, Offset updated) {
+  void _moveWaypoint(Offset original, Offset rawUpdated) {
     final index = _laneWaypoints.indexWhere(
       (point) => (point - original).distance <= .01,
     );
-    if (index < 0 || (original - updated).distance <= .01) return;
+    if (index < 0) return;
+    // 끌어다 놓은 자리가 레인 근처면 그 선 위로 맞춘다. 자기에게 붙어 있는
+    // 레인은 함께 움직이므로 스냅 대상에서 뺀다.
+    final updated =
+        _snapToLane(rawUpdated, _waypointLaneSnapTolerance, ignore: original) ??
+        rawUpdated;
+    if ((original - updated).distance <= .01) return;
     final issue = _waypointDropIssue(original, updated);
     if (issue != null) {
       ScaffoldMessenger.of(
@@ -3084,6 +3227,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final oldMutexGroups = {..._laneMutexGroups};
     final type = _waypointTypes[original];
     final name = _waypointNames[original];
+    var spliced = 0;
     setState(() {
       _laneWaypoints[index] = updated;
       _waypointTypes.remove(original);
@@ -3115,12 +3259,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
           (_activeLaneEndpoint! - original).distance <= .01) {
         _activeLaneEndpoint = updated;
       }
+      if (_waypointTypes[updated] != '설비') {
+        spliced = _spliceWaypointIntoLanes(updated, _waypointLaneSnapTolerance);
+      }
       _isDeployed = false;
       _vertexLabelRevision++;
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Waypoint와 연결된 Lane을 함께 이동했습니다.')),
+      SnackBar(
+        content: Text(
+          spliced > 0
+              ? 'Waypoint를 레인 위에 놓아 레인 $spliced개를 나눠 이었습니다.'
+              : 'Waypoint와 연결된 Lane을 함께 이동했습니다.',
+        ),
+      ),
     );
+  }
+
+  /// Waypoint 를 끌어 놓을 때 레인에 붙는 거리.
+  ///
+  /// Waypoint 추가와 같은 기준(도면 짧은 변의 2%)을 쓴다. 도면이 없으면 화면
+  /// 기준으로 16px.
+  double get _waypointLaneSnapTolerance {
+    final drawing = _drawing;
+    final width = drawing?.pixelWidth;
+    final height = drawing?.pixelHeight;
+    if (width == null || height == null) return 16;
+    return math.min(width, height) * .02;
   }
 
   Future<void> _confirmDeleteWaypoint(Offset waypoint) async {
@@ -3479,7 +3644,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
-  Future<void> _addLaneWaypoint(Offset point) async {
+  Future<void> _addLaneWaypoint(Offset rawPoint) async {
+    var point = rawPoint;
     final drawing = _drawing;
     final snapTolerance =
         drawing?.pixelWidth != null && drawing?.pixelHeight != null
@@ -3553,6 +3719,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 기존 Waypoint에 붙지 않았다면, 레인 위에 얹으려는 것인지 본다. Waypoint
+    // 끼리는 예전부터 스냅됐지만 레인에는 붙지 않아서, 선 위에 놓은 지점이
+    // 연결되지 않은 채 남았다.
+    final laneSnap = _snapToLane(point, snapTolerance);
+    final snappedToLane = laneSnap != null;
+    if (laneSnap != null) point = laneSnap;
     final floorPoint = _floorCoordinate(point);
     final activeEndpoint = _activeLaneEndpoint;
     final crossedWaypoint = activeEndpoint == null
@@ -3574,7 +3746,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '좌표  X ${floorPoint.dx.toStringAsFixed(1)}  ·  Y ${floorPoint.dy.toStringAsFixed(1)}',
+                  '좌표  X ${floorPoint.dx.toStringAsFixed(1)}  ·  Y ${floorPoint.dy.toStringAsFixed(1)}'
+                  '${snappedToLane ? '  ·  레인 위에 스냅 (레인을 이 지점에서 나눠 잇습니다)' : ''}',
                   style: const TextStyle(
                     color: Color(0xFF475569),
                     fontWeight: FontWeight.w600,
@@ -3668,6 +3841,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ? null
         : _laneCreationIssue(laneStart, point);
     _recordUndo();
+    var splicedLanes = 0;
     setState(() {
       if (laneStart != null && laneIssue == null) {
         final lane = (laneStart, point);
@@ -3677,11 +3851,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _laneWaypoints.add(point);
       _waypointTypes[point] = selectedType;
       _waypointNames[point] = waypointName;
+      // 설비는 이동 Lane에 끼우지 않는다. 나머지는 얹혀 있는 레인을 이 지점에서
+      // 나눠 이어 로봇이 지나갈 수 있게 한다.
+      if (selectedType != '설비') {
+        splicedLanes = _spliceWaypointIntoLanes(point, snapTolerance);
+      }
       _activeLaneEndpoint = selectedType == '설비' ? null : point;
       _stage = MapStage.lanes;
       _isDeployed = false;
       _vertexLabelRevision++;
     });
+    if (splicedLanes > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('레인 $splicedLanes개를 이 Waypoint에서 나눠 이었습니다.')),
+      );
+    }
     if (laneIssue != null) {
       _showLaneCreationIssue('Waypoint는 추가했지만 Lane은 잇지 못했습니다. $laneIssue');
       return;
@@ -3843,9 +4027,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _returnRobotsToSpawn() async {
     final movable = _mockRobots.where((robot) => robot.kind.isMobile).toList();
     if (movable.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('되돌릴 이동 로봇이 없습니다.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('되돌릴 이동 로봇이 없습니다.')));
       return;
     }
     final running = movable.where((robot) => robot.activeTaskId != null).length;

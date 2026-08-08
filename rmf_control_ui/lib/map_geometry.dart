@@ -10,8 +10,7 @@ double pointSegmentDistance(Offset point, Offset start, Offset end) {
   final lengthSquared = vector.dx * vector.dx + vector.dy * vector.dy;
   if (lengthSquared <= .0001) return (point - start).distance;
   final ratio =
-      (((point.dx - start.dx) * vector.dx +
-                  (point.dy - start.dy) * vector.dy) /
+      (((point.dx - start.dx) * vector.dx + (point.dy - start.dy) * vector.dy) /
               lengthSquared)
           .clamp(0.0, 1.0);
   return (point - (start + vector * ratio)).distance;
@@ -157,4 +156,20 @@ Offset constrainToAxis(Offset origin, Offset point) {
   return delta.dx.abs() >= delta.dy.abs()
       ? Offset(point.dx, origin.dy)
       : Offset(origin.dx, point.dy);
+}
+
+/// [point] 에서 가장 가까운 [start]-[end] 선분 위의 점.
+///
+/// Waypoint 를 레인 위에 얹을 때 좌표를 선 위로 맞추는 데 쓴다. 눈으로는 선
+/// 위에 놓았는데 몇 픽셀 떨어져 있으면, 그 Waypoint 는 레인에 끼워 넣을 수
+/// 없어 로봇이 지나갈 수 없는 외딴 지점이 된다.
+Offset closestPointOnSegment(Offset point, Offset start, Offset end) {
+  final vector = end - start;
+  final lengthSquared = vector.dx * vector.dx + vector.dy * vector.dy;
+  if (lengthSquared <= .0001) return start;
+  final ratio =
+      (((point.dx - start.dx) * vector.dx + (point.dy - start.dy) * vector.dy) /
+              lengthSquared)
+          .clamp(0.0, 1.0);
+  return start + vector * ratio;
 }

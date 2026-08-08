@@ -182,4 +182,65 @@ void main() {
       expect(constrainToAxis(origin, origin), origin);
     });
   });
+
+  group('closestPointOnSegment', () {
+    test('선분 위로 수직 투영한다', () {
+      expect(
+        closestPointOnSegment(
+          const Offset(50, 10),
+          const Offset(0, 0),
+          const Offset(100, 0),
+        ),
+        const Offset(50, 0),
+      );
+    });
+
+    test('선분 밖이면 가까운 끝점으로 묶는다', () {
+      expect(
+        closestPointOnSegment(
+          const Offset(-30, 5),
+          const Offset(0, 0),
+          const Offset(100, 0),
+        ),
+        const Offset(0, 0),
+      );
+      expect(
+        closestPointOnSegment(
+          const Offset(130, 5),
+          const Offset(0, 0),
+          const Offset(100, 0),
+        ),
+        const Offset(100, 0),
+      );
+    });
+
+    test('길이가 없는 선분은 시작점을 돌려준다', () {
+      expect(
+        closestPointOnSegment(
+          const Offset(9, 9),
+          const Offset(4, 4),
+          const Offset(4, 4),
+        ),
+        const Offset(4, 4),
+      );
+    });
+
+    test('실제로 문제가 됐던 대기5 좌표를 레인 위로 맞춘다', () {
+      // 대기5 는 드랍오프1 — 대기1 레인에서 0.2px 떨어져 있었다. 눈으로는 선
+      // 위인데 연결되지 않아 로봇이 지나갈 수 없었다.
+      final snapped = closestPointOnSegment(
+        const Offset(1539.2180708254127, 264.28777249088154),
+        const Offset(1712.1041927469707, 264.3628158493872),
+        const Offset(889.5, 262.8),
+      );
+      expect(
+        pointSegmentDistance(
+          snapped,
+          const Offset(1712.1041927469707, 264.3628158493872),
+          const Offset(889.5, 262.8),
+        ),
+        closeTo(0, .001),
+      );
+    });
+  });
 }
