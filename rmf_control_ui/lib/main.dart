@@ -742,6 +742,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
   }
 
+  String _laneLabel((Offset, Offset) lane) =>
+      '${_waypointLabel(lane.$1)} ↔ ${_waypointLabel(lane.$2)}';
+
+  /// 목록이 길면 앞쪽만 보이고 나머지는 수로 줄인다. 수십 개를 다 나열하면
+  /// 정작 무엇을 고쳐야 하는지 묻히기 때문이다.
+  static String _summarize(Iterable<String> items, {int limit = 8}) {
+    final list = items.toList();
+    if (list.length <= limit) return list.join(', ');
+    return '${list.take(limit).join(', ')} 외 ${list.length - limit}개';
+  }
+
   List<String> _validateMap() {
     final warnings = <String>[];
     if (_measurement == null) {
@@ -753,13 +764,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (_recommendedLanes.isEmpty) {
       warnings.add('Lane이 하나도 없습니다.');
     } else {
-      final zeroLengthLaneCount = _recommendedLanes
+      final zeroLengthLanes = _recommendedLanes
           .where((lane) => (lane.$1 - lane.$2).distance <= .01)
-          .length;
-      if (zeroLengthLaneCount > 0) {
-        warnings.add('시작점과 끝점이 같은 Lane이 $zeroLengthLaneCount개 있습니다.');
+          .toList();
+      if (zeroLengthLanes.isNotEmpty) {
+        warnings.add(
+          '시작점과 끝점이 같은 Lane이 ${zeroLengthLanes.length}개 있습니다: '
+          '${_summarize(zeroLengthLanes.map(_laneLabel))}.',
+        );
       }
-      var duplicateLaneCount = 0;
+      final duplicateLanes = <String>{};
       for (var i = 0; i < _recommendedLanes.length; i++) {
         for (var j = i + 1; j < _recommendedLanes.length; j++) {
           final first = _recommendedLanes[i];
@@ -770,50 +784,72 @@ class _ControlDashboardState extends State<ControlDashboard> {
           final reverseDirection =
               (first.$1 - second.$2).distance <= .01 &&
               (first.$2 - second.$1).distance <= .01;
-          if (sameDirection || reverseDirection) duplicateLaneCount++;
+          if (sameDirection || reverseDirection) {
+            duplicateLanes.add(_laneLabel(first));
+          }
         }
       }
-      if (duplicateLaneCount > 0) {
+      if (duplicateLanes.isNotEmpty) {
         warnings.add(
-          '동일한 Waypoint 쌍을 연결하는 중복 Lane이 $duplicateLaneCount개 있습니다.',
+          '같은 Waypoint 쌍을 잇는 Lane이 겹쳐 있습니다: '
+          '${_summarize(duplicateLanes)}.',
         );
       }
-      final wallCrossingCount = _recommendedLanes
+      final wallCrossingLanes = _recommendedLanes
           .where((lane) => _crossesWall(lane.$1, lane.$2))
-          .length;
-      if (wallCrossingCount > 0) {
-        warnings.add('벽을 통과하는 Lane이 $wallCrossingCount개 있습니다.');
+          .toList();
+      if (wallCrossingLanes.isNotEmpty) {
+        warnings.add(
+          '벽을 통과하는 Lane이 ${wallCrossingLanes.length}개 있습니다: '
+          '${_summarize(wallCrossingLanes.map(_laneLabel))}.',
+        );
       }
       final metersPerPixel = _metersPerPixel;
       if (metersPerPixel != null) {
         final minimumLaneLengthMeters = math.max(.3, _turningRadiusMeters * 2);
         final minimumWallClearanceMeters =
             _robotWidthMeters / 2 + _localizationMarginMeters;
-        final shortLaneCount = _recommendedLanes
+        final shortLanes = _recommendedLanes
             .where(
               (lane) =>
                   (lane.$1 - lane.$2).distance * metersPerPixel <
                   minimumLaneLengthMeters,
             )
-            .length;
-        if (shortLaneCount > 0) {
+            .toList();
+        if (shortLanes.isNotEmpty) {
+          final labels = shortLanes.map((lane) {
+            final meters = (lane.$1 - lane.$2).distance * metersPerPixel;
+            return '${_laneLabel(lane)} (${meters.toStringAsFixed(2)}m)';
+          });
           warnings.add(
-            '길이가 ${minimumLaneLengthMeters}m보다 짧아 회전·정지 여유가 부족한 Lane이 $shortLaneCount개 있습니다.',
+            '길이가 ${minimumLaneLengthMeters}m보다 짧아 회전·정지 여유가 부족한 Lane이 '
+            '${shortLanes.length}개 있습니다: ${_summarize(labels)}.',
           );
         }
         final walls = _visibleWallSegments();
-        final narrowLaneCount = _recommendedLanes.where((lane) {
-          if (walls.isEmpty) return false;
-          final clearancePixels = walls
-              .map(
-                (wall) => _segmentDistance(lane.$1, lane.$2, wall.$1, wall.$2),
-              )
-              .reduce(math.min);
-          return clearancePixels * metersPerPixel < minimumWallClearanceMeters;
-        }).length;
-        if (narrowLaneCount > 0) {
+        // 여유가 얼마나 모자란지 함께 보여 준다. 로봇 폭이 잘못 잡혀서 전부
+        // 걸리는 것인지, 특정 Lane 하나만 벽에 붙은 것인지 구분되어야 한다.
+        final narrowLanes = <(Offset, Offset), double>{};
+        for (final lane in _recommendedLanes) {
+          if (walls.isEmpty) break;
+          final clearanceMeters =
+              walls
+                  .map(
+                    (wall) =>
+                        _segmentDistance(lane.$1, lane.$2, wall.$1, wall.$2),
+                  )
+                  .reduce(math.min) *
+              metersPerPixel;
+          if (clearanceMeters < minimumWallClearanceMeters) {
+            narrowLanes[lane] = clearanceMeters;
+          }
+        }
+        if (narrowLanes.isNotEmpty) {
           warnings.add(
-            '벽과의 중심선 여유가 ${minimumWallClearanceMeters}m보다 작은 Lane이 $narrowLaneCount개 있습니다. 로봇 폭을 확인하세요.',
+            '벽과의 중심선 여유가 ${minimumWallClearanceMeters}m보다 작은 Lane이 '
+            '${narrowLanes.length}개 있습니다: '
+            '${_summarize(narrowLanes.entries.map((entry) => '${_laneLabel(entry.key)} (${entry.value.toStringAsFixed(2)}m)'))}. '
+            '로봇 폭을 확인하세요.',
           );
         }
       }
@@ -835,14 +871,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
         (point) => !visited.contains(point),
       );
       if (disconnected.isNotEmpty) {
-        final names = disconnected
-            .map((point) => _waypointNames[point])
-            .whereType<String>()
-            .where((name) => name.isNotEmpty)
-            .toList();
         warnings.add(
-          'Lane 네트워크가 분리되어 접근할 수 없는 Waypoint가 있습니다'
-          '${names.isEmpty ? '' : ': ${names.join(', ')}'}.',
+          'Lane 네트워크가 분리되어 접근할 수 없는 Waypoint가 '
+          '${disconnected.length}개 있습니다: '
+          '${_summarize(disconnected.map(_waypointLabel))}.',
         );
       }
       final directed = <Offset, Set<Offset>>{
@@ -889,7 +921,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (unreachable.isNotEmpty || noReturnPath.isNotEmpty) {
           warnings.add(
             '단방향 규칙 때문에 모든 Waypoint를 왕복할 수 없습니다. '
-            '(진입 불가 ${unreachable.length}개, 복귀 불가 ${noReturnPath.length}개)',
+            '${_waypointLabel(root)}에서 갈 수 없는 곳: '
+            '${unreachable.isEmpty ? '없음' : _summarize(unreachable.map(_waypointLabel))}. '
+            '거기서 ${_waypointLabel(root)}로 돌아올 수 없는 곳: '
+            '${noReturnPath.isEmpty ? '없음' : _summarize(noReturnPath.map(_waypointLabel))}.',
           );
         }
       }
@@ -897,7 +932,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final connectedPoints = <Offset>{
       for (final lane in _recommendedLanes) ...[lane.$1, lane.$2],
     };
-    final orphanCount = _laneWaypoints
+    final orphans = _laneWaypoints
         .where(
           (point) =>
               _waypointTypes[point] != '설비' &&
@@ -905,11 +940,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 (connected) => (connected - point).distance <= .01,
               ),
         )
-        .length;
-    if (orphanCount > 0) {
-      warnings.add('어떤 Lane에도 연결되지 않은 Waypoint가 $orphanCount개 있습니다.');
+        .toList();
+    if (orphans.isNotEmpty) {
+      warnings.add(
+        '어떤 Lane에도 연결되지 않은 Waypoint가 ${orphans.length}개 있습니다: '
+        '${_summarize(orphans.map(_waypointLabel))}.',
+      );
     }
-    final connectedEquipmentCount = _laneWaypoints
+    final connectedEquipment = _laneWaypoints
         .where(
           (point) =>
               _waypointTypes[point] == '설비' &&
@@ -917,10 +955,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 (connected) => (connected - point).distance <= .01,
               ),
         )
-        .length;
-    if (connectedEquipmentCount > 0) {
+        .toList();
+    if (connectedEquipment.isNotEmpty) {
       warnings.add(
-        '고정 설비 Waypoint가 Lane에 연결되어 있습니다: $connectedEquipmentCount개. '
+        '고정 설비 Waypoint가 Lane에 연결되어 있습니다: '
+        '${_summarize(connectedEquipment.map(_waypointLabel))}. '
         '이동 로봇용 픽업 Waypoint를 별도로 만드세요.',
       );
     }
@@ -2223,11 +2262,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 메시지에서 Waypoint를 가리키는 이름.
+  ///
+  /// 이름이 없으면 순번과 함께 Floor 좌표를 붙인다. 오류 검증이 어느 지점을
+  /// 두고 하는 말인지 알 수 없으면 고칠 수가 없다.
   String _waypointLabel(Offset point) {
     final name = (_waypointNames[point] ?? '').trim();
     if (name.isNotEmpty) return name;
     final index = _laneWaypoints.indexOf(point);
-    return index < 0 ? 'Waypoint' : 'Waypoint ${index + 1}';
+    final floor = _floorCoordinate(point);
+    final position =
+        '${floor.dx.toStringAsFixed(0)}, ${floor.dy.toStringAsFixed(0)}';
+    return index < 0 ? '이름없음($position)' : '이름없는 ${index + 1}번($position)';
   }
 
   bool _hasLane(Offset start, Offset end) => _recommendedLanes.any(
@@ -3427,7 +3473,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('이 Waypoint를 레인 시작점으로 잡았습니다. 다음 Waypoint를 찍으면 이어집니다.'),
+            content: Text(
+              '이 Waypoint를 레인 시작점으로 잡았습니다. 다음 Waypoint를 찍으면 이어집니다.',
+            ),
           ),
         );
         return;
