@@ -617,6 +617,110 @@ void main() {
     });
   });
 
+  group('실행 전 점검', () {
+    const pinky = RmfProjectRobot(
+      robotId: 'PK-01',
+      displayName: '핑키',
+      model: 'PINKY-GZ',
+      dataSource: RobotDataSource.gazebo,
+      gzName: 'pinky_01',
+      zones: ['ambient'],
+      chargerWaypoint: '충전1',
+    );
+    const omx = RmfProjectRobot(
+      robotId: 'OMX-01',
+      displayName: '팔',
+      model: 'open_manipulator_x',
+      kind: RmfRobotKind.workcell,
+      dataSource: RobotDataSource.gazebo,
+      gzName: 'omx_01',
+      zones: [],
+      chargerWaypoint: 'OMX1',
+    );
+
+    test('설치 로봇이 있으면 그 workspace 도 읽는다', () {
+      // 이것이 빠져 있어 open_manipulator_description 을 못 찾았고, launch 가
+      // 통째로 예외를 내며 멈춰 Pinky 까지 안 떴다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(script, contains(r'OMX_WS/install/setup.bash'));
+      expect(script, contains('open_manipulator_description'));
+    });
+
+    test('필요한 패키지를 등록에서 뽑는다', () {
+      final mixed = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(
+        mixed,
+        contains(
+          'REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter ros_gz_sim '
+          'pinky_description open_manipulator_description"',
+        ),
+      );
+      // 설치 로봇이 없으면 요구하지 않는다. 요구하면 그것을 안 쓰는 사람도
+      // 못 띄운다.
+      final onlyPinky = buildProjectRunScript(
+        mapName: 'pinky',
+        mapDirectory: '/maps/pinky',
+        robots: const [pinky],
+      );
+      expect(onlyPinky, isNot(contains('open_manipulator_description')));
+    });
+
+    test('없으면 무엇을 빌드해야 하는지 알려 준다', () {
+      // 예전에는 찾아본 경로 수십 개가 한 줄로 쏟아져 원인을 알기 어려웠다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(script, contains('없는 ROS 패키지'));
+      expect(script, contains('colcon build'));
+      expect(script, contains('ros2 pkg prefix'));
+    });
+
+    test('Gazebo 경로도 쓰는 것만 가리킨다', () {
+      // 없는 패키지를 가리키면 launch 가 통째로 멈춘다.
+      final mixed = buildProjectBringupXml(
+        mapName: 'mixed',
+        robots: const [pinky, omx],
+        mapDirectory: '/maps/mixed',
+      );
+      expect(mixed, contains('open_manipulator_description)/../'));
+      final onlyPinky = buildProjectBringupXml(
+        mapName: 'pinky',
+        robots: const [pinky],
+        mapDirectory: '/maps/pinky',
+      );
+      expect(onlyPinky, contains('pinky_description)/../'));
+      expect(onlyPinky, isNot(contains('open_manipulator_description')));
+    });
+
+    test('Mock 만 있으면 로봇 패키지를 요구하지 않는다', () {
+      final script = buildProjectRunScript(
+        mapName: 'mockonly',
+        mapDirectory: '/maps/mockonly',
+        robots: const [
+          RmfProjectRobot(
+            robotId: 'MK-01',
+            displayName: '연습',
+            model: 'PINKY-GZ',
+            gzName: 'mock_01',
+            zones: [],
+          ),
+        ],
+      );
+      expect(script, isNot(contains('pinky_description')));
+      expect(script, isNot(contains('open_manipulator_description')));
+    });
+  });
+
   group('중지 스크립트', () {
     final script = buildProjectStopScript(
       mapName: 'gwanghee',

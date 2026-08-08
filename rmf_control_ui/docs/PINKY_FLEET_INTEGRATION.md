@@ -720,6 +720,42 @@ Gazebo가 먼저 떠야 `/clock` 이 나오고, 그래야 `use_sim_time` 을 쓰
 된 자리에서 바로 띄울 수 있어야지, 다른 메뉴로 찾아가라고 하면 무엇을 눌러야
 하는지 또 헤맵니다.
 
+### 7.2.1 로봇이 안 뜨면
+
+**launch 예외는 bringup 전체를 중단시킵니다.** 패키지 하나를 못 찾으면 그것과
+상관없는 로봇까지 안 뜹니다. Pinky 와 OMX 를 함께 등록해 두고
+`open_manipulator_description` 이 없으면 **Pinky 도 안 뜹니다.**
+
+실행 스크립트가 띄우기 전에 필요한 패키지를 먼저 확인합니다.
+
+```
+없는 ROS 패키지: open_manipulator_description
+
+이 프로젝트의 로봇을 띄우려면 아래를 빌드하고 다시 실행하세요.
+  open_manipulator_description  ->  cd $OMX_WS && colcon build
+```
+
+예전에는 찾아본 경로 수십 개가 한 줄로 쏟아져 원인을 알기 어려웠습니다.
+
+필요한 패키지는 **등록에서 뽑습니다.**
+
+| 등록에 있는 것 | 요구하는 패키지 |
+|---|---|
+| Gazebo 이동 로봇 | `pinky_description` |
+| Gazebo 설치 로봇 | `open_manipulator_description` |
+| Mock·실물만 | (로봇 패키지 없음) |
+
+`GZ_SIM_RESOURCE_PATH` 도 같은 규칙을 따릅니다. 설치 로봇이 없는 프로젝트가
+`open_manipulator_description` 을 가리키면, 그것을 쓰지 않는 사람도 bringup 이
+통째로 멈춥니다.
+
+빌드해야 하는 것:
+
+```bash
+cd ~/robosapiens/open_manipulator
+colcon build --packages-select open_manipulator_description open_manipulator_bringup
+```
+
 ### 7.3 터미널에서 띄우기
 
 ```bash

@@ -714,10 +714,13 @@ String buildProjectBringupXml({
       'default="\$(var map_dir)/${mapName}_gz_bridge.yaml"/>',
     )
     ..writeln('')
+    // 없는 패키지를 가리키면 launch 가 통째로 예외를 내며 멈춘다. 워크셀이
+    // 하나도 없는데 open_manipulator 를 찾으면, 그것을 안 쓰는 프로젝트에서도
+    // Pinky 까지 못 뜬다.
     ..writeln('  <set_env name="GZ_SIM_RESOURCE_PATH"')
     ..writeln(
       '           value="\$(find-pkg-share pinky_description)/../:'
-      '\$(find-pkg-share open_manipulator_description)/../:'
+      '${robots.any((robot) => !robot.isMobile && robot.runsInGazebo) ? '\$(find-pkg-share open_manipulator_description)/../:' : ''}'
       '\$(var map_dir)/generated_models:\$(env HOME)/.gazebo/models"/>',
     )
     ..writeln('')
@@ -779,6 +782,21 @@ String buildProjectBringupXml({
   return buffer.toString();
 }
 
+/// 이 프로젝트의 로봇을 띄우는 데 꼭 있어야 하는 ROS 패키지.
+///
+/// 없는 것을 launch 가 찾으면 통째로 예외를 내며 멈춘다. 워크셀이 하나도 없는
+/// 프로젝트에 open_manipulator 를 요구하면, 그것을 쓰지 않는 사람도 Pinky 를
+/// 못 띄운다.
+List<String> _requiredPackages(List<RmfProjectRobot> robots) => [
+  'rmf_demos',
+  'rmf_demos_fleet_adapter',
+  'ros_gz_sim',
+  if (robots.any((robot) => robot.runsInGazebo && robot.isMobile))
+    'pinky_description',
+  if (robots.any((robot) => robot.runsInGazebo && !robot.isMobile))
+    'open_manipulator_description',
+];
+
 /// 프로젝트를 통째로 띄우는 셸 스크립트.
 ///
 /// ROS 환경을 읽고 bringup 과 RMF 를 순서대로 띄운다. Gazebo 가 먼저 떠야
@@ -786,9 +804,11 @@ String buildProjectBringupXml({
 String buildProjectRunScript({
   required String mapName,
   required String mapDirectory,
+  List<RmfProjectRobot> robots = const [],
   String rosSetup = '/opt/ros/jazzy/setup.bash',
   String rmfWorkspace = r'$HOME/rmf_ws',
   String pinkyWorkspace = r'$HOME/robosapiens/pinky_pro',
+  String manipulatorWorkspace = r'$HOME/robosapiens/open_manipulator',
 }) =>
     '''#!/usr/bin/env bash
 # $mapName 프로젝트 실행.
@@ -804,6 +824,10 @@ MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 ROS_SETUP="\${ROS_SETUP:-$rosSetup}"
 RMF_WS="\${RMF_WS:-$rmfWorkspace}"
 PINKY_WS="\${PINKY_WS:-$pinkyWorkspace}"
+OMX_WS="\${OMX_WS:-$manipulatorWorkspace}"
+
+# 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
+REQUIRED_PACKAGES="${_requiredPackages(robots).join(' ')}"
 HEADLESS="\${HEADLESS:-true}"
 
 for required in "\$MAP_DIR/$mapName.building.yaml" "\$MAP_DIR/nav_graphs/0.yaml"; do
@@ -819,6 +843,7 @@ set +u
 source "\$ROS_SETUP"
 [[ -f "\$RMF_WS/install/setup.bash" ]] && source "\$RMF_WS/install/setup.bash"
 [[ -f "\$PINKY_WS/install/setup.bash" ]] && source "\$PINKY_WS/install/setup.bash"
+[[ -f "\$OMX_WS/install/setup.bash" ]] && source "\$OMX_WS/install/setup.bash"
 set -u
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
@@ -833,6 +858,26 @@ cleanup() {
   kill \$(jobs -p) 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
+
+# 필요한 패키지가 없으면 launch 가 통째로 예외를 내며 멈춘다. 그러면 다른
+# 로봇까지 안 뜨는데, 화면에는 찾아본 경로 목록만 잔뜩 나와 원인을 알기 어렵다.
+missing=()
+for pkg in \$REQUIRED_PACKAGES; do
+  ros2 pkg prefix "\$pkg" >/dev/null 2>&1 || missing+=("\$pkg")
+done
+if ((\${#missing[@]} > 0)); then
+  echo "없는 ROS 패키지: \${missing[*]}" >&2
+  echo "" >&2
+  echo "이 프로젝트의 로봇을 띄우려면 아래를 빌드하고 다시 실행하세요." >&2
+  for pkg in "\${missing[@]}"; do
+    case "\$pkg" in
+      pinky_*) echo "  \$pkg  ->  cd \$PINKY_WS && colcon build" >&2 ;;
+      open_manipulator_*) echo "  \$pkg  ->  cd \$OMX_WS && colcon build" >&2 ;;
+      *) echo "  \$pkg" >&2 ;;
+    esac
+  done
+  exit 1
+fi
 
 echo "[1/2] Gazebo bringup"
 ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &

@@ -6658,6 +6658,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildProjectRunScript(
           mapName: mapName,
           mapDirectory: mapDirectory,
+          robots: _fleetRobots,
         ),
         generatedAt: now,
       ),
