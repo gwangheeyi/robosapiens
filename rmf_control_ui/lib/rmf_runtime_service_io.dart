@@ -6,6 +6,7 @@ library;
 
 import 'dart:io';
 
+import 'rmf_config_export.dart';
 import 'rmf_runtime_models.dart';
 
 /// 노드 이름이 이 조각을 담고 있으면 RMF 백엔드로 본다.
@@ -112,30 +113,71 @@ Future<RmfRuntimeStatus> probeRmfRuntime() async {
   }
 }
 
-/// `openrmf/scripts/stop_office.sh` 를 실행해 백엔드를 내린다.
-Future<RmfStopResult> stopRmfBackend() async {
+/// 떠 있는 백엔드를 내린다.
+///
+/// 예전에는 무조건 `stop_office.sh` 만 돌렸다. 그 스크립트는 office 데모의
+/// 경로(`tinyRobot_config.yaml`)로만 대상을 고르므로, 맵 프로젝트로 띄운
+/// 백엔드는 **한 번도 대상이 아니었다.** `백엔드 중지` 를 눌러도
+/// `<맵>_pinky_fleet_manager` 가 그대로 남았다.
+///
+/// [mapName] 을 주면 그 프로젝트의 중지 스크립트를 먼저 돌린다. office 데모
+/// 스크립트는 그다음에 돌려 남은 데모 프로세스를 정리한다.
+Future<RmfStopResult> stopRmfBackend({String? mapName}) async {
   final root = _findProjectRoot();
   if (root == null) {
     return const RmfStopResult(
       success: false,
       output:
-          'openrmf/scripts/stop_office.sh 를 찾을 수 없습니다. '
-          'RMF_ROOT 환경 변수로 프로젝트 위치를 지정하세요.',
+          '프로젝트 위치를 찾을 수 없습니다. '
+          'RMF_ROOT 환경 변수로 지정하세요.',
     );
   }
-  try {
-    final result = await Process.run(
-      'bash',
-      ['${root.path}/openrmf/scripts/stop_office.sh'],
-      workingDirectory: root.path,
-      runInShell: false,
-    ).timeout(const Duration(seconds: 90));
-    final output = [result.stdout, result.stderr]
-        .map((value) => value.toString().trim())
-        .where((value) => value.isNotEmpty)
-        .join('\n');
-    return RmfStopResult(success: result.exitCode == 0, output: output);
-  } catch (error) {
-    return RmfStopResult(success: false, output: error.toString());
+  final buffer = StringBuffer();
+  var success = true;
+
+  Future<void> run(String label, String script, String workingDirectory) async {
+    if (!File(script).existsSync()) return;
+    buffer.writeln('[$label] $script');
+    try {
+      final result = await Process.run(
+        'bash',
+        [script],
+        workingDirectory: workingDirectory,
+        runInShell: false,
+      ).timeout(const Duration(seconds: 90));
+      final output = [result.stdout, result.stderr]
+          .map((value) => value.toString().trim())
+          .where((value) => value.isNotEmpty)
+          .join('\n');
+      if (output.isNotEmpty) buffer.writeln(output);
+      if (result.exitCode != 0) success = false;
+    } catch (error) {
+      success = false;
+      buffer.writeln('실패: $error');
+    }
+    buffer.writeln();
   }
+
+  if (mapName != null) {
+    final directory =
+        '${root.path}/rmf_maps/${safeMapDirectoryName(mapName)}';
+    await run('맵 프로젝트', '$directory/stop_$mapName.sh', directory);
+  }
+  await run(
+    'office 데모',
+    '${root.path}/openrmf/scripts/stop_office.sh',
+    root.path,
+  );
+
+  final text = buffer.toString().trim();
+  if (text.isEmpty) {
+    return const RmfStopResult(
+      success: false,
+      output:
+          '돌릴 중지 스크립트가 없습니다.\n'
+          '맵 프로젝트를 열고 `설정 파일` 에서 `디스크로 내보내기` 를 '
+          '한 번 누르면 중지 스크립트도 함께 생깁니다.',
+    );
+  }
+  return RmfStopResult(success: success, output: text);
 }

@@ -617,6 +617,46 @@ void main() {
     });
   });
 
+  group('중지 스크립트', () {
+    final script = buildProjectStopScript(
+      mapName: 'gwanghee',
+      mapDirectory: '/maps/gwanghee',
+    );
+
+    test('이 맵을 물고 남은 노드를 쓸어낸다', () {
+      // ros2 launch 가 죽으면 자식이 init 으로 재부모화된다. 그룹도 잃고
+      // `ros2 launch <경로>` 라는 이름도 잃어서 이름·PGID 로는 못 잡는다.
+      // fleet_manager 가 그렇게 남아 `백엔드 중지` 를 눌러도 살아 있었다.
+      expect(script, contains('sweep_map_dir'));
+      expect(script, contains(r'/proc/$pid/cmdline'));
+      expect(script, contains('이 맵을 물고 남은 노드'));
+    });
+
+    test('제 자신은 죽이지 않는다', () {
+      // 스크립트 경로에도 맵 디렉터리가 들어 있다. 거르지 않으면 자기를 끊는다.
+      expect(script, contains('stop_gwanghee.sh'));
+      expect(script, contains(r'"$pid" == "$$"'));
+      expect(script, contains(r'"$pid" == "$PPID"'));
+    });
+
+    test('응답이 없으면 강제 종료까지 올라간다', () {
+      // rclpy 노드는 TERM 을 받고도 종료 중에 굳는 일이 있다. 거기서 멈추면
+      // 노드가 살아남아 다음 실행에서 이름이 겹친다.
+      expect(script, contains('for signal in INT TERM KILL'));
+      expect(script, contains('응답이 없어 강제 종료합니다'));
+    });
+
+    test('좀비는 기다리지 않는다', () {
+      // 이미 끝난 것을 두고 매 단계 3초씩 기다리면 중지가 괜히 느려진다.
+      expect(script, contains(r'*Z*'));
+    });
+
+    test('다른 맵은 건드리지 않는다', () {
+      expect(script, contains(r'MAP_DIR="${MAP_DIR:-/maps/gwanghee}"'));
+      expect(script, isNot(contains('tinyRobot')));
+    });
+  });
+
   group('프로젝트 launch', () {
     test('경로가 전부 이 프로젝트 것으로 박힌다', () {
       final xml = buildProjectLaunchXml(

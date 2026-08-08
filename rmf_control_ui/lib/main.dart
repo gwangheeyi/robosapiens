@@ -11371,7 +11371,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
         content: SizedBox(
           width: 430,
           child: Text(
-            'openrmf/scripts/stop_office.sh 를 실행해 떠 있는 백엔드를 내립니다.\n\n'
+            '${widget.projectName == null ? 'office 데모' : '`${widget.projectName}` 프로젝트와 office 데모'}'
+            '의 중지 스크립트를 실행합니다.\n\n'
             '대상: ${_rmfStatus.nodes.join(', ')}\n\n'
             '진행 중인 작업이 있으면 함께 끊깁니다.',
           ),
@@ -11394,7 +11395,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _rmfBusy = true);
-    final result = await stopRmfBackend();
+    // 무엇을 띄웠느냐에 따라 내리는 스크립트가 다르다. 예전에는 무조건 office
+    // 데모 스크립트만 돌려서, 맵 프로젝트로 띄운 fleet_manager 가 그대로
+    // 남았다.
+    final result = await stopRmfBackend(mapName: widget.projectName);
     if (!mounted) return;
     setState(() => _rmfBusy = false);
     // 스크립트가 무엇을 내렸는지 그대로 보여 준다. '중지했습니다'만으로는 실제로

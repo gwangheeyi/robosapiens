@@ -857,17 +857,65 @@ set -euo pipefail
 
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 
-stop_matching() {
-  local label="\$1" pattern="\$2"
-  mapfile -t pids < <(pgrep -u "\$(id -u)" -f "\$pattern" 2>/dev/null || true)
+# INT → TERM → KILL 로 올려 가며 내린다.
+#
+# rclpy 노드는 TERM 을 받고도 종료 중에 스레드가 서로를 기다리며 굳는 일이
+# 있다. 거기서 멈추면 노드가 살아남아 다음 실행에서 이름이 겹친다.
+stop_pids() {
+  local label="\$1"
+  shift
+  local pids=("\$@") remaining=() pid
   if ((\${#pids[@]} == 0)); then
     echo "\$label: 실행 중이 아님"
     return
   fi
   echo "\$label 중지: \${pids[*]}"
-  kill -INT "\${pids[@]}" 2>/dev/null || true
-  sleep 3
-  kill -TERM "\${pids[@]}" 2>/dev/null || true
+  local signal
+  for signal in INT TERM KILL; do
+    remaining=()
+    for pid in "\${pids[@]}"; do
+      # 좀비는 이미 끝난 것이다. 기다릴 것이 없다.
+      if kill -0 "\$pid" 2>/dev/null &&
+         [[ "\$(ps -o stat= -p "\$pid" 2>/dev/null)" != *Z* ]]; then
+        remaining+=("\$pid")
+      fi
+    done
+    if ((\${#remaining[@]} == 0)); then
+      return
+    fi
+    [[ "\$signal" == "KILL" ]] &&
+      echo "  \$label: 응답이 없어 강제 종료합니다 (\${remaining[*]})"
+    kill "-\$signal" "\${remaining[@]}" 2>/dev/null || true
+    sleep 3
+  done
+}
+
+stop_matching() {
+  local label="\$1" pattern="\$2"
+  mapfile -t pids < <(pgrep -u "\$(id -u)" -f "\$pattern" 2>/dev/null || true)
+  stop_pids "\$label" "\${pids[@]}"
+}
+
+# ros2 launch 가 죽으면 자식이 init 으로 재부모화된다. 그룹도 잃고
+# `ros2 launch <경로>` 라는 이름도 잃어서, 이름이나 PGID 로는 잡히지 않는다.
+# 이 맵 디렉터리를 인자로 물고 있으면 이 프로젝트가 띄운 것이다.
+sweep_map_dir() {
+  local label="\$1" pids=() pid args
+  while read -r pid; do
+    [[ -z "\$pid" || "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && continue
+    # pgrep 과 여기 사이에 끝난 프로세스가 있을 수 있다. 없으면 조용히 넘긴다.
+    [[ -r "/proc/\$pid/cmdline" ]] || continue
+    args="\$(tr '\\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null || true)"
+    # 이 스크립트 자신과 이것을 부른 셸은 건드리지 않는다.
+    [[ "\$args" == *"stop_$mapName.sh"* ]] && continue
+    [[ "\$args" == *"\$MAP_DIR"* ]] || continue
+    pids+=("\$pid")
+  done < <(pgrep -u "\$(id -u)" -f "\$MAP_DIR" 2>/dev/null || true)
+  if ((\${#pids[@]} == 0)); then
+    echo "\$label: 남은 것 없음"
+    return
+  fi
+  stop_pids "\$label" "\${pids[@]}"
 }
 
 stop_matching "Open-RMF ($mapName)" "ros2 launch \$MAP_DIR/$mapName.launch.xml"
@@ -888,6 +936,10 @@ if [[ -f "\$PGID_FILE" ]]; then
   fi
   rm -f "\$PGID_FILE"
 fi
+
+# 마지막으로 재부모화되어 살아남은 것을 쓸어낸다. fleet_manager 처럼 launch 가
+# 죽어도 혼자 도는 것들이 여기서 잡힌다.
+sweep_map_dir "이 맵을 물고 남은 노드 ($mapName)"
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';

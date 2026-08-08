@@ -9,5 +9,5 @@ Future<RmfRuntimeStatus> probeRmfRuntime() async => const RmfRuntimeStatus(
   message: '웹 빌드에서는 ROS 노드를 확인할 수 없습니다. Linux 데스크톱 앱에서 실행하세요.',
 );
 
-Future<RmfStopResult> stopRmfBackend() async =>
+Future<RmfStopResult> stopRmfBackend({String? mapName}) async =>
     const RmfStopResult(success: false, output: '웹 빌드에서는 백엔드를 내릴 수 없습니다.');
