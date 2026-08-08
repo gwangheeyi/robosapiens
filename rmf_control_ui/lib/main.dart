@@ -12,6 +12,7 @@ import 'deployment_service.dart';
 import 'deployed_map_service.dart';
 import 'map_ai_service.dart';
 import 'map_geometry.dart';
+import 'map_project_store.dart';
 import 'scenario_route_planner.dart';
 import 'task_store.dart';
 
@@ -418,6 +419,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
   int _selectedMenu = 0;
+  /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
+  ///
+  /// 대시보드의 작업은 이 프로젝트에 속한다. 프로젝트를 저장하거나 열기 전에는
+  /// null 이며, 그동안에는 작업을 읽지도 쓰지도 않고 주문 자동 분류도 돌지
+  /// 않는다 — 작업 단계가 그 맵의 Waypoint 좌표를 들고 있어서, 맵이 정해지지
+  /// 않은 상태에서 만들면 아무 데도 가리키지 않는 작업이 되기 때문이다.
+  /// 파일에서 연 맵도 MySQL에 저장하기 전까지는 null 이다.
+  String? _openProjectName;
   final List<_MockRobot> _mockRobots = [];
   final List<_MockTask> _mockTasks = [];
   final Map<Offset, String> _homeReservations = {};
@@ -430,22 +439,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
   @override
   void initState() {
     super.initState();
-    unawaited(
-      _loadMockTasks().whenComplete(() {
-        if (!mounted) return;
-        unawaited(_pollPendingOrders());
-        _orderDispatchTimer = Timer.periodic(
-          const Duration(seconds: 5),
-          (_) => unawaited(_pollPendingOrders()),
-        );
-      }),
+    // 시작 시점에는 열린 프로젝트가 없다. 작업도 주문 분류도 프로젝트가 정해진
+    // 뒤에야 의미가 있으므로 타이머만 걸어 두고 실제 처리는 그때 시작한다.
+    _orderDispatchTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_pollPendingOrders()),
     );
+  }
+
+  /// 열린 프로젝트가 바뀌었을 때 대시보드를 그 프로젝트 상태로 갈아 끼운다.
+  Future<void> _switchOpenProject(String? mapName) async {
+    setState(() {
+      _openProjectName = mapName;
+      // 이전 프로젝트의 작업은 이 맵의 Waypoint를 가리키지 않는다. 남겨 두면
+      // 갈 곳 없는 목적지를 들고 있는 작업이 화면에 남는다.
+      _mockTasks.clear();
+      _homeReservations.clear();
+    });
+    if (mapName == null) return;
+    await _loadMockTasks();
+    if (!mounted) return;
+    await _pollPendingOrders();
   }
 
   bool _triggerMatches(_OrderTrigger trigger, Set<String> zones) =>
       trigger == _OrderTrigger.any || zones.contains(trigger.name);
 
   Future<void> _pollPendingOrders() async {
+    // 주문을 태스크로 전개하려면 목적지로 삼을 맵이 있어야 한다. 열린 프로젝트가
+    // 없으면 주문은 미처리 상태로 그냥 둔다(주문 자체는 창고 공통 원장이다).
+    if (_openProjectName == null) return;
     if (_isPollingOrders || !mounted) return;
     _isPollingOrders = true;
     try {
@@ -644,8 +667,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _loadMockTasks() async {
+    final project = _openProjectName;
+    if (project == null) return;
     try {
-      final contents = await loadSavedTasks();
+      final contents = await loadSavedTasks(project);
       if (contents == null || contents.trim().isEmpty) return;
       final data = jsonDecode(contents);
       if (data is! List) return;
@@ -672,17 +697,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _saveMockTasks() {
+    // 작업은 맵 프로젝트에 속한다. 저장할 프로젝트가 정해지지 않았으면 쓸 곳이
+    // 없다. 이 경로는 화면에서 작업을 만들 수 없게 막아 두어 실제로는 오지
+    // 않지만, 어느 맵의 것인지 모르는 작업이 DB에 들어가는 일은 없어야 한다.
+    final project = _openProjectName;
+    if (project == null) return _taskSaveChain;
     final contents = const JsonEncoder.withIndent(
       '  ',
     ).convert(_mockTasks.map(_encodeTask).toList());
-    _taskSaveChain = _taskSaveChain.then((_) => saveTasks(contents)).catchError(
-      (Object error) {
-        if (!mounted) return;
-        setState(
-          () => _processingWarning = '[작업 저장] 작업 목록을 저장하지 못했습니다: $error',
-        );
-      },
-    );
+    _taskSaveChain = _taskSaveChain
+        .then((_) => saveTasks(project, contents))
+        .catchError((Object error) {
+          if (!mounted) return;
+          setState(
+            () => _processingWarning = '[작업 저장] 작업 목록을 저장하지 못했습니다: $error',
+          );
+        });
     return _taskSaveChain;
   }
 
@@ -1028,7 +1058,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           (point) =>
               connected.contains(point) &&
               _isInsideFloor(point) &&
-              (_waypointTypes[point] ?? '일반') == '일반' &&
+              (_waypointTypes[point] ?? '대기') == '대기' &&
               (_waypointNames[point] ?? '').trim().isEmpty,
         )
         .toList();
@@ -1043,7 +1073,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       0,
       config.chargerCount - existingCount('충전'),
     );
-    final holdingNeeded = math.max(0, config.homeCount - existingCount('대기'));
+    final holdingNeeded = math.max(0, config.homeCount - existingCount('주차'));
     final ambientNeeded = math.max(
       0,
       config.ambientPickupCount - existingCount('픽업', namePrefix: '상온'),
@@ -1071,7 +1101,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (candidates.length < neededCount) return null;
 
     final occupied = _laneWaypoints
-        .where((point) => (_waypointTypes[point] ?? '일반') != '일반')
+        .where((point) => (_waypointTypes[point] ?? '대기') != '대기')
         .toList();
     final selected = <Offset>[];
     Offset takeSpreadPoint() {
@@ -1159,10 +1189,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
           .map((assignment) => assignment.point),
     ];
     assign(homeNeeded, '홈', '홈', near: dropoffAnchors);
+    // 이름 붙이기 규칙이 Waypoint 추가 창(주차 → 홈N)과 다르다. 여기서는 이
+    // 자동 배치가 예전부터 내보내던 이름(주차N)을 그대로 둔다. 변수명이
+    // holdingNeeded 인데 카테고리가 '주차'인 것도 이름 정리 이전부터의 상태다
+    // — 실제로 내보내는 속성(is_parking_spot)은 예전과 같다.
     assign(
       holdingNeeded,
-      '대기',
-      '대기',
+      '주차',
+      '주차',
       near: _scenarioUsesSeparateRoutes ? const [] : _scenarioHoldingAnchors,
     );
     assign(chargerNeeded, '충전', '충전');
@@ -1186,14 +1220,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return '드랍오프';
     }
     if (RegExp(r'(픽업|상차|pickup|pick)').hasMatch(normalized)) return '픽업';
-    if (RegExp(r'(대기|parking|holding|wait)').hasMatch(normalized)) return '대기';
+    if (RegExp(r'(주차|parking|park)').hasMatch(normalized)) return '주차';
+    if (RegExp(r'(대기|holding|hold|wait)').hasMatch(normalized)) return '대기';
     return null;
   }
 
   int _inferWaypointTypesFromNames() {
     final updates = <Offset, String>{};
     for (final point in _laneWaypoints) {
-      if (_waypointTypes[point] == '설비') continue;
+      // 설비는 Lane에 연결하지 않으므로 제외한다. 주차는 이름이 홈N이라
+      // 이름만 보면 '홈'으로 추론돼 is_parking_spot 이 조용히 떨어져 나간다.
+      if (_waypointTypes[point] == '설비' || _waypointTypes[point] == '주차') {
+        continue;
+      }
       final inferred = _categoryInferredFromName(_waypointNames[point] ?? '');
       if (inferred != null && inferred != _waypointTypes[point]) {
         updates[point] = inferred;
@@ -1209,8 +1248,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return updates.length;
   }
 
-  bool _isInsideFloor(Offset point) =>
-      insidePolygon(point, _floorOutline());
+  bool _isInsideFloor(Offset point) => insidePolygon(point, _floorOutline());
 
   bool _floorSupportsTwoRobotRoutes() {
     final outline = _floorOutline();
@@ -1241,7 +1279,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     };
     final availableCount = _laneWaypoints.where((point) {
       return connected.contains(point) &&
-          (_waypointTypes[point] ?? '일반') == '일반' &&
+          (_waypointTypes[point] ?? '대기') == '대기' &&
           (_waypointNames[point] ?? '').trim().isEmpty;
     }).length;
     final deficit = math.max(0, config.requiredWaypointCount - availableCount);
@@ -1311,8 +1349,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           if ((candidate - raw).distance <= .01) anchor = candidate;
         }
         final point = anchor ?? canonical(raw);
-        if (resolved.isNotEmpty &&
-            (resolved.last - point).distance <= .01) {
+        if (resolved.isNotEmpty && (resolved.last - point).distance <= .01) {
           continue;
         }
         resolved.add(point);
@@ -1385,12 +1422,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ],
     ];
     for (final (start, end, spacing) in corridors) {
-      if (addDraftPath(
-        start,
-        end,
-        routeDirection,
-        waypointSpacing: spacing,
-      )) {
+      if (addDraftPath(start, end, routeDirection, waypointSpacing: spacing)) {
         continue;
       }
       _showProcessingWarning(
@@ -1443,10 +1475,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       unlinked.add('기존 Lane 네트워크');
     }
     final operationalAnchors = _laneWaypoints.where((point) {
-      final type = _waypointTypes[point] ?? '일반';
+      final type = _waypointTypes[point] ?? '대기';
       return _isInsideFloor(point) &&
           (type == '홈' ||
-              type == '대기' ||
+              type == '주차' ||
               type == '충전' ||
               type == '픽업' ||
               type == '드랍오프');
@@ -1487,7 +1519,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           (existing) => (existing - point).distance <= .01,
         )) {
           _laneWaypoints.add(point);
-          _waypointTypes[point] = '일반';
+          _waypointTypes[point] = '대기';
           _waypointNames[point] = ' ';
         }
       }
@@ -1569,7 +1601,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             'x': entry.key.dx,
             'y': entry.key.dy,
             'name': (_waypointNames[entry.key] ?? '').trim(),
-            'category': _waypointTypes[entry.key] ?? '일반',
+            'category': _waypointTypes[entry.key] ?? '대기',
           },
       ],
       'lanes': [
@@ -1592,7 +1624,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         'chargerWaypointsMustUseChargerCategory': true,
         'minimumHoldingWaypointCount': config.homeCount,
         'connectEveryMobileWaypoint': true,
-        'allowedCategories': ['일반', '대기', '홈', '충전', '픽업', '드랍오프'],
+        'allowedCategories': ['대기', '주차', '홈', '충전', '픽업', '드랍오프'],
         'allowedDirections': ['양방향', '정방향', '역방향'],
       },
     };
@@ -1615,7 +1647,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final newPoints = <Offset>[];
     final names = <Offset, String>{};
     final categories = <Offset, String>{};
-    final allowedCategories = {'일반', '대기', '홈', '충전', '픽업', '드랍오프'};
+    final allowedCategories = {'대기', '주차', '홈', '충전', '픽업', '드랍오프'};
     final width = (drawing.pixelWidth ?? 0).toDouble();
     final height = (drawing.pixelHeight ?? 0).toDouble();
     try {
@@ -1642,7 +1674,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (existingPoint == null && !_isInsideFloor(point)) {
           throw const FormatException('Codex Waypoint가 Floor 영역 밖에 있습니다.');
         }
-        final category = item['category'] as String? ?? '일반';
+        final category = item['category'] as String? ?? '대기';
         if (!allowedCategories.contains(category)) {
           throw FormatException('지원하지 않는 Waypoint 종류: $category');
         }
@@ -1675,7 +1707,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       int finalCategoryCount(String category) {
         final existing = _laneWaypoints.where((point) {
           final proposed = categories[point];
-          return (proposed ?? _waypointTypes[point] ?? '일반') == category;
+          return (proposed ?? _waypointTypes[point] ?? '대기') == category;
         }).length;
         final added = newPoints
             .where((point) => categories[point] == category)
@@ -1684,7 +1716,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
 
       if (finalCategoryCount('홈') < config.homeCount ||
-          finalCategoryCount('대기') < config.homeCount ||
+          finalCategoryCount('주차') < config.homeCount ||
           finalCategoryCount('충전') < config.chargerCount) {
         throw const FormatException('Codex 제안에 Home·대기·충전 Waypoint가 부족합니다.');
       }
@@ -1744,7 +1776,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           }
           for (final entry in names.entries) {
             _waypointNames[entry.key] = entry.value;
-            _waypointTypes[entry.key] = categories[entry.key] ?? '일반';
+            _waypointTypes[entry.key] = categories[entry.key] ?? '대기';
           }
           for (final lane in lanes) {
             if (_hasLane(lane.$1, lane.$2)) continue;
@@ -1832,7 +1864,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('기존 Lane에 연결된 일반 Waypoint를 운영 목적에 맞게 자동 배치합니다.'),
+                    const Text(
+                      '기존 Lane에 연결된 이름 없는 대기 Waypoint를 운영 목적에 맞게 자동 배치합니다.',
+                    ),
                     const SizedBox(height: 16),
                     Row(
                       children: [
@@ -1939,7 +1973,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final assignments = _buildScenarioAssignments(config);
     if (assignments == null) {
       final connectedGeneralCount = _laneWaypoints.where((point) {
-        if ((_waypointTypes[point] ?? '일반') != '일반') return false;
+        if ((_waypointTypes[point] ?? '대기') != '대기') return false;
         if ((_waypointNames[point] ?? '').trim().isNotEmpty) return false;
         return _recommendedLanes.any(
           (lane) =>
@@ -1950,7 +1984,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _showProcessingWarning(
         '시나리오 맵 자동 완성',
         '기존 픽업·드랍오프·충전·Home을 제외한 부족한 역할을 배치할 '
-            'Lane 연결 일반 Waypoint가 부족합니다. '
+            'Lane 연결 대기 Waypoint(이름 없음)가 부족합니다. '
             '현재 사용 가능: $connectedGeneralCount개',
       );
       return;
@@ -2261,8 +2295,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     for (final entry in adjacency.entries) {
       if (recommendations.length >= 8) break;
       if (entry.value.length != 1) continue;
-      final category = _waypointTypes[entry.key] ?? '일반';
-      if (category == '충전' || category == '대기') continue;
+      final category = _waypointTypes[entry.key] ?? '대기';
+      if (category == '충전' || category == '주차') continue;
       Offset? nearest;
       var nearestDistance = double.infinity;
       for (final candidate in adjacency.keys) {
@@ -2757,7 +2791,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             : _waypointNames[waypoint]!,
       ),
       content: Text(
-        '카테고리: ${_waypointTypes[waypoint] ?? '일반'}\n'
+        '카테고리: ${_waypointTypes[waypoint] ?? '대기'}\n'
         '이 Waypoint에서 수행할 작업을 선택하세요.',
       ),
       actions: [
@@ -2851,9 +2885,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (index < 0 || (original - updated).distance <= .01) return;
     final issue = _waypointDropIssue(original, updated);
     if (issue != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(_waypointDropMessage(issue))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_waypointDropMessage(issue))));
       return;
     }
     final movedLanes = <(Offset, Offset)>[
@@ -2940,8 +2974,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   String _waypointTypeDescription(String type) => switch (type) {
-    '일반' => '경로 연결과 잠시 정지할 수 있는 지점입니다. RMF에서는 holding point로 내보냅니다.',
-    '대기' => '작업이 없을 때 로봇을 장시간 주차·대기시키는 전용 자리입니다. RMF에서는 parking spot으로 내보냅니다.',
+    '대기' => '경로 연결과 잠시 정지할 수 있는 지점입니다. RMF에서는 holding point로 내보냅니다.',
+    '주차' =>
+      '작업이 없을 때 로봇을 장시간 세워 두는 전용 자리입니다. 이름을 홈N으로 붙여 로봇 복귀 지점으로도 씁니다. RMF에서는 parking spot으로 내보냅니다.',
     '홈' => '홈 풀 자동 할당에서 복귀 위치로 사용하는 지점입니다.',
     '충전' => '로봇 충전 위치로 사용하는 지점입니다.',
     '픽업' => '상품이나 화물을 싣는 작업 위치입니다.',
@@ -2950,18 +2985,23 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _ => '',
   };
 
+  /// 자동 이름의 접두사가 카테고리명과 다른 경우. 주차 지점은 로봇이 복귀해
+  /// 서 있는 자리이므로 `_homeWaypoints`(이름이 '홈'으로 시작하는 Waypoint를
+  /// 복귀 지점으로 잡는다)가 집어갈 수 있도록 홈N으로 붙인다.
+  static const Map<String, String> _waypointNamePrefixes = {'주차': '홈'};
+
   String _nextWaypointName(String category) {
-    if (category == '일반') return ' ';
+    final prefix = _waypointNamePrefixes[category] ?? category;
     var maxNumber = 0;
-    final pattern = RegExp('^${RegExp.escape(category)}([0-9]+)\$');
-    for (final entry in _waypointTypes.entries) {
-      if (entry.value != category) continue;
-      final name = _waypointNames[entry.key] ?? '';
-      final match = pattern.firstMatch(name);
+    final pattern = RegExp('^${RegExp.escape(prefix)}([0-9]+)\$');
+    // 카테고리가 아니라 이름 전체를 훑는다. '주차'와 '홈'이 같은 홈N 접두사를
+    // 공유하므로, 카테고리별로 세면 양쪽에서 홈1이 생겨 중복 이름 검사에 걸린다.
+    for (final name in _waypointNames.values) {
+      final match = pattern.firstMatch(name.trim());
       final number = match == null ? null : int.tryParse(match.group(1)!);
       if (number != null) maxNumber = math.max(maxNumber, number);
     }
-    return '$category${maxNumber + 1}';
+    return '$prefix${maxNumber + 1}';
   }
 
   Future<void> _editWaypoint(Offset waypoint) async {
@@ -2970,7 +3010,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     var selectedType = _waypointTypes[waypoint] == '드롭오프'
         ? '드랍오프'
-        : _waypointTypes[waypoint] ?? '일반';
+        : _waypointTypes[waypoint] ?? '대기';
     final action = await showDialog<String>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -2997,7 +3037,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['일반', '대기', '홈', '충전', '픽업', '드랍오프', '설비']
+                  items: const ['대기', '주차', '홈', '충전', '픽업', '드랍오프', '설비']
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -3038,7 +3078,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ),
             FilledButton(
               onPressed:
-                  selectedType != '일반' && nameController.text.trim().isEmpty
+                  selectedType != '대기' && nameController.text.trim().isEmpty
                   ? null
                   : () => Navigator.pop(dialogContext, 'save'),
               child: const Text('저장'),
@@ -3047,7 +3087,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       ),
     );
-    final name = selectedType == '일반' ? ' ' : nameController.text.trim();
+    // 대기 지점은 이름 없이 둘 수 있다(시나리오 자동 배치가 이름 없는 대기
+    // Waypoint를 후보로 쓴다). 다만 입력한 이름이 있으면 그대로 살린다.
+    final enteredName = nameController.text.trim();
+    final name = enteredName.isEmpty ? ' ' : enteredName;
     await Future<void>.delayed(const Duration(milliseconds: 350));
     nameController.dispose();
     if (!mounted) return;
@@ -3322,7 +3365,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final crossedWaypoint = activeEndpoint == null
         ? null
         : _firstCrossedWaypoint(activeEndpoint, point, snapTolerance);
-    var selectedType = '일반';
+    var selectedType = '주차';
     final nameController = TextEditingController(
       text: _nextWaypointName(selectedType),
     );
@@ -3349,7 +3392,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   controller: nameController,
                   decoration: InputDecoration(
                     labelText: 'Waypoint 이름',
-                    hintText: selectedType == '일반' ? '(이름 없음)' : null,
+                    hintText: selectedType == '대기' ? '(이름 없음)' : null,
                     helperText: '유형에 맞는 이름을 자동 제안합니다. 원하는 이름으로 수정할 수 있습니다.',
                     helperMaxLines: 2,
                     errorText:
@@ -3371,7 +3414,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['일반', '대기', '홈', '충전', '픽업', '드랍오프', '설비']
+                  items: const ['대기', '주차', '홈', '충전', '픽업', '드랍오프', '설비']
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -3404,7 +3447,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ),
             FilledButton(
               onPressed:
-                  (selectedType != '일반' &&
+                  (selectedType != '대기' &&
                           nameController.text.trim().isEmpty) ||
                       (nameController.text.trim().isNotEmpty &&
                           _waypointNames.values.any(
@@ -4093,6 +4136,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _createMockTask() async {
+    // 작업은 맵 프로젝트에 속한다. 저장할 프로젝트가 없으면 만들 수 없다.
+    if (_openProjectName == null) {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.info_outline, color: Color(0xFF2563EB)),
+          title: const Text('먼저 맵 프로젝트를 저장하세요'),
+          content: const SizedBox(
+            width: 420,
+            child: Text(
+              '작업은 맵 프로젝트에 속합니다. 작업 단계가 그 맵의 Waypoint 좌표와 이름을 '
+              '그대로 담기 때문에, 어느 맵의 작업인지 정해지지 않으면 목적지가 아무 곳도 '
+              '가리키지 않습니다.\n\n'
+              '맵 관리에서 `프로젝트 저장`으로 지도 이름을 정해 저장하거나, '
+              '`프로젝트 열기`로 저장된 맵을 여세요.',
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
     final waypoints = _mobileRuntimeWaypoints;
     final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
     final taskRobots = _mockRobots
@@ -5196,7 +5266,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final drawing = _drawing;
     return {
       'format': 'robosapiens-map-project',
-      'version': 1,
+      // v2: Waypoint 카테고리 이름이 바뀌었다. v1 의 '일반'(holding point)이
+      // '대기'가 되고, v1 의 '대기'(parking spot)가 '주차'가 된다. '대기'가
+      // 양쪽 버전에 다른 뜻으로 존재하므로 이 번호로만 구분할 수 있다.
+      'version': 2,
       'mapName': mapName ?? _mapName,
       'mapScenarioSummary': _mapScenarioSummary,
       'robotSafety': {
@@ -5247,7 +5320,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           {
             'point': _encodeOffset(point),
             'name': _waypointNames[point] ?? '',
-            'category': _waypointTypes[point] ?? '일반',
+            'category': _waypointTypes[point] ?? '대기',
           },
       ],
       'activeLaneEndpoint': _activeLaneEndpoint == null
@@ -5348,6 +5421,276 @@ class _ControlDashboardState extends State<ControlDashboard> {
     });
   }
 
+  /// 맵 프로젝트 이름을 입력받는다. 취소하면 null.
+  Future<String?> _askMapProjectName({
+    required String title,
+    required String initialName,
+    required String confirmLabel,
+    String? helperText,
+  }) async {
+    final controller = TextEditingController(text: initialName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.drive_file_rename_outline, size: 36),
+        title: Text(title),
+        content: SizedBox(
+          width: 390,
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: '지도 이름',
+              helperText: helperText ?? '이 이름이 프로젝트 구분자가 됩니다.',
+              helperMaxLines: 3,
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (value) {
+              final trimmed = value.trim();
+              if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final trimmed = controller.text.trim();
+              if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
+            },
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return name;
+  }
+
+  /// 같은 지도 이름의 프로젝트가 이미 있을 때 어떻게 할지 묻는다.
+  Future<MapProjectNameConflictChoice> _askMapProjectNameConflict(
+    String mapName,
+    MapProjectSummary? existing,
+  ) async {
+    final saved = existing == null
+        ? ''
+        : '\n\n저장된 내용: Waypoint ${existing.waypointCount}개 · '
+              'Lane ${existing.laneCount}개'
+              '${existing.drawingName == null ? '' : ' · 도면 ${existing.drawingName}'}'
+              '\n마지막 저장: ${_projectTimestamp(existing.updatedAt)}';
+    final choice = await showDialog<MapProjectNameConflictChoice>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.help_outline, size: 36),
+        title: const Text('같은 이름의 프로젝트가 있습니다'),
+        content: SizedBox(
+          width: 420,
+          child: Text(
+            '`$mapName` 프로젝트가 이미 저장되어 있습니다. '
+            '덮어쓰면 그 프로젝트의 Waypoint와 Lane이 지금 작업 내용으로 '
+            '완전히 교체되며 되돌릴 수 없습니다.$saved',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              MapProjectNameConflictChoice.cancel,
+            ),
+            child: const Text('취소'),
+          ),
+          TextButton.icon(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              MapProjectNameConflictChoice.rename,
+            ),
+            icon: const Icon(Icons.drive_file_rename_outline, size: 18),
+            label: const Text('다른 이름으로 저장'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              MapProjectNameConflictChoice.overwrite,
+            ),
+            icon: const Icon(Icons.save_outlined, size: 18),
+            label: Text('`$mapName` 덮어쓰기'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+          ),
+        ],
+      ),
+    );
+    return choice ?? MapProjectNameConflictChoice.cancel;
+  }
+
+  static String _projectTimestamp(DateTime at) =>
+      '${at.year}-${at.month.toString().padLeft(2, '0')}-'
+      '${at.day.toString().padLeft(2, '0')} '
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}';
+
+  /// 지금 작업을 MySQL 맵 프로젝트 저장소에 저장한다.
+  ///
+  /// 지도 이름이 곧 프로젝트 구분자다. 같은 이름이 이미 있으면 덮어쓸지 다른
+  /// 이름으로 갈지 먼저 묻는다. 다른 이름을 골랐는데 그 이름도 이미 있으면
+  /// 다시 묻는다 — 그래서 반복문이다.
+  Future<void> _saveProjectToDatabase() async {
+    if (_drawing == null) return;
+    try {
+      var mapName = _mapName.trim();
+      while (true) {
+        if (mapName.isEmpty) {
+          final asked = await _askMapProjectName(
+            title: '맵 프로젝트 저장',
+            initialName: '',
+            confirmLabel: '저장',
+          );
+          if (asked == null || !mounted) return;
+          mapName = asked;
+          continue;
+        }
+        if (!await mapProjectExists(mapName)) break;
+        if (!mounted) return;
+        final existing = (await listMapProjects())
+            .where((project) => project.mapName == mapName)
+            .firstOrNull;
+        if (!mounted) return;
+        final choice = await _askMapProjectNameConflict(mapName, existing);
+        if (!mounted) return;
+        if (choice == MapProjectNameConflictChoice.cancel) return;
+        if (choice == MapProjectNameConflictChoice.overwrite) break;
+        final renamed = await _askMapProjectName(
+          title: '다른 이름으로 저장',
+          initialName: '$mapName 사본',
+          confirmLabel: '저장',
+          helperText: '이미 쓰고 있는 이름이면 다시 확인합니다.',
+        );
+        if (renamed == null || !mounted) return;
+        mapName = renamed;
+      }
+      await saveMapProject(
+        mapName: mapName,
+        payloadJson: jsonEncode(_buildProjectData(mapName: mapName)),
+      );
+      if (!mounted) return;
+      setState(() {
+        _mapNameOverride = mapName;
+        _projectFileName = mapName;
+      });
+      // 저장한 프로젝트가 곧 열린 프로젝트가 된다. 다른 이름으로 저장했다면
+      // 작업 목록도 그 프로젝트의 것으로 갈아 끼운다.
+      if (_openProjectName != mapName) {
+        await _switchOpenProject(mapName);
+        if (!mounted) return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('`$mapName` 프로젝트를 MySQL에 저장했습니다.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('맵 프로젝트 저장', error);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('프로젝트를 저장하지 못했습니다: $error')));
+    }
+  }
+
+  /// MySQL에 저장된 프로젝트 목록에서 골라 연다.
+  Future<void> _openProjectFromDatabase() async {
+    try {
+      final projects = await listMapProjects();
+      if (!mounted) return;
+      if (projects.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('MySQL에 저장된 맵 프로젝트가 없습니다.')),
+        );
+        return;
+      }
+      final picked = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.storage_outlined, size: 36),
+          title: const Text('맵 프로젝트 열기'),
+          content: SizedBox(
+            width: 460,
+            height: 360,
+            child: ListView.separated(
+              itemCount: projects.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (_, index) {
+                final project = projects[index];
+                return ListTile(
+                  leading: const Icon(Icons.map_outlined),
+                  title: Text(project.mapName),
+                  subtitle: Text(
+                    'Waypoint ${project.waypointCount}개 · '
+                    'Lane ${project.laneCount}개\n'
+                    '${_projectTimestamp(project.updatedAt)}'
+                    '${project.drawingName == null ? '' : ' · ${project.drawingName}'}',
+                  ),
+                  isThreeLine: true,
+                  onTap: () => Navigator.pop(dialogContext, project.mapName),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+          ],
+        ),
+      );
+      if (picked == null || !mounted) return;
+      final payload = await loadMapProject(picked);
+      if (!mounted) return;
+      if (payload == null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('`$picked` 프로젝트를 찾지 못했습니다.')));
+        return;
+      }
+      _applyProjectData(
+        jsonDecode(payload) as Map<String, dynamic>,
+        sourceName: picked,
+        fallbackMapName: picked,
+      );
+      await _switchOpenProject(picked);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('`$picked` 프로젝트를 MySQL에서 불러왔습니다.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('맵 프로젝트 열기', error);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('프로젝트를 열지 못했습니다: $error')));
+    }
+  }
+
+  /// 저장된 카테고리 문자열을 현재 이름 체계로 옮긴다.
+  ///
+  /// v1 은 holding point 를 '일반', parking spot 을 '대기'라고 불렀다. v2 부터
+  /// 각각 '대기', '주차'다. '대기'가 두 버전에서 서로 다른 뜻이므로 버전을
+  /// 보지 않으면 구분할 수 없다 — 그냥 두면 예전 파일의 주차 자리가 단순
+  /// 정지 지점으로 바뀌어 is_parking_spot 이 사라진다.
+  static String _migrateWaypointCategory(String category, Object? version) {
+    final normalized = category == '드롭오프' ? '드랍오프' : category;
+    if (version != 1) return normalized;
+    return switch (normalized) {
+      '대기' => '주차',
+      '일반' => '대기',
+      _ => normalized,
+    };
+  }
+
+  /// `.rmfproject` 파일에서 프로젝트를 연다.
   Future<void> _loadProject() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -5356,10 +5699,43 @@ class _ControlDashboardState extends State<ControlDashboard> {
         withData: true,
       );
       if (result == null || result.files.single.bytes == null) return;
+      final fileName = result.files.single.name;
       final data =
           jsonDecode(utf8.decode(result.files.single.bytes!))
               as Map<String, dynamic>;
-      if (data['format'] != 'robosapiens-map-project' || data['version'] != 1) {
+      if (!mounted) return;
+      _applyProjectData(
+        data,
+        sourceName: fileName,
+        fallbackMapName: fileName.replaceFirst(RegExp(r'\.rmfproject$'), ''),
+      );
+      // 파일에서 연 맵은 아직 MySQL의 프로젝트가 아니다. `프로젝트 저장`으로
+      // 등록하기 전까지는 작업을 붙일 곳이 없으므로 열린 프로젝트를 비운다.
+      await _switchOpenProject(null);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$fileName 작업을 불러왔습니다. 작업을 만들려면 프로젝트로 저장하세요.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('작업 불러오기', error);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('작업을 불러오지 못했습니다: $error')));
+    }
+  }
+
+  /// 파싱한 프로젝트 JSON 을 편집 화면에 적용한다. 파일에서 왔든 MySQL 맵
+  /// 프로젝트 저장소에서 왔든 같은 경로를 탄다.
+  void _applyProjectData(
+    Map<String, dynamic> data, {
+    required String sourceName,
+    required String fallbackMapName,
+  }) {
+    {
+      final projectVersion = data['version'];
+      if (data['format'] != 'robosapiens-map-project' ||
+          (projectVersion != 1 && projectVersion != 2)) {
         throw const FormatException('지원하지 않는 프로젝트 파일입니다.');
       }
       final drawingData = data['drawing'] as Map<String, dynamic>?;
@@ -5374,8 +5750,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
         final point = _decodeOffset(waypoint['point']);
         loadedWaypoints.add(point);
         loadedNames[point] = waypoint['name'] as String? ?? '';
-        final category = waypoint['category'] as String? ?? '일반';
-        loadedTypes[point] = category == '드롭오프' ? '드랍오프' : category;
+        final category = waypoint['category'] as String? ?? '대기';
+        loadedTypes[point] = _migrateWaypointCategory(category, projectVersion);
       }
       final loadedOverrides = <Offset, Offset>{};
       for (final item in data['wallVertexOverrides'] as List<dynamic>) {
@@ -5410,19 +5786,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
       for (final lane in loadedLanes) {
         loadedDirections.putIfAbsent(lane, () => '양방향');
       }
-      if (!mounted) return;
       final loadedMapName = (data['mapName'] as String?)?.trim();
-      final fallbackMapName = result.files.single.name.replaceFirst(
-        RegExp(r'\.rmfproject$'),
-        '',
-      );
       _recordUndo();
       _fitMapToScreen();
       setState(() {
         _mapNameOverride = loadedMapName?.isNotEmpty == true
             ? loadedMapName
             : fallbackMapName;
-        _projectFileName = result.files.single.name;
+        _projectFileName = sourceName;
         _mapScenarioSummary = data['mapScenarioSummary'] as String?;
         _robotWidthMeters =
             (safetyData?['widthMeters'] as num?)?.toDouble() ?? .6;
@@ -5503,15 +5874,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _isDeployed = false;
         _vertexLabelRevision++;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${result.files.single.name} 작업을 불러왔습니다.')),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      _showProcessingWarning('작업 불러오기', error);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('작업을 불러오지 못했습니다: $error')));
     }
   }
 
@@ -5912,8 +6274,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
             : waypointName ?? (waypointType != null ? 'waypoint_$i' : '');
         final trafficEditorProperty = switch (waypointType) {
           '충전' => 'is_charger',
-          '대기' => 'is_parking_spot',
-          '일반' => 'is_holding_point',
+          '주차' => 'is_parking_spot',
+          '대기' => 'is_holding_point',
           _ => null,
         };
         final waypointProperties = <String>[
@@ -6232,6 +6594,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               drawing: _robotRuntimeDrawing,
                               mapName:
                                   _robotDeployedMap?.summary.name ?? _mapName,
+                              openProjectName: _openProjectName,
                               mapReady:
                                   (_robotDeployedMap?.waypoints ??
                                           _laneWaypoints)
@@ -6291,6 +6654,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                         onSaveProject: _saveProject,
                                         onSaveProjectAs: _saveProjectAs,
                                         onLoadProject: _loadProject,
+                                        onSaveToDatabase:
+                                            _saveProjectToDatabase,
+                                        onOpenFromDatabase:
+                                            _openProjectFromDatabase,
                                       ),
                                       const SizedBox(height: 14),
                                       _MapFileStatus(
@@ -7888,6 +8255,7 @@ class _MainDashboard extends StatelessWidget {
   const _MainDashboard({
     required this.drawing,
     required this.mapName,
+    required this.openProjectName,
     required this.mapReady,
     required this.deployed,
     required this.lanes,
@@ -7906,6 +8274,10 @@ class _MainDashboard extends StatelessWidget {
 
   final UploadedDrawing? drawing;
   final String mapName;
+
+  /// 열려 있는 맵 프로젝트 이름. null 이면 프로젝트가 없다는 뜻이고, 그때는
+  /// 작업 목록이 비어 있는 것이 정상이다.
+  final String? openProjectName;
   final bool mapReady;
   final bool deployed;
   final List<(Offset, Offset)> lanes;
@@ -7994,6 +8366,35 @@ class _MainDashboard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 18),
+          // 프로젝트가 없으면 대시보드는 비어 있는 게 맞다. 다만 왜 비었는지는
+          // 알려 준다 — 데이터가 사라진 것으로 오해할 수 있다.
+          if (openProjectName == null) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF93C5FD)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.folder_off_outlined, color: Color(0xFF2563EB)),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '열린 맵 프로젝트가 없습니다. 작업과 주문 자동 분류는 맵 프로젝트에 속하므로 '
+                      '지금은 아무 데이터도 표시하지 않습니다.\n'
+                      '맵 관리에서 `프로젝트 열기`로 저장된 맵을 열거나, 작성 중인 맵을 '
+                      '`프로젝트 저장`으로 등록하세요.',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -9428,10 +9829,10 @@ Future<void> _showUsageGuide(
             'Lane 만들기를 켜고 통로 중앙에 Waypoint를 순서대로 놓습니다.',
             '교차로, 회전 전후, 픽업 위치와 하차 위치에는 별도 Waypoint를 만듭니다.',
             'Waypoint를 클릭한 뒤 수정 창의 Waypoint 삭제를 누르면 해당 지점과 연결된 모든 Lane을 함께 제거할 수 있습니다.',
-            '일반은 경로상의 정지·통과 지점(holding point), 대기는 작업이 없을 때 로봇을 세워 두는 전용 주차 위치(parking spot)입니다.',
+            '대기는 경로상의 정지·통과 지점(holding point), 주차는 작업이 없을 때 로봇을 세워 두는 전용 위치(parking spot)입니다.',
             'Lane을 양방향·정방향·역방향 중 실제 운영 규칙에 맞게 지정합니다.',
             'Lane 설정에서 속도 제한, 정면·후진 자세 제약과 좁은 통로 Mutex 그룹을 필요에 따라 지정합니다.',
-            '대기, 충전, 픽업, 드랍오프 Waypoint에 알아보기 쉬운 이름을 부여합니다.',
+            '주차, 충전, 픽업, 드랍오프 Waypoint에 알아보기 쉬운 이름을 부여합니다. 주차는 홈1·홈2처럼 붙이면 로봇 복귀 지점으로 잡힙니다.',
             '고정 로봇팔이나 컨베이어 위치는 설비 Waypoint로 만들고 Lane에는 연결하지 않습니다.',
             '시나리오 맵 자동 완성에서 로봇·Home·충전소·온도대별 픽업·드랍오프 수를 입력하면 기존 Lane 위에 운영 지점을 추천 배치할 수 있습니다.',
           ],
@@ -9768,6 +10169,8 @@ class _PageHeading extends StatelessWidget {
     required this.onSaveProject,
     required this.onSaveProjectAs,
     required this.onLoadProject,
+    required this.onSaveToDatabase,
+    required this.onOpenFromDatabase,
   });
   final VoidCallback onHelp;
   final VoidCallback onUpload;
@@ -9779,8 +10182,11 @@ class _PageHeading extends StatelessWidget {
   final VoidCallback onSaveProject;
   final VoidCallback onSaveProjectAs;
   final VoidCallback onLoadProject;
+  final VoidCallback onSaveToDatabase;
+  final VoidCallback onOpenFromDatabase;
   @override
   Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
     children: [
       Expanded(
         child: Column(
@@ -9795,132 +10201,187 @@ class _PageHeading extends StatelessWidget {
           ],
         ),
       ),
-      OutlinedButton.icon(
-        onPressed: onHelp,
-        icon: const Icon(Icons.help_outline, size: 18),
-        label: const Text('사용법'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      OutlinedButton.icon(
-        onPressed: onLoadProject,
-        icon: const Icon(Icons.folder_open_outlined, size: 18),
-        label: const Text('작업 불러오기'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      OutlinedButton.icon(
-        onPressed: exportEnabled ? onSaveProject : null,
-        icon: const Icon(Icons.save_outlined, size: 18),
-        label: const Text('작업 저장'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      OutlinedButton.icon(
-        onPressed: exportEnabled ? onSaveProjectAs : null,
-        icon: const Icon(Icons.save_as_outlined, size: 18),
-        label: const Text('다른 이름으로 저장'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      OutlinedButton.icon(
-        onPressed: exportEnabled ? onValidate : null,
-        icon: const Icon(Icons.fact_check_outlined, size: 18),
-        label: const Text('오류 검증'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      OutlinedButton.icon(
-        onPressed: exportEnabled ? onRecommend : null,
-        icon: const Icon(Icons.auto_awesome_outlined, size: 18),
-        label: const Text('경로 추천'),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 16),
-        ),
-      ),
-      const SizedBox(width: 8),
-      PopupMenuButton<_ExportAction>(
-        enabled: exportEnabled,
-        onSelected: (action) {
-          if (action == _ExportAction.download) {
-            onDownload();
-          } else {
-            onCopy();
-          }
-        },
-        itemBuilder: (context) => const [
-          PopupMenuItem(
-            value: _ExportAction.download,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.download_outlined),
-              title: Text('파일 다운로드'),
-              subtitle: Text('.building.yaml로 저장'),
-            ),
-          ),
-          PopupMenuItem(
-            value: _ExportAction.copy,
-            child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.content_copy_outlined),
-              title: Text('YAML 복사'),
-              subtitle: Text('클립보드에 내용 복사'),
-            ),
-          ),
-        ],
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 14),
-          decoration: BoxDecoration(
-            color: exportEnabled ? Colors.white : const Color(0xFFF1F5F9),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFFCBD5E1)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.download_outlined,
-                size: 19,
-                color: exportEnabled
-                    ? const Color(0xFF334155)
-                    : const Color(0xFF94A3B8),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '맵 다운로드',
-                style: TextStyle(
-                  color: exportEnabled
-                      ? const Color(0xFF334155)
-                      : const Color(0xFF94A3B8),
-                  fontWeight: FontWeight.w700,
+      // 버튼이 열 개에 가까워 좁은 창에서는 한 줄에 들어가지 않는다. Row 에
+      // 그대로 늘어놓으면 폭이 모자란 순간 오른쪽이 잘려 나가므로, 모자라면
+      // 다음 줄로 접히도록 Wrap 에 담는다.
+      Flexible(
+        child: Wrap(
+          alignment: WrapAlignment.end,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: onHelp,
+              icon: const Icon(Icons.help_outline, size: 18),
+              label: const Text('사용법'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
                 ),
               ),
-              const SizedBox(width: 5),
-              const Icon(Icons.arrow_drop_down, size: 18),
-            ],
-          ),
-        ),
-      ),
-      const SizedBox(width: 10),
-      FilledButton.icon(
-        onPressed: onUpload,
-        icon: const Icon(Icons.upload_file_rounded, size: 19),
-        label: const Text('도면 올리기'),
-        style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 17),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
+            ),
+            // 맵 프로젝트의 원장은 MySQL이다. 지도 이름으로 프로젝트를 구분해 담으므로
+            // 이 두 버튼이 여러 창고를 오가는 기본 경로다. 파일 저장·불러오기는 다른
+            // PC로 옮기거나 백업할 때 쓰는 보조 수단으로 남겨 둔다.
+            FilledButton.icon(
+              onPressed: onOpenFromDatabase,
+              icon: const Icon(Icons.storage_outlined, size: 18),
+              label: const Text('프로젝트 열기'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            FilledButton.icon(
+              onPressed: exportEnabled ? onSaveToDatabase : null,
+              icon: const Icon(Icons.cloud_upload_outlined, size: 18),
+              label: const Text('프로젝트 저장'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: onLoadProject,
+              icon: const Icon(Icons.folder_open_outlined, size: 18),
+              label: const Text('파일에서 열기'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: exportEnabled ? onSaveProject : null,
+              icon: const Icon(Icons.save_outlined, size: 18),
+              label: const Text('파일로 저장'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: exportEnabled ? onSaveProjectAs : null,
+              icon: const Icon(Icons.save_as_outlined, size: 18),
+              label: const Text('다른 이름으로 저장'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: exportEnabled ? onValidate : null,
+              icon: const Icon(Icons.fact_check_outlined, size: 18),
+              label: const Text('오류 검증'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: exportEnabled ? onRecommend : null,
+              icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+              label: const Text('경로 추천'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            PopupMenuButton<_ExportAction>(
+              enabled: exportEnabled,
+              onSelected: (action) {
+                if (action == _ExportAction.download) {
+                  onDownload();
+                } else {
+                  onCopy();
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: _ExportAction.download,
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.download_outlined),
+                    title: Text('파일 다운로드'),
+                    subtitle: Text('.building.yaml로 저장'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: _ExportAction.copy,
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.content_copy_outlined),
+                    title: Text('YAML 복사'),
+                    subtitle: Text('클립보드에 내용 복사'),
+                  ),
+                ),
+              ],
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 17,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: exportEnabled ? Colors.white : const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFCBD5E1)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.download_outlined,
+                      size: 19,
+                      color: exportEnabled
+                          ? const Color(0xFF334155)
+                          : const Color(0xFF94A3B8),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '맵 다운로드',
+                      style: TextStyle(
+                        color: exportEnabled
+                            ? const Color(0xFF334155)
+                            : const Color(0xFF94A3B8),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    const Icon(Icons.arrow_drop_down, size: 18),
+                  ],
+                ),
+              ),
+            ),
+            FilledButton.icon(
+              onPressed: onUpload,
+              icon: const Icon(Icons.upload_file_rounded, size: 19),
+              label: const Text('도면 올리기'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 17,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     ],
@@ -11267,7 +11728,7 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
               child: IgnorePointer(
                 child: _WaypointHoverBadge(
                   name: widget.waypointNames[_hoveredWaypoint!] ?? '',
-                  category: widget.waypointTypes[_hoveredWaypoint!] ?? '일반',
+                  category: widget.waypointTypes[_hoveredWaypoint!] ?? '대기',
                 ),
               ),
             ),
@@ -12140,11 +12601,7 @@ class _WaypointDragPainter extends CustomPainter {
           ..strokeCap = StrokeCap.round,
       );
     }
-    canvas.drawCircle(
-      original,
-      6,
-      Paint()..color = const Color(0x33475569),
-    );
+    canvas.drawCircle(original, 6, Paint()..color = const Color(0x33475569));
     canvas.drawLine(
       original,
       target,

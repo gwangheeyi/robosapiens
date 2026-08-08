@@ -21,8 +21,20 @@ cd /home/gyi/robosapiens/rmf_control_ui
 flutter run -d linux
 ```
 
-작업 목록과 작업 변경 이력은 MySQL `robosapiens` 데이터베이스의
-`rmf_ui_tasks`, `rmf_ui_task_history` 테이블에 저장됩니다. 접속값은
+창고 맵은 **지도 이름으로 구분되는 프로젝트 단위**로 MySQL `robosapiens`
+데이터베이스에 저장됩니다(`map_projects`, `map_project_waypoints`,
+`map_project_lanes`). 프로젝트가 다르면 Waypoint·Lane·축척이 전부 별개이며,
+같은 이름으로 저장하려 하면 덮어쓸지 다른 이름을 쓸지 먼저 확인합니다.
+자세한 내용은 [맵 작성 및 배포 가이드](docs/MAP_AUTHORING_AND_DEPLOYMENT.md)의
+`맵 프로젝트 저장` 절을 참고하세요.
+
+작업 목록과 작업 변경 이력(`rmf_ui_tasks`, `rmf_ui_task_history`)도 **맵
+프로젝트에 속합니다.** 작업 단계가 그 맵의 Waypoint 좌표와 이름을 그대로 담기
+때문에, 다른 맵에서 꺼내면 목적지가 아무 데도 가리키지 않습니다. 그래서 열린
+프로젝트가 없으면 대시보드에 작업이 표시되지 않고 주문 자동 분류도 돌지
+않습니다. 프로젝트를 지우면 그 맵의 작업도 함께 사라집니다.
+
+주문·재고(`orders`, `lots`)는 창고 공통 원장이라 프로젝트로 나누지 않습니다. 접속값은
 `ROBOSAPIENS_DB_HOST`(기본 `127.0.0.1`), `ROBOSAPIENS_DB_PORT`(기본 `3306`),
 `ROBOSAPIENS_DB_USER`(기본 `root`), `ROBOSAPIENS_DB_NAME`(기본 `robosapiens`)으로
 변경할 수 있습니다. 팀 개발용 기본 비밀번호는 `robosapiens`로 설정되어 있으며,

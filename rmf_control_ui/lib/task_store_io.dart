@@ -36,39 +36,48 @@ Future<String> _query(String sql) async {
   return output.trim();
 }
 
-Future<String?> loadSavedTasks() async {
+/// `map_name` 은 utf8mb4_unicode_ci 컬럼인데 사용자 변수는 접속 collation
+/// (MySQL 8 기본 utf8mb4_0900_ai_ci)을 따라간다. 비교할 때마다 맞춰 준다.
+const String _nameParam = '(@map_name COLLATE utf8mb4_unicode_ci)';
+
+/// 열려 있는 맵 프로젝트를 잡는 SQL 머리말.
+///
+/// 작업은 맵 프로젝트에 속한다 — payload 안의 단계가 그 맵의 Waypoint 좌표를
+/// 그대로 들고 있어서, 다른 맵에서 꺼내면 아무 데도 가리키지 않기 때문이다.
+/// 이름에 해당하는 프로젝트가 없으면 @project_id 가 NULL 이 되고, 뒤따르는
+/// INSERT 가 NOT NULL 위반으로 즉시 멈춘다. 조용히 엉뚱한 맵에 붙는 것보다
+/// 낫다.
+String _projectPreamble(String mapName) =>
+    "SET @map_name = CONVERT(FROM_BASE64('${base64Encode(utf8.encode(mapName))}') USING utf8mb4);\n"
+    'SET @project_id = (SELECT id FROM map_projects WHERE map_name = $_nameParam);';
+
+/// [mapName] 프로젝트에 저장된 작업 목록. 프로젝트가 없으면 빈 목록이다.
+///
+/// 스키마는 db/schema.sql 이 갖는다. 예전에는 이 자리에서 CREATE TABLE 을
+/// 했지만, 그러면 map_project_id 가 없는 옛 모양의 표가 새로 생겨 버린다.
+Future<String?> loadSavedTasks(String mapName) async {
   final output = await _query('''
-CREATE TABLE IF NOT EXISTS rmf_ui_tasks (
-  id VARCHAR(64) NOT NULL PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  status VARCHAR(32) NOT NULL,
-  payload JSON NOT NULL,
-  created_at DATETIME(6) NOT NULL,
-  updated_at DATETIME(6) NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-CREATE TABLE IF NOT EXISTS rmf_ui_task_history (
-  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  task_id VARCHAR(64) NOT NULL,
-  event_type VARCHAR(32) NOT NULL,
-  payload JSON NOT NULL,
-  recorded_at DATETIME(6) NOT NULL,
-  KEY idx_rmf_ui_task_history_task (task_id, recorded_at),
-  KEY idx_rmf_ui_task_history_at (recorded_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+${_projectPreamble(mapName)}
 SELECT COALESCE(JSON_ARRAYAGG(payload), JSON_ARRAY())
-FROM rmf_ui_tasks;
+FROM rmf_ui_tasks
+WHERE map_project_id = @project_id;
 ''');
   return output.isEmpty ? '[]' : output.split('\n').last;
 }
 
-Future<void> saveTasks(String contents) async {
+/// [mapName] 프로젝트의 작업 목록을 [contents] 스냅샷으로 통째로 맞춘다.
+///
+/// 증분이 아니라 전체 치환이다. 다른 프로젝트의 작업은 건드리지 않는다.
+Future<void> saveTasks(String mapName, String contents) async {
   final snapshot = base64Encode(utf8.encode(contents));
   await _query('''
+${_projectPreamble(mapName)}
 SET @snapshot = CAST(CONVERT(FROM_BASE64('$snapshot') USING utf8mb4) AS JSON);
 START TRANSACTION;
 
-INSERT INTO rmf_ui_task_history (task_id, event_type, payload, recorded_at)
-SELECT incoming.id, 'created', incoming.payload, NOW(6)
+INSERT INTO rmf_ui_task_history
+  (map_project_id, task_id, event_type, payload, recorded_at)
+SELECT @project_id, incoming.id, 'created', incoming.payload, NOW(6)
 FROM JSON_TABLE(
   @snapshot,
   '\$[*]' COLUMNS (
@@ -77,11 +86,14 @@ FROM JSON_TABLE(
   )
 ) AS incoming
 LEFT JOIN rmf_ui_tasks existing
-  ON existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
+  ON existing.map_project_id = @project_id
+ AND existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
 WHERE existing.id IS NULL;
 
-INSERT INTO rmf_ui_task_history (task_id, event_type, payload, recorded_at)
+INSERT INTO rmf_ui_task_history
+  (map_project_id, task_id, event_type, payload, recorded_at)
 SELECT
+  @project_id,
   incoming.id,
   CASE
     WHEN JSON_UNQUOTE(JSON_EXTRACT(existing.payload, '\$.status')) <> incoming.status
@@ -99,21 +111,25 @@ FROM JSON_TABLE(
   )
 ) AS incoming
 JOIN rmf_ui_tasks existing
-  ON existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
+  ON existing.map_project_id = @project_id
+ AND existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
 WHERE NOT (existing.payload <=> incoming.payload);
 
-INSERT INTO rmf_ui_task_history (task_id, event_type, payload, recorded_at)
-SELECT existing.id, 'deleted', existing.payload, NOW(6)
+INSERT INTO rmf_ui_task_history
+  (map_project_id, task_id, event_type, payload, recorded_at)
+SELECT @project_id, existing.id, 'deleted', existing.payload, NOW(6)
 FROM rmf_ui_tasks existing
 LEFT JOIN JSON_TABLE(
   @snapshot,
   '\$[*]' COLUMNS (id VARCHAR(64) PATH '\$.id')
 ) AS incoming
   ON existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
-WHERE incoming.id IS NULL;
+WHERE existing.map_project_id = @project_id AND incoming.id IS NULL;
 
-INSERT INTO rmf_ui_tasks (id, name, status, payload, created_at, updated_at)
+INSERT INTO rmf_ui_tasks
+  (map_project_id, id, name, status, payload, created_at, updated_at)
 SELECT
+  @project_id,
   incoming.id,
   incoming.name,
   incoming.status,
@@ -143,7 +159,7 @@ LEFT JOIN JSON_TABLE(
   '\$[*]' COLUMNS (id VARCHAR(64) PATH '\$.id')
 ) AS incoming
   ON existing.id = (incoming.id COLLATE utf8mb4_unicode_ci)
-WHERE incoming.id IS NULL;
+WHERE existing.map_project_id = @project_id AND incoming.id IS NULL;
 
 COMMIT;
 ''');
@@ -193,7 +209,8 @@ Future<void> markOrderDispatched(String orderId, String taskId) async {
 SET @order_id = CONVERT(FROM_BASE64('$encodedOrderId') USING utf8mb4);
 SET @task_id = CONVERT(FROM_BASE64('$encodedTaskId') USING utf8mb4);
 START TRANSACTION;
-UPDATE orders SET expanded = 1 WHERE id = @order_id AND expanded = 0;
+UPDATE orders SET expanded = 1
+WHERE id = (@order_id COLLATE utf8mb4_unicode_ci) AND expanded = 0;
 INSERT INTO events (
   at, severity, category, source, message, task_id, order_id
 )

@@ -78,9 +78,12 @@ void main() {
     await tester.tap(find.text('확인'));
     await tester.pumpAndSettle();
 
+    // 작업은 맵 프로젝트에 속한다. 프로젝트를 열거나 저장하기 전에는 어느 맵의
+    // Waypoint를 목적지로 삼을지 정해지지 않으므로 만들 수 없다.
     await tester.tap(find.text('새 작업'));
     await tester.pumpAndSettle();
-    expect(find.text('작업 준비가 필요합니다'), findsOneWidget);
-    expect(find.text('배포 맵 불러오기'), findsWidgets);
+    expect(find.text('먼저 맵 프로젝트를 저장하세요'), findsOneWidget);
+    await tester.tap(find.text('확인'));
+    await tester.pumpAndSettle();
   });
 }

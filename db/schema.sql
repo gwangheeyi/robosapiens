@@ -219,30 +219,118 @@ CREATE TABLE IF NOT EXISTS `task_steps` (
     REFERENCES `tasks` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- RMF Control UI에서 작성한 재사용 가능한 작업 정의. payload에는 지도 Waypoint,
--- 단계와 배정 정보를 JSON으로 보존한다.
-CREATE TABLE IF NOT EXISTS `rmf_ui_tasks` (
-  `id`         VARCHAR(64)  NOT NULL,
-  `name`       VARCHAR(255) NOT NULL,
-  `status`     VARCHAR(32)  NOT NULL,
-  `payload`    JSON         NOT NULL,
-  `created_at` DATETIME(6)  NOT NULL,
-  `updated_at` DATETIME(6)  NOT NULL,
+-- RMF Control UI 의 작업 정의는 맵 프로젝트에 속한다. 정의는 아래
+-- '맵 프로젝트' 절에 map_projects 다음으로 있다(외래 키 순서 때문).
+
+
+-- ---------------------------------------------------------------------------
+-- 맵 프로젝트 — 지도 이름이 곧 프로젝트 구분자
+--
+-- 한 대의 관제가 여러 창고(프로젝트)를 다룬다. 프로젝트가 다르면 Waypoint,
+-- Lane, 벽, 축척이 전부 별개이므로 지도 이름으로 갈라 담는다.
+--
+-- `payload` 가 복원의 원본이다. 도면 이미지 바이트와 벽·바닥 마스크까지 통째로
+-- 들고 있어 이것만 있으면 편집 화면을 그대로 되살릴 수 있다.
+-- 아래 map_project_waypoints / map_project_lanes 는 그 payload 에서 뽑아낸
+-- 조회용 사본이다. 저장할 때마다 지우고 다시 채우므로 payload 와 어긋나지
+-- 않는다. 관제나 다른 도구가 도면 수백 KB를 읽지 않고도 "이 맵의 주차 자리가
+-- 어디인가"를 물어볼 수 있게 하려고 둔다.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `map_projects` (
+  `id`             BIGINT       NOT NULL AUTO_INCREMENT,
+  -- 프로젝트 구분자. 같은 이름의 프로젝트는 하나만 존재한다. 앱은 저장 전에
+  -- 이 이름의 존재 여부를 확인해 덮어쓸지 다른 이름으로 갈지 사용자에게 묻는다.
+  `map_name`       VARCHAR(128) NOT NULL,
+  -- 프로젝트 JSON 의 스키마 번호(.rmfproject 의 `version` 과 같은 값).
+  `format_version` INT          NOT NULL,
+  `payload`        JSON         NOT NULL,
+  `drawing_name`   VARCHAR(255) NULL,
+  `waypoint_count` INT          NOT NULL DEFAULT 0,
+  `lane_count`     INT          NOT NULL DEFAULT 0,
+  `created_at`     DATETIME(6)  NOT NULL,
+  `updated_at`     DATETIME(6)  NOT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_rmf_ui_tasks_status` (`status`),
-  KEY `idx_rmf_ui_tasks_updated` (`updated_at`)
+  UNIQUE KEY `uq_map_projects_name` (`map_name`),
+  KEY `idx_map_projects_updated` (`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 작업 생성·수정·삭제·상태 변경 이력. 작업 삭제 뒤에도 기록을 보존한다.
+-- 프로젝트별 Waypoint 조회용 사본. seq 는 프로젝트 안에서의 입력 순서다.
+CREATE TABLE IF NOT EXISTS `map_project_waypoints` (
+  `project_id` BIGINT       NOT NULL,
+  `seq`        INT          NOT NULL,
+  `name`       VARCHAR(128) NOT NULL,
+  -- 대기(is_holding_point) | 주차(is_parking_spot) | 홈 | 충전 | 픽업 |
+  -- 드랍오프 | 설비. RMF Control UI 의 카테고리 문자열 그대로다.
+  `category`   VARCHAR(32)  NOT NULL,
+  `x`          DOUBLE       NOT NULL,
+  `y`          DOUBLE       NOT NULL,
+  PRIMARY KEY (`project_id`, `seq`),
+  KEY `idx_map_waypoints_category` (`project_id`, `category`),
+  KEY `idx_map_waypoints_name` (`project_id`, `name`),
+  CONSTRAINT `fk_map_waypoints_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- RMF Control UI에서 작성한 재사용 가능한 작업 정의. payload에는 지도 Waypoint,
+-- 단계와 배정 정보를 JSON으로 보존한다.
+--
+-- 프로젝트에 속한다. payload 안의 단계가 그 맵의 Waypoint 좌표와 이름을 그대로
+-- 들고 있기 때문이다 — `창고 1층`의 홈1(12.5, -3.25)로 가는 작업을 `창고 2층`
+-- 에서 꺼내면 그 좌표는 아무 데도 가리키지 않는다. 프로젝트를 지우면 그 맵의
+-- 작업도 함께 사라진다.
+--
+-- 작업 번호(id)는 앱이 프로젝트 안에서 매기므로 서로 다른 맵이 같은 번호를 쓸
+-- 수 있다. 그래서 기본 키가 (map_project_id, id) 복합키다.
+CREATE TABLE IF NOT EXISTS `rmf_ui_tasks` (
+  `map_project_id` BIGINT       NOT NULL,
+  `id`             VARCHAR(64)  NOT NULL,
+  `name`           VARCHAR(255) NOT NULL,
+  `status`         VARCHAR(32)  NOT NULL,
+  `payload`        JSON         NOT NULL,
+  `created_at`     DATETIME(6)  NOT NULL,
+  `updated_at`     DATETIME(6)  NOT NULL,
+  PRIMARY KEY (`map_project_id`, `id`),
+  KEY `idx_rmf_ui_tasks_status` (`map_project_id`, `status`),
+  KEY `idx_rmf_ui_tasks_updated` (`map_project_id`, `updated_at`),
+  CONSTRAINT `fk_rmf_ui_tasks_project` FOREIGN KEY (`map_project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 작업 생성·수정·삭제·상태 변경 이력. 작업을 지운 뒤에도 그 프로젝트 안에서는
+-- 기록이 남는다(task_id 에 외래 키를 걸지 않는 이유). 프로젝트 자체를 지우면
+-- 함께 사라진다.
 CREATE TABLE IF NOT EXISTS `rmf_ui_task_history` (
-  `id`          BIGINT      NOT NULL AUTO_INCREMENT,
-  `task_id`     VARCHAR(64) NOT NULL,
-  `event_type`  VARCHAR(32) NOT NULL,
-  `payload`     JSON        NOT NULL,
-  `recorded_at` DATETIME(6) NOT NULL,
+  `id`             BIGINT      NOT NULL AUTO_INCREMENT,
+  `map_project_id` BIGINT      NOT NULL,
+  `task_id`        VARCHAR(64) NOT NULL,
+  `event_type`     VARCHAR(32) NOT NULL,
+  `payload`        JSON        NOT NULL,
+  `recorded_at`    DATETIME(6) NOT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_rmf_ui_task_history_task` (`task_id`, `recorded_at`),
-  KEY `idx_rmf_ui_task_history_at` (`recorded_at`)
+  KEY `idx_rmf_ui_task_history_task`
+    (`map_project_id`, `task_id`, `recorded_at`),
+  KEY `idx_rmf_ui_task_history_at` (`map_project_id`, `recorded_at`),
+  CONSTRAINT `fk_rmf_ui_task_history_project` FOREIGN KEY (`map_project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 프로젝트별 Lane 조회용 사본.
+CREATE TABLE IF NOT EXISTS `map_project_lanes` (
+  `project_id`  BIGINT      NOT NULL,
+  `seq`         INT         NOT NULL,
+  `start_x`     DOUBLE      NOT NULL,
+  `start_y`     DOUBLE      NOT NULL,
+  `end_x`       DOUBLE      NOT NULL,
+  `end_y`       DOUBLE      NOT NULL,
+  -- 양방향 | 정방향 | 역방향
+  `direction`   VARCHAR(16) NOT NULL,
+  `speed_limit` DOUBLE      NULL,
+  `orientation` VARCHAR(16) NULL,
+  `mutex_group` VARCHAR(64) NULL,
+  PRIMARY KEY (`project_id`, `seq`),
+  CONSTRAINT `fk_map_lanes_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
@@ -295,6 +383,10 @@ CREATE TABLE IF NOT EXISTS `counters` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+-- v3: 맵 프로젝트 테이블(map_projects / map_project_waypoints /
+--     map_project_lanes) 추가. 여러 창고 맵을 지도 이름으로 구분해 담는다.
+-- v4: rmf_ui_tasks / rmf_ui_task_history 를 맵 프로젝트에 귀속.
+--     이미 v3 로 쓰던 데이터베이스는 db/migrate_v3_to_v4.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 2, NOW(6))
+VALUES (1, 4, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);
