@@ -40,4 +40,55 @@ void main() {
     dispatchOrder(original, (task) => task.at);
     expect(original, copy, reason: '화면 표시 순서가 배차 때문에 바뀌면 안 된다');
   });
+
+  group('긴급도 우선', () {
+    ({String id, DateTime at, int weight}) urgent(
+      String id,
+      int minute,
+      int weight,
+    ) => (id: id, at: DateTime(2026, 8, 8, 10, minute), weight: weight);
+
+    List<String> byUrgency(
+      List<({String id, DateTime at, int weight})> tasks,
+    ) => [
+      for (final entry in dispatchOrder(
+        tasks,
+        (task) => task.at,
+        priority: (task) => task.weight,
+      ))
+        entry.id,
+    ];
+
+    test('나중에 들어온 긴급 주문이 먼저 나간다', () {
+      expect(byUrgency([urgent('보통-먼저', 1, 1), urgent('긴급-나중', 9, 3)]), [
+        '긴급-나중',
+        '보통-먼저',
+      ]);
+    });
+
+    test('같은 긴급도끼리는 오래 기다린 쪽이 먼저다', () {
+      expect(
+        byUrgency([
+          urgent('높음-나중', 8, 2),
+          urgent('높음-먼저', 2, 2),
+          urgent('긴급', 5, 3),
+          urgent('낮음', 1, 0),
+        ]),
+        ['긴급', '높음-먼저', '높음-나중', '낮음'],
+      );
+    });
+
+    test('priority 를 넘기지 않으면 순수 선입선출이다', () {
+      expect(
+        [
+          for (final entry in dispatchOrder([
+            urgent('긴급', 9, 3),
+            urgent('보통', 1, 1),
+          ], (task) => task.at))
+            entry.id,
+        ],
+        ['보통', '긴급'],
+      );
+    });
+  });
 }

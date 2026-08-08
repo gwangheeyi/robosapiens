@@ -317,6 +317,26 @@ class _MockTaskStep {
   };
 }
 
+/// 주문 긴급도. robo_core 의 Urgency enum 과 이름·가중치를 맞춘다.
+enum _TaskUrgency {
+  critical('긴급', 3),
+  high('높음', 2),
+  normal('보통', 1),
+  low('낮음', 0);
+
+  const _TaskUrgency(this.label, this.weight);
+
+  final String label;
+  final int weight;
+
+  static _TaskUrgency parse(String? name) => switch (name) {
+    'critical' => critical,
+    'high' => high,
+    'low' => low,
+    _ => normal,
+  };
+}
+
 class _MockTask {
   _MockTask({
     required this.id,
@@ -327,6 +347,7 @@ class _MockTask {
     required this.steps,
     this.trigger = _OrderTrigger.manual,
     this.orderId,
+    this.urgency = _TaskUrgency.normal,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -338,6 +359,9 @@ class _MockTask {
   final List<_MockTaskStep> steps;
   _OrderTrigger trigger;
   final String? orderId;
+
+  /// 주문에서 넘어온 긴급도. 대기가 쌓였을 때 배차 순서를 가른다.
+  _TaskUrgency urgency;
   int currentStepIndex = 0;
   _MockTaskStatus status = _MockTaskStatus.queued;
   final DateTime createdAt;
@@ -525,6 +549,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           type: template.type,
           robotId: robot?.id ?? '__auto__',
           orderId: orderId,
+          urgency: _TaskUrgency.parse(value['urgency'] as String?),
           steps: [
             for (final step in template.steps)
               _MockTaskStep(
@@ -574,6 +599,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             task.orderId != null && task.status == _MockTaskStatus.queued,
       ),
       (task) => task.createdAt,
+      priority: (task) => task.urgency.weight,
     );
     var changed = false;
     while (available.isNotEmpty && queued.isNotEmpty) {
@@ -602,6 +628,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     'status': task.status.name,
     'trigger': task.trigger.name,
     'orderId': task.orderId,
+    'urgency': task.urgency.name,
     'currentStepIndex': task.currentStepIndex,
     'createdAt': task.createdAt.toIso8601String(),
     'completedAt': task.completedAt?.toIso8601String(),
@@ -635,6 +662,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         data['trigger'] as String? ?? _OrderTrigger.manual.name,
       ),
       orderId: data['orderId'] as String?,
+      urgency: _TaskUrgency.parse(data['urgency'] as String?),
       createdAt:
           DateTime.tryParse(data['createdAt'] as String? ?? '') ??
           DateTime.now(),
@@ -3677,9 +3705,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final loadedMap = _robotDeployedMap;
     final lanes = loadedMap?.lanes ?? _recommendedLanes;
     for (final lane in lanes) {
+      // 배포 맵도 일방통행 정보를 들고 온다. 예전에는 무조건 양방향으로 봐서
+      // 로봇이 일방통행 레인을 거슬러 올라갔다.
       final direction = loadedMap == null
           ? _laneDirections[lane] ?? '양방향'
-          : '양방향';
+          : loadedMap.laneDirections[lane] ?? '양방향';
       if ((lane.$1 - point).distance <= .01 && direction != '역방향') {
         result.add(lane.$2);
       }
@@ -3707,9 +3737,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     for (final lane in lanes) {
       final from = canonical(lane.$1);
       final to = canonical(lane.$2);
+      // 배포 맵도 일방통행 정보를 들고 온다. 예전에는 무조건 양방향으로 봐서
+      // 로봇이 일방통행 레인을 거슬러 올라갔다.
       final direction = loadedMap == null
           ? _laneDirections[lane] ?? '양방향'
-          : '양방향';
+          : loadedMap.laneDirections[lane] ?? '양방향';
       final distance = (from - to).distance;
       if (direction != '역방향') {
         edges.putIfAbsent(from, () => []).add((to, distance));
@@ -8553,7 +8585,9 @@ class _TaskManagementPage extends StatelessWidget {
                                         : task.trigger != _OrderTrigger.manual
                                         ? '자동화 ${task.trigger.label} · '
                                         : ''}'
-                                    '${task.type} · ${task.robotId} · ${task.currentStepIndex}/${task.steps.length}단계 완료 · 생성 ${_time(task.createdAt)}'
+                                    '${task.type} · ${task.robotId} · '
+                                    '${task.orderId == null ? '' : '긴급도 ${task.urgency.label} · '}'
+                                    '${task.currentStepIndex}/${task.steps.length}단계 완료 · 생성 ${_time(task.createdAt)}'
                                     '\n${task.steps.map((step) => step.label).join(' → ')}'
                                     '${task.description.isEmpty ? '' : '\n${task.description}'}',
                                     maxLines: 3,

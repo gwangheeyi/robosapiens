@@ -120,6 +120,13 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
       for (final value in data['recommendedLanes'] as List<dynamic>)
         (decodePoint((value as List<dynamic>)[0]), decodePoint(value[1])),
     ];
+    // 일방통행 레인을 놓치면 로봇이 거슬러 올라간다.
+    final directions = <(Offset, Offset), String>{};
+    for (final value in (data['laneDirections'] as List<dynamic>?) ?? const []) {
+      final entry = value as Map<String, dynamic>;
+      directions[(decodePoint(entry['start']), decodePoint(entry['end']))] =
+          entry['direction'] as String? ?? '양방향';
+    }
     final waypoints = <Offset>[];
     final names = <Offset, String>{};
     for (final value in data['waypoints'] as List<dynamic>) {
@@ -139,6 +146,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
       lanes: lanes,
       waypoints: waypoints,
       waypointNames: names,
+      laneDirections: directions,
     );
   }
   final yamlFile = File(summary.yamlPath);
@@ -181,7 +189,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     }
   }
 
-  final laneIndices = <(int, int)>[];
+  final laneIndices = <(int, int, bool)>[];
   var inLanes = false;
   for (final line in const LineSplitter().convert(yaml)) {
     if (line.startsWith('    lanes:')) {
@@ -192,16 +200,28 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     if (!inLanes) continue;
     final match = RegExp(r'^\s*-\s*\[\s*(\d+),\s*(\d+),').firstMatch(line);
     if (match != null) {
-      laneIndices.add((int.parse(match.group(1)!), int.parse(match.group(2)!)));
+      // Open-RMF 는 일방통행을 bidirectional: [4, false] 로 적고, 진행 방향은
+      // 앞의 두 정점 순서로 나타낸다. 이 값을 읽지 않으면 로봇이 일방통행
+      // 레인을 거슬러 올라간다.
+      final bidirectional = !RegExp(
+        r'bidirectional:\s*\[\s*\d+\s*,\s*false\s*\]',
+      ).hasMatch(line);
+      laneIndices.add((
+        int.parse(match.group(1)!),
+        int.parse(match.group(2)!),
+        bidirectional,
+      ));
     }
   }
   final lanes = <(Offset, Offset)>[];
+  final directions = <(Offset, Offset), String>{};
   final waypointSet = <Offset>{};
   for (final lane in laneIndices) {
     if (lane.$1 >= vertices.length || lane.$2 >= vertices.length) continue;
     final start = vertices[lane.$1];
     final end = vertices[lane.$2];
     lanes.add((start, end));
+    directions[(start, end)] = lane.$3 ? '양방향' : '정방향';
     waypointSet.addAll([start, end]);
   }
   for (final index in equipmentIndices) {
@@ -222,5 +242,6 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     lanes: lanes,
     waypoints: waypointSet.toList(),
     waypointNames: waypointNames,
+    laneDirections: directions,
   );
 }
