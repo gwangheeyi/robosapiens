@@ -419,6 +419,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
   int _selectedMenu = 0;
+
   /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
   ///
   /// 대시보드의 작업은 이 프로젝트에 속한다. 프로젝트를 저장하거나 열기 전에는
@@ -2266,14 +2267,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return null;
   }
 
+  /// Waypoint를 찍다 생긴 오류를 팝업으로 알린다.
+  ///
+  /// 스낵바를 쓰다 팝업으로 옮겼다. 진단 문구에 수치가 들어가 길어졌는데
+  /// 스낵바는 읽기 전에 사라지고, 값을 옮겨 적을 수도 없었다. 팝업은 닫을
+  /// 때까지 남고, 본문을 끌어 선택하거나 복사 버튼으로 통째로 가져갈 수 있다.
   void _showLaneCreationIssue(String issue) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(issue),
-        backgroundColor: const Color(0xFFDC2626),
-        // 수치가 들어가 문장이 길어졌다. 기본 4초로는 읽기 전에 사라진다.
-        duration: const Duration(seconds: 8),
-        showCloseIcon: true,
+    unawaited(
+      showWaypointErrorDialog(
+        context,
+        title: 'Waypoint · Lane 오류',
+        message: issue,
       ),
     );
   }
@@ -10449,6 +10453,133 @@ class _PageHeading extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// Waypoint를 찍다 생긴 오류를 복사·크기 조절이 되는 팝업으로 보여 준다.
+Future<void> showWaypointErrorDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+}) => showDialog<void>(
+  context: context,
+  builder: (_) => _CopyableErrorDialog(title: title, message: message),
+);
+
+/// 본문을 복사할 수 있고 크기를 조절할 수 있는 오류 팝업.
+///
+/// 오류 문구에 좌표·거리·축척 같은 수치가 들어가면 길어진다. 스낵바로는 다
+/// 읽기 전에 사라지고 옮겨 적을 수도 없어서, 닫을 때까지 남고 통째로 복사할 수
+/// 있는 팝업으로 보여 준다. 문구가 길면 오른쪽 아래 모서리를 끌어 넓힌다.
+class _CopyableErrorDialog extends StatefulWidget {
+  const _CopyableErrorDialog({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  State<_CopyableErrorDialog> createState() => _CopyableErrorDialogState();
+}
+
+class _CopyableErrorDialogState extends State<_CopyableErrorDialog> {
+  static const double _minWidth = 320;
+  static const double _minHeight = 140;
+
+  double _width = 520;
+  double _height = 240;
+
+  @override
+  Widget build(BuildContext context) {
+    final screen = MediaQuery.of(context).size;
+    // 팝업이 화면을 넘어가면 끌어서 되돌릴 수도 없게 된다.
+    final maxWidth = math.max(_minWidth, screen.width - 120);
+    final maxHeight = math.max(_minHeight, screen.height - 220);
+    final width = _width.clamp(_minWidth, maxWidth);
+    final height = _height.clamp(_minHeight, maxHeight);
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.error_outline, color: Color(0xFFDC2626)),
+          const SizedBox(width: 10),
+          Expanded(child: Text(widget.title)),
+        ],
+      ),
+      content: SizedBox(
+        width: width,
+        height: height,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFFECACA)),
+                ),
+                child: Scrollbar(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 26),
+                    child: SelectableText(
+                      widget.message,
+                      style: const TextStyle(
+                        color: Color(0xFF7F1D1D),
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeDownRight,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanUpdate: (details) => setState(() {
+                    _width = (width + details.delta.dx).clamp(
+                      _minWidth,
+                      maxWidth,
+                    );
+                    _height = (height + details.delta.dy).clamp(
+                      _minHeight,
+                      maxHeight,
+                    );
+                  }),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: Icon(
+                      Icons.open_in_full,
+                      size: 15,
+                      color: Color(0xFFB91C1C),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: widget.message));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('오류 내용을 클립보드에 복사했습니다.')),
+            );
+          },
+          icon: const Icon(Icons.content_copy_outlined, size: 18),
+          label: const Text('복사'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('닫기'),
+        ),
+      ],
+    );
+  }
 }
 
 class _StageBar extends StatelessWidget {
