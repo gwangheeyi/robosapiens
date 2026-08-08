@@ -11,6 +11,7 @@
 - [식품 주문 · Pinky · OMX-AI 연동 설계](docs/FOOD_ORDER_PINKY_OMX_WORKFLOW.md)
 - [ROS 관제 시스템 Waypoint 아키텍처 매핑](docs/ROS_CONTROL_WAYPOINT_ARCHITECTURE.md)
 - [Waypoint·Lane 혼합형 자동 경로 지정 가이드](docs/HYBRID_ROUTE_AUTO_PLANNING.md)
+- [Pinky 가상 로봇 · Fleet Adapter 연동](docs/PINKY_FLEET_INTEGRATION.md)
 
 ## 실행
 
@@ -42,3 +43,15 @@ flutter run -d linux
 
 웹 빌드에서는 맵 편집과 YAML 내보내기는 가능하지만 운영체제 프로세스를
 실행할 수 없으므로 실제 배포는 지원하지 않습니다.
+
+## 팝업
+
+모든 팝업은 위쪽 손잡이를 끌어 옮길 수 있습니다. 팝업이 화면 가운데 고정되면
+그 아래의 지도나 목록을 보면서 고칠 수 없기 때문입니다.
+
+오류 팝업은 본문을 끌어 선택하거나 `복사`로 전문을 가져갈 수 있고, 오른쪽 아래
+모서리를 끌어 크기를 바꿀 수 있습니다. 진단 문구에 좌표·거리·축척 같은 수치가
+들어가 길어지기 때문입니다.
+
+새 팝업은 `lib/movable_dialog.dart`의 `showMovableDialog`로 엽니다. `showDialog`와
+인자가 같습니다.
