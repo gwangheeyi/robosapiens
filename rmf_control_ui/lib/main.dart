@@ -6176,6 +6176,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
         generatedAt: now,
       ),
       MapProjectFile(
+        fileName: '${mapName}_gz_bridge.yaml',
+        kind: 'bridge',
+        description:
+            'Gazebo 와 ROS 사이의 토픽 다리. 로봇마다 /<로봇>/odom · cmd_vel · '
+            'scan 을 절대 이름으로 적어 여러 대를 띄워도 겹치지 않는다. '
+            'clock 과 tf 는 월드에 하나뿐이라 로봇별로 나누지 않는다.',
+        content: buildProjectGzBridgeYaml(
+          mapName: mapName,
+          robots: _fleetRobots,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
         fileName: 'run_$mapName.sh',
         kind: 'script',
         description:

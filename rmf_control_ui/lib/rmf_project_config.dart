@@ -386,10 +386,118 @@ String buildProjectLaunchXml({
   return buffer.toString();
 }
 
+/// Gazebo 와 ROS 사이의 토픽 다리 설정.
+///
+/// 벤더의 `pinky_bridge.yaml` 은 이름이 상대 경로(`odom`, `cmd_vel`)라서 로봇이
+/// 하나일 때만 맞는다. 여러 대를 띄우면 전부 같은 `/odom` 으로 겹친다.
+///
+/// 그래서 프로젝트마다 **양쪽 다 절대 이름**으로 새로 만든다. 네임스페이스
+/// 해석 규칙에 기대지 않으므로 어긋날 여지가 없다.
+///
+/// `clock` 과 `tf` 는 월드에 하나뿐이라 로봇별로 나누지 않는다. 프레임 이름은
+/// `frame_prefix` 로 이미 갈라져 있어 `/tf` 를 함께 써도 섞이지 않는다.
+String buildProjectGzBridgeYaml({
+  required String mapName,
+  required List<RmfProjectRobot> robots,
+}) {
+  void entry(
+    StringBuffer out, {
+    required String ros,
+    required String gz,
+    required String rosType,
+    required String gzType,
+    required String direction,
+  }) {
+    out
+      ..writeln('- ros_topic_name: "$ros"')
+      ..writeln('  gz_topic_name: "$gz"')
+      ..writeln('  ros_type_name: "$rosType"')
+      ..writeln('  gz_type_name: "$gzType"')
+      ..writeln('  direction: $direction')
+      ..writeln();
+  }
+
+  final buffer = StringBuffer()
+    ..writeln('# $mapName 프로젝트의 ros_gz_bridge 설정.')
+    ..writeln('# rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('#')
+    ..writeln('# 이름을 양쪽 다 절대 경로로 적는다. 로봇이 여러 대일 때')
+    ..writeln('# 상대 이름을 쓰면 전부 같은 토픽으로 겹친다.')
+    ..writeln();
+  entry(
+    buffer,
+    ros: '/clock',
+    gz: '/clock',
+    rosType: 'rosgraph_msgs/msg/Clock',
+    gzType: 'gz.msgs.Clock',
+    direction: 'GZ_TO_ROS',
+  );
+  entry(
+    buffer,
+    ros: '/tf',
+    gz: '/tf',
+    rosType: 'tf2_msgs/msg/TFMessage',
+    gzType: 'gz.msgs.Pose_V',
+    direction: 'GZ_TO_ROS',
+  );
+  if (robots.isEmpty) {
+    buffer.writeln('# 등록된 로봇이 없다. RMF 설정에서 추가한다.');
+  }
+  for (final robot in robots) {
+    final ns = '/${robot.gzName}';
+    buffer.writeln('# ${robot.robotId} · ${robot.displayName}');
+    entry(
+      buffer,
+      ros: '$ns/odom',
+      gz: '$ns/odom',
+      rosType: 'nav_msgs/msg/Odometry',
+      gzType: 'gz.msgs.Odometry',
+      direction: 'GZ_TO_ROS',
+    );
+    entry(
+      buffer,
+      ros: '$ns/cmd_vel',
+      gz: '$ns/cmd_vel',
+      rosType: 'geometry_msgs/msg/Twist',
+      gzType: 'gz.msgs.Twist',
+      direction: 'ROS_TO_GZ',
+    );
+    entry(
+      buffer,
+      ros: '$ns/scan',
+      gz: '$ns/scan',
+      rosType: 'sensor_msgs/msg/LaserScan',
+      gzType: 'gz.msgs.LaserScan',
+      direction: 'GZ_TO_ROS',
+    );
+    entry(
+      buffer,
+      ros: '$ns/joint_states',
+      gz: '$ns/joint_states',
+      rosType: 'sensor_msgs/msg/JointState',
+      gzType: 'gz.msgs.Model',
+      direction: 'GZ_TO_ROS',
+    );
+    entry(
+      buffer,
+      ros: '$ns/camera/camera_info',
+      gz: '$ns/camera/camera_info',
+      rosType: 'sensor_msgs/msg/CameraInfo',
+      gzType: 'gz.msgs.CameraInfo',
+      direction: 'GZ_TO_ROS',
+    );
+  }
+  return buffer.toString();
+}
+
 /// Gazebo 에 이 프로젝트의 월드와 로봇을 올리는 bringup launch.
 ///
 /// 로봇마다 네임스페이스를 나눈다. 그래야 `/pinky_01/odom` 처럼 로봇별 토픽이
 /// 갈리고, fleet adapter 가 어느 로봇의 위치인지 구분할 수 있다.
+///
+/// 네임스페이스는 `upload_robot.launch.py` 의 인자로만 넘긴다. `<group>` 에
+/// `push-ros-namespace` 를 함께 걸면 `/pinky_01/pinky_01/...` 로 두 번 겹쳐,
+/// `create` 가 기다리는 `robot_description` 이 영영 오지 않는다.
 String buildProjectBringupXml({
   required String mapName,
   required List<RmfProjectRobot> robots,
@@ -408,6 +516,10 @@ String buildProjectBringupXml({
     ..writeln('  <arg name="headless" default="true"/>')
     ..writeln('  <arg name="map_dir" default="$mapDirectory"/>')
     ..writeln('  <arg name="world" default="\$(var map_dir)/$mapName.world"/>')
+    ..writeln(
+      '  <arg name="bridge_params" '
+      'default="\$(var map_dir)/${mapName}_gz_bridge.yaml"/>',
+    )
     ..writeln('')
     ..writeln('  <set_env name="GZ_SIM_RESOURCE_PATH"')
     ..writeln(
@@ -443,11 +555,13 @@ String buildProjectBringupXml({
       ..writeln('')
       ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')
       ..writeln('  <group>')
-      ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
       ..writeln(
         '    <include file="\$(find-pkg-share pinky_description)'
         '/launch/upload_robot.launch.py">',
       )
+      // 이 인자 하나가 세 가지를 정한다: 노드 네임스페이스, URDF 링크·프레임
+      // 접두사, 그리고 Gazebo 플러그인이 쓸 토픽 접두사. push-ros-namespace 를
+      // 겹쳐 걸면 첫 번째만 두 배가 되어 셋이 어긋난다.
       ..writeln('      <arg name="namespace" value="${robot.gzName}"/>')
       ..writeln('      <arg name="use_sim_time" value="True"/>')
       ..writeln('      <arg name="is_sim" value="True"/>')
@@ -455,21 +569,24 @@ String buildProjectBringupXml({
       ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
       ..writeln(
         '          args="-name ${robot.gzName} '
-        '-topic robot_description '
+        '-topic /${robot.gzName}/robot_description '
         '-x $x -y $y -z 0.1 '
         '-Y ${robot.spawnHeading.toStringAsFixed(3)}">',
       )
       ..writeln('      <param name="use_sim_time" value="True"/>')
       ..writeln('    </node>')
-      ..writeln('    <node pkg="ros_gz_bridge" exec="parameter_bridge"')
-      ..writeln('          output="screen"')
-      ..writeln(
-        '          args="--ros-args -p config_file:='
-        '\$(find-pkg-share pinky_gz_sim)/params/pinky_bridge.yaml"/>',
-      )
       ..writeln('  </group>');
   }
-  buffer.writeln('</launch>');
+  buffer
+    ..writeln('')
+    ..writeln('  <!-- 다리는 하나로 묶는다. 설정에 이름이 절대 경로로 적혀')
+    ..writeln('       있어 로봇이 몇 대든 겹치지 않는다. -->')
+    ..writeln('  <node pkg="ros_gz_bridge" exec="parameter_bridge"')
+    ..writeln('        name="gz_bridge" output="screen"')
+    ..writeln(
+      '        args="--ros-args -p config_file:=\$(var bridge_params)"/>',
+    )
+    ..writeln('</launch>');
   return buffer.toString();
 }
 

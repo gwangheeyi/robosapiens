@@ -162,7 +162,8 @@ ros2 topic echo /odom --once --field pose.pose.position.x
 - 로봇이 1대입니다. `robo_pinky/src/robo_pinky_sim/config/fleet.yaml`에 정의된
   PK-01, PK-02, PK-03을 각각 네임스페이스로 띄워야 합니다.
 
-두 가지 모두 3단계에서 통합 launch를 만들며 함께 처리합니다.
+여러 대 띄우기는 6.3.2~6.3.4에서 해결하고 실제로 검증했습니다. 배포한
+`*.world`를 쓰는 것은 생성된 bringup에 들어가 있으나 아직 돌려보지 않았습니다.
 
 ## 6. RMF 설정은 프로젝트마다 만들어진다
 
@@ -208,6 +209,7 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
 | `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
 | `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나눔 |
+| `<맵이름>_gz_bridge.yaml` | `bridge` | Gazebo↔ROS 토픽 다리. 로봇별 토픽을 절대 이름으로 나눔 |
 | `run_<맵이름>.sh` | `script` | 전체 실행. Gazebo를 먼저 띄운 뒤 Open-RMF를 올림 |
 | `stop_<맵이름>.sh` | `script` | 이 프로젝트로 띄운 프로세스만 정리 |
 
@@ -233,6 +235,116 @@ launch는 경로를 전부 이 프로젝트 것으로 박습니다. 하나라도
 <arg name="config_file" value="$(var map_dir)/gwanghee_pinky_config.yaml"/>
 <arg name="nav_graph_file" value="$(var map_dir)/nav_graphs/0.yaml"/>
 ```
+
+### 6.3.1 스폰되는 로봇의 정체
+
+Pinky에는 **Gazebo용 SDF 모델이 없습니다.** `pinky_gz_sim/models/`에 있는 것은
+선반과 매니퓰레이터 메시뿐입니다. 로봇 본체는 xacro로 URDF를 만들어
+`robot_description` 토픽에 올린 뒤 그 토픽에서 스폰합니다.
+
+```
+robot.urdf.xacro          ← 진입점 (robot name="pinky")
+ └ pinky.urdf.xacro       ← 링크·조인트·메시 (실물과 공용)
+    └ pinky_gz.urdf.xacro ← is_sim:=True 일 때만 붙는 Gazebo 매크로
+```
+
+```
+ros2 run ros_gz_sim create -name pinky_01 -topic /pinky_01/robot_description ...
+```
+
+메시에서 직접 잰 실체입니다.
+
+| 항목 | 값 |
+|---|---|
+| 구동 | 2륜 차동구동 + 캐스터 1개 |
+| 본체 크기 | 113 × 88 × 107 mm (base_link 충돌 메시) |
+| 바퀴 간격 / 반경 | 96.1 mm / 28 mm |
+| 총 질량 | 약 1.4 kg |
+| 속도·가속 한계 | ±1.0 m/s, ±2.0 m/s² |
+| LiDAR | RPLidar C1 — 640샘플, 360°, 0.05~12 m, 10 Hz |
+| 카메라 | 전면 1280×720, 30 Hz |
+| IMU | 100 Hz |
+| 특수 | 램프 제어 플러그인 (`libgz-sim-lamp-control-system.so`) |
+
+폭이 11 cm인 손바닥만 한 로봇입니다. 맵의 로봇 안전 기준을 0.2 m로 두면
+`footprint 0.1`이 되어 실측보다 넉넉합니다.
+
+**`is_sim:=True`가 빠지면 안 됩니다.** 그러면 `insert_gz_sim` 매크로가 통째로
+빠져 diff drive도 LiDAR도 없는 껍데기가 스폰됩니다. 보이기는 하는데 `cmd_vel`을
+줘도 꿈쩍하지 않습니다.
+
+### 6.3.2 네임스페이스는 한 번만 건다
+
+`upload_robot.launch.py`의 `namespace` 인자 **하나**가 세 가지를 함께 정합니다.
+
+1. 노드 네임스페이스 (`/pinky_01/robot_state_publisher`)
+2. URDF 링크·프레임 접두사 (`pinky_01/base_link`)
+3. Gazebo 플러그인의 토픽 접두사 (`/pinky_01/odom`)
+
+여기에 `<push-ros-namespace>`를 겹쳐 걸면 **1번만 두 배**가 되어 셋이 어긋납니다.
+
+```
+/pinky_01/pinky_01/robot_state_publisher   ← 노드는 두 겹
+/pinky_01/robot_description                ← create 가 기다리는 곳
+```
+
+`create`가 기다리는 `robot_description`이 영영 오지 않아 **로봇이 스폰되지 않고
+멈춰 있습니다.** 그래서 bringup은 `push-ros-namespace`를 쓰지 않고 launch 인자로만
+넘기며, `create`의 `-topic`도 절대 이름으로 적습니다.
+
+### 6.3.3 토픽 다리는 프로젝트마다 새로 만든다
+
+벤더의 `pinky_gz_sim/params/pinky_bridge.yaml`은 이름이 상대 경로(`odom`,
+`cmd_vel`)라서 **로봇이 하나일 때만** 맞습니다. 여러 대를 띄우면 전부 같은
+`/odom`으로 겹칩니다.
+
+그래서 프로젝트마다 양쪽 다 절대 이름으로 새로 만듭니다. 네임스페이스 해석
+규칙에 기대지 않으므로 어긋날 여지가 없습니다.
+
+```yaml
+- ros_topic_name: "/pinky_01/odom"
+  gz_topic_name: "/pinky_01/odom"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+```
+
+`clock`과 `tf`는 월드에 하나뿐이라 로봇별로 나누지 않습니다. 프레임 이름은
+`frame_prefix`로 이미 갈라져 있어 `/tf`를 함께 써도 섞이지 않습니다.
+
+다리 노드도 **하나만** 띄웁니다. 로봇마다 띄우면 같은 토픽에 다리를 여러 번
+놓게 됩니다.
+
+### 6.3.4 검증 — 실제로 두 대를 띄워 확인
+
+돌고 있는 `pinky_factory` 월드에 생성된 bringup으로 두 대를 붙였습니다.
+
+```
+=== ROS 노드 ===              ← 두 겹이 아니다
+/pinky_01/robot_state_publisher
+/pinky_02/robot_state_publisher
+/gz_bridge                    ← 다리는 하나
+
+=== gz 모델 ===
+    - pinky_01
+    - pinky_02
+
+=== ROS 토픽 ===
+/pinky_01/odom  /pinky_01/cmd_vel  /pinky_01/scan  …
+/pinky_02/odom  /pinky_02/cmd_vel  /pinky_02/scan  …
+```
+
+`pinky_01`에만 `cmd_vel`을 주고 둘의 위치를 비교했습니다.
+
+```
+pinky_01  0.0284 -> 0.0545   이동 0.0261 m
+pinky_02  -0.0000 -> -0.0000  이동 -0.0000 m
+```
+
+**한 대만 움직입니다.** 토픽이 겹치지 않는다는 뜻입니다.
+
+이동 거리가 작은 것은 이 PC에서 로봇 3대 + GUI를 함께 돌려 real-time factor가
+**0.006**까지 떨어졌기 때문입니다. 실제 운영에서는 `headless:=true`로 띄우십시오.
 
 ### 6.4 디스크로 내보내기
 
@@ -407,8 +519,9 @@ building map server·supervisor·dispatcher)와 이 프로젝트의 fleet adapte
 - `디스크로 내보내기`를 한 번 눌러야 파일이 생깁니다
 - 이전 세션의 RMF 노드가 남아 있으면 먼저 정리해야 합니다(7절)
 
-Gazebo는 아직 이 launch에 없습니다. 지금은 `pinky_gz_sim`을 따로 띄웁니다.
-로봇 3대를 각각 네임스페이스로 올리는 것과 배포한 `*.world`를 쓰는 것이 남았습니다.
+Gazebo는 `<맵이름>_bringup.launch.xml`이 맡고 `run_<맵이름>.sh`가 둘을 순서대로
+띄웁니다. 로봇을 네임스페이스로 나눠 여러 대 올리는 것은 실제로 검증했습니다
+(6.3.4). 배포한 `*.world`를 쓰는 것은 아직 돌려보지 않았습니다.
 
 ### 8.3 앱과 rmf-web 연결 (없음)
 
