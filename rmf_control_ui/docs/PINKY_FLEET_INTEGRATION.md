@@ -392,6 +392,9 @@ ros2 launch rmf_maps/gwanghee/robots/PK-01/spawn.launch.xml
 모든 파일은 같은 등록 정보에서 만들어지므로 서로 어긋나지 않습니다. 손으로
 고치면 다음 저장 때 덮어써집니다 — 앱의 `로봇 등록`에서 고칩니다.
 
+각 파일의 내용과 등록 정보가 흘러가는 경로는
+[로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md)에 따로 정리했습니다.
+
 ### 6.4 디스크로 내보내기
 
 로봇 디렉터리도 함께 만들어집니다. 파일 이름에 `..`이 섞이면 배포 디렉터리
@@ -699,6 +702,8 @@ rmf-web WebSocket ws://127.0.0.1:8000/_internal
 
 ## 9. 관련 문서
 
+- [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) — 등록 정보가 어떤 파일로
+  흘러가는지, `robots/<로봇 ID>/` 에 무엇이 들어 있는지
 - [맵 작성 및 배포 가이드](MAP_AUTHORING_AND_DEPLOYMENT.md) — 맵을 만들고
   `nav_graphs/0.yaml`을 얻는 과정
 - [앱 전용 Mock 로봇 가이드](APP_MOCK_ROBOTS.md) — 지금의 Mock 주행 범위
