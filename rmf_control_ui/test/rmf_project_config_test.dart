@@ -131,11 +131,7 @@ void main() {
 
   group('Gazebo bringup', () {
     test('네임스페이스를 두 번 걸지 않는다', () {
-      final xml = buildProjectBringupXml(
-        mapName: 'gwanghee',
-        robots: robots,
-        mapDirectory: '/maps/gwanghee',
-      );
+      final xml = buildRobotSpawnLaunchXml(robots.first);
       // push-ros-namespace 와 launch 인자를 함께 쓰면 노드가
       // /pinky_01/pinky_01/... 에 뜬다. 그러면 create 가 기다리는
       // robot_description 이 영영 오지 않아 로봇이 스폰되지 않는다.
@@ -144,26 +140,56 @@ void main() {
     });
 
     test('create 가 그 로봇의 robot_description 을 절대 이름으로 가리킨다', () {
+      for (final robot in robots) {
+        final xml = buildRobotSpawnLaunchXml(robot);
+        expect(xml, contains('-topic /${robot.gzName}/robot_description'));
+        // 상대 이름이면 루트의 /robot_description 을 기다린다.
+        expect(xml, isNot(contains('-topic robot_description')));
+      }
+    });
+
+    test('로봇마다 제 디렉터리에서 불러온다', () {
+      // 로봇 하나가 디렉터리 하나다. 한 대를 빼거나 옮길 때 그 디렉터리만
+      // 보면 된다.
       final xml = buildProjectBringupXml(
         mapName: 'gwanghee',
         robots: robots,
         mapDirectory: '/maps/gwanghee',
       );
-      expect(xml, contains('-topic /pinky_01/robot_description'));
-      expect(xml, contains('-topic /pinky_02/robot_description'));
-      // 상대 이름이면 루트의 /robot_description 을 기다린다.
-      expect(xml, isNot(contains('-topic robot_description')));
+      expect(robotDirectoryName(robots.first), 'robots/PK-01');
+      expect(
+        xml,
+        contains(r'<include file="$(var map_dir)/robots/PK-01'
+            '/spawn.launch.xml"/>'),
+      );
+      expect(
+        xml,
+        contains(r'<include file="$(var map_dir)/robots/PK-02'
+            '/spawn.launch.xml"/>'),
+      );
+      // 로봇 설정이 이 파일에 다시 적히면 두 곳이 어긋날 수 있다.
+      expect(xml, isNot(contains('upload_robot.launch.py')));
+    });
+
+    test('로봇 ID 에 이상한 글자가 있어도 디렉터리 밖으로 나가지 않는다', () {
+      const sneaky = RmfProjectRobot(
+        robotId: '../../etc/passwd',
+        displayName: 'x',
+        model: 'PINKY-GZ',
+        gzName: 'pinky_x',
+        zones: [],
+      );
+      expect(robotDirectoryName(sneaky), isNot(contains('..')));
+      expect(robotDirectoryName(sneaky), startsWith('robots/'));
     });
 
     test('Gazebo 플러그인이 켜지도록 is_sim 을 넘긴다', () {
       // is_sim 이 빠지면 diff drive 도 LiDAR 도 없는 껍데기가 스폰된다.
       // 보이기는 하는데 cmd_vel 을 줘도 움직이지 않는다.
-      final xml = buildProjectBringupXml(
-        mapName: 'gwanghee',
-        robots: robots,
-        mapDirectory: '/maps/gwanghee',
+      expect(
+        buildRobotSpawnLaunchXml(robots.first),
+        contains('<arg name="is_sim" value="True"/>'),
       );
-      expect(xml, contains('<arg name="is_sim" value="True"/>'));
     });
 
     test('다리는 이 프로젝트 설정으로 한 번만 띄운다', () {
@@ -295,11 +321,7 @@ void main() {
     });
 
     test('bringup 은 open_manipulator 쪽 설명을 쓴다', () {
-      final xml = buildProjectBringupXml(
-        mapName: 'gwanghee',
-        robots: mixed,
-        mapDirectory: '/maps/gwanghee',
-      );
+      final xml = buildRobotSpawnLaunchXml(workcell);
       // pinky_description 의 xacro 로는 팔이 나오지 않는다.
       expect(
         xml,
@@ -314,26 +336,25 @@ void main() {
       expect(xml, contains('args="gripper_controller"'));
       expect(xml, contains('args="joint_state_broadcaster"'));
       // 이동 로봇 쪽은 그대로다.
-      expect(xml, contains('-topic /pinky_01/robot_description'));
+      expect(
+        buildRobotSpawnLaunchXml(robots.first),
+        contains('-topic /pinky_01/robot_description'),
+      );
     });
 
     test('그리퍼가 없는 모델에는 그리퍼 컨트롤러를 올리지 않는다', () {
       // omy_3m 에는 그리퍼가 없다. 없는 컨트롤러를 올리면 spawner 가 기다리다
       // 실패하고, 팔까지 함께 안 움직이는 것처럼 보인다.
-      final xml = buildProjectBringupXml(
-        mapName: 'gwanghee',
-        robots: const [
-          RmfProjectRobot(
-            robotId: 'OMY-01',
-            displayName: '팔 1호',
-            model: 'omy_3m',
-            kind: RmfRobotKind.workcell,
-            gzName: 'omy_01',
-            zones: [],
-            chargerWaypoint: 'OMX1',
-          ),
-        ],
-        mapDirectory: '/maps/gwanghee',
+      final xml = buildRobotSpawnLaunchXml(
+        const RmfProjectRobot(
+          robotId: 'OMY-01',
+          displayName: '팔 1호',
+          model: 'omy_3m',
+          kind: RmfRobotKind.workcell,
+          gzName: 'omy_01',
+          zones: [],
+          chargerWaypoint: 'OMX1',
+        ),
       );
       expect(xml, contains('args="arm_controller"'));
       expect(xml, contains('args="joint_state_broadcaster"'));
@@ -390,6 +411,67 @@ void main() {
         'gzName': 'pinky_09',
       });
       expect(restored.kind, RmfRobotKind.mobile);
+    });
+  });
+
+  group('로봇별 디렉터리', () {
+    const workcell = RmfProjectRobot(
+      robotId: 'OMX-01',
+      displayName: '매니퓰레이터 1호',
+      model: 'open_manipulator_x',
+      kind: RmfRobotKind.workcell,
+      gzName: 'omx_01',
+      zones: [],
+      chargerWaypoint: 'OMX1',
+      spawnX: 5,
+      spawnY: 2,
+    );
+
+    test('등록 정보를 사람이 읽을 수 있게 남긴다', () {
+      final yaml = buildRobotInfoYaml(robots.first);
+      expect(yaml, contains('id: PK-01'));
+      expect(yaml, contains('kind: mobile # 이동 로봇'));
+      expect(yaml, contains('gz_name: pinky_01'));
+      expect(yaml, contains('charger_waypoint: 충전1'));
+      expect(yaml, contains('spawn_x: 12.500'));
+    });
+
+    test('설치 로봇은 충전이 아니라 설비 자리라고 적는다', () {
+      final yaml = buildRobotInfoYaml(workcell);
+      expect(yaml, contains('kind: workcell # 설치 로봇'));
+      expect(yaml, contains('station_waypoint: OMX1'));
+      expect(yaml, isNot(contains('charger_waypoint')));
+    });
+
+    test('한 대만 담긴 다리 설정을 남긴다', () {
+      final yaml = buildRobotBridgeYaml(robots.first);
+      expect(yaml, contains('/pinky_01/odom'));
+      // 다른 로봇 것이 섞이면 이 디렉터리만 봐서는 알 수 없게 된다.
+      expect(yaml, isNot(contains('pinky_02')));
+      expect(yaml, contains('한 대의 토픽 목록'));
+    });
+
+    test('설명이 어디서 고치는지 알려 준다', () {
+      final readme = buildRobotReadme(robots.first, 'gwanghee');
+      expect(readme, contains('# PK-01 · 핑키 1호'));
+      expect(readme, contains('`/pinky_01`'));
+      // 여기 파일을 손으로 고치면 다음 저장 때 사라진다.
+      expect(readme, contains('손으로 고치지 마세요'));
+      expect(readme, contains('로봇 등록'));
+    });
+
+    test('설치 로봇 설명에는 올리는 컨트롤러가 적힌다', () {
+      final readme = buildRobotReadme(workcell, 'gwanghee');
+      expect(readme, contains('workcell'));
+      expect(readme, contains('`arm_controller`'));
+      expect(readme, contains('`gripper_controller`'));
+    });
+
+    test('로봇마다 디렉터리가 갈린다', () {
+      final names = {
+        for (final robot in [...robots, workcell]) robotDirectoryName(robot),
+      };
+      expect(names, {'robots/PK-01', 'robots/PK-02', 'robots/OMX-01'});
     });
   });
 

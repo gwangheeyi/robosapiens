@@ -210,6 +210,7 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
 | `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나누고, 종류에 따라 pinky/open_manipulator 설명을 씀 |
 | `<맵이름>_gz_bridge.yaml` | `bridge` | Gazebo↔ROS 토픽 다리. 로봇별 토픽을 절대 이름으로 나눔 |
+| `robots/<로봇 ID>/…` | `robot` | 로봇 한 대의 등록 정보·spawn launch·토픽·설명 (6.3.5) |
 | `run_<맵이름>.sh` | `script` | 전체 실행. Gazebo를 먼저 띄운 뒤 Open-RMF를 올림 |
 | `stop_<맵이름>.sh` | `script` | 이 프로젝트로 띄운 프로세스만 정리 |
 
@@ -346,7 +347,55 @@ pinky_02  -0.0000 -> -0.0000  이동 -0.0000 m
 이동 거리가 작은 것은 이 PC에서 로봇 3대 + GUI를 함께 돌려 real-time factor가
 **0.006**까지 떨어졌기 때문입니다. 실제 운영에서는 `headless:=true`로 띄우십시오.
 
+### 6.3.5 로봇 하나가 디렉터리 하나
+
+로봇 설정을 한 파일에 모아 두면 로봇이 늘수록 어느 줄이 누구 것인지 찾기
+어렵습니다. 그래서 **로봇마다 제 디렉터리**를 둡니다.
+
+```
+rmf_maps/gwanghee/
+├── gwanghee.building.yaml
+├── gwanghee_bringup.launch.xml       ← 아래 spawn.launch.xml 들을 include
+├── gwanghee_gz_bridge.yaml           ← 실행에 쓰는 통합 다리 설정
+├── gwanghee_pinky_config.yaml
+├── run_gwanghee.sh / stop_gwanghee.sh
+└── robots/
+    ├── PK-01/
+    │   ├── robot.yaml            이 로봇의 등록 정보
+    │   ├── spawn.launch.xml      이 로봇만 Gazebo에 올리는 launch
+    │   ├── bridge.yaml           이 로봇이 주고받는 토픽
+    │   └── README.md             무엇이고 어디서 고치는지
+    └── OMX-01/
+        └── …
+```
+
+**한 대를 빼거나 옮길 때 그 디렉터리만 보면 됩니다.**
+
+bringup은 이제 로봇 설정을 직접 적지 않고 불러오기만 합니다.
+
+```xml
+<!-- PK-01 · 핑키 1호 · 이동 로봇 @ 충전1 -->
+<include file="$(var map_dir)/robots/PK-01/spawn.launch.xml"/>
+```
+
+두 곳에 같은 것을 적으면 어긋납니다. 로봇의 spawn 설정은 그 디렉터리에만
+있습니다. **이 로봇만 따로 시험하려면 그 파일 하나만 돌리면 됩니다.**
+
+```bash
+ros2 launch rmf_maps/gwanghee/robots/PK-01/spawn.launch.xml
+```
+
+로봇별 `bridge.yaml`에는 `clock`과 `tf`를 넣지 않았습니다. 월드에 하나뿐이라
+로봇별 파일에 넣어 두면 이것만 보고 돌렸을 때 같은 토픽에 다리를 두 번 놓게
+됩니다. **실행에는 통합 `<맵이름>_gz_bridge.yaml`을 씁니다.**
+
+모든 파일은 같은 등록 정보에서 만들어지므로 서로 어긋나지 않습니다. 손으로
+고치면 다음 저장 때 덮어써집니다 — 앱의 `로봇 등록`에서 고칩니다.
+
 ### 6.4 디스크로 내보내기
+
+로봇 디렉터리도 함께 만들어집니다. 파일 이름에 `..`이 섞이면 배포 디렉터리
+밖에 파일을 쓰게 되므로 막습니다 — 로봇 ID는 사람이 타자로 칩니다.
 
 설정의 원장은 MySQL이지만 **`ros2 launch`는 파일만 읽습니다.** 실행하기 전에
 `RMF 설정` → `설정 파일` 탭 → `디스크로 내보내기`를 한 번 누르세요.

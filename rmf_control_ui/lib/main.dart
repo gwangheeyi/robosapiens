@@ -6370,6 +6370,49 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         generatedAt: now,
       ),
+      // 로봇 하나가 디렉터리 하나다. 한 대를 빼거나 옮길 때 그 디렉터리만
+      // 보면 되고, 파일이 늘어도 어느 것이 누구 것인지 헷갈리지 않는다.
+      for (final robot in _fleetRobots) ...[
+        MapProjectFile(
+          fileName: '${robotDirectoryName(robot)}/robot.yaml',
+          kind: 'robot',
+          description:
+              '${robot.robotId} · ${robot.displayName} 의 등록 정보. '
+              '${robot.kind.label} · ${robot.model} · '
+              '${robot.isMobile ? '충전' : '설비'} 자리 '
+              '${robot.chargerWaypoint ?? '미지정'}.',
+          content: buildRobotInfoYaml(robot),
+          generatedAt: now,
+        ),
+        MapProjectFile(
+          fileName: '${robotDirectoryName(robot)}/spawn.launch.xml',
+          kind: 'robot',
+          description:
+              '${robot.robotId} 한 대만 Gazebo 에 올리는 launch. '
+              '프로젝트 bringup 이 이 파일을 include 한다. '
+              '이 로봇만 따로 시험할 때는 이것만 돌리면 된다.',
+          content: buildRobotSpawnLaunchXml(robot),
+          generatedAt: now,
+        ),
+        MapProjectFile(
+          fileName: '${robotDirectoryName(robot)}/bridge.yaml',
+          kind: 'robot',
+          description:
+              '${robot.robotId} 가 주고받는 토픽. 실행에는 프로젝트 전체를 묶은 '
+              '${mapName}_gz_bridge.yaml 을 쓴다. 이 파일은 이 로봇 몫만 '
+              '따로 보기 위한 것이다.',
+          content: buildRobotBridgeYaml(robot),
+          generatedAt: now,
+        ),
+        MapProjectFile(
+          fileName: '${robotDirectoryName(robot)}/README.md',
+          kind: 'robot',
+          description:
+              '${robot.robotId} 디렉터리 설명. 무엇이고 어디서 고치는지.',
+          content: buildRobotReadme(robot, mapName),
+          generatedAt: now,
+        ),
+      ],
       MapProjectFile(
         fileName: 'run_$mapName.sh',
         kind: 'script',
@@ -16211,6 +16254,8 @@ class _ProjectFilesPageState extends State<_ProjectFilesPage> {
       Color(0xFF15803D),
     ),
     'bringup': ('실행 (Gazebo)', Icons.view_in_ar_outlined, Color(0xFFEA580C)),
+    'bridge': ('토픽 다리', Icons.swap_horiz, Color(0xFF0D9488)),
+    'robot': ('로봇별 설정', Icons.folder_outlined, Color(0xFF9333EA)),
     'script': ('셸 스크립트', Icons.terminal, Color(0xFF334155)),
   };
 

@@ -52,6 +52,22 @@ String safeMapDirectoryName(String mapName) {
   return safe.isEmpty ? 'map' : safe;
 }
 
+/// 저장된 파일 이름을 내보낼 상대 경로로 바꾼다. 나갈 수 없으면 null.
+///
+/// 로봇마다 제 디렉터리를 쓰므로(`robots/PK-01/spawn.launch.xml`) 하위 경로를
+/// 허용해야 한다. 다만 `..` 이 섞이면 배포 디렉터리 밖으로 나가므로 막는다.
+/// 파일 이름은 로봇 ID 에서 만들어지고 로봇 ID 는 사람이 타자로 친다.
+String? safeExportRelativePath(String fileName) {
+  final segments = fileName
+      .split(RegExp(r'[/\\]'))
+      .map((segment) => segment.trim())
+      .where((segment) => segment.isNotEmpty)
+      .toList();
+  if (segments.isEmpty) return null;
+  if (segments.any((segment) => segment == '.' || segment == '..')) return null;
+  return segments.join('/');
+}
+
 /// [files] 를 `rmf_maps/<맵이름>/` 아래에 쓴다.
 ///
 /// 배포 산출물(`nav_graphs/0.yaml`, `*.world`)이 이미 그 디렉터리에 있으므로
@@ -86,10 +102,15 @@ Future<RmfConfigExportResult> exportProjectConfigFiles({
     await target.create(recursive: true);
     final written = <String>[];
     for (final file in files) {
-      // 파일 이름에 경로 구분자가 섞여 들어오면 디렉터리 밖으로 나갈 수 있다.
-      final name = file.fileName.split(RegExp(r'[/\\]')).last;
-      if (name.isEmpty || name == '.' || name == '..') continue;
+      final name = safeExportRelativePath(file.fileName);
+      if (name == null) continue;
       final path = '${target.path}/$name';
+      final separator = name.lastIndexOf('/');
+      if (separator > 0) {
+        await Directory(
+          '${target.path}/${name.substring(0, separator)}',
+        ).create(recursive: true);
+      }
       await File(path).writeAsString(file.content, flush: true);
       // .sh 는 실행 권한이 없으면 그대로 돌릴 수 없다.
       if (file.executable) {

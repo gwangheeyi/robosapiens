@@ -488,6 +488,7 @@ String buildProjectLaunchXml({
 String buildProjectGzBridgeYaml({
   required String mapName,
   required List<RmfProjectRobot> robots,
+  bool includeGlobal = true,
 }) {
   void entry(
     StringBuffer out, {
@@ -513,22 +514,24 @@ String buildProjectGzBridgeYaml({
     ..writeln('# 이름을 양쪽 다 절대 경로로 적는다. 로봇이 여러 대일 때')
     ..writeln('# 상대 이름을 쓰면 전부 같은 토픽으로 겹친다.')
     ..writeln();
-  entry(
-    buffer,
-    ros: '/clock',
-    gz: '/clock',
-    rosType: 'rosgraph_msgs/msg/Clock',
-    gzType: 'gz.msgs.Clock',
-    direction: 'GZ_TO_ROS',
-  );
-  entry(
-    buffer,
-    ros: '/tf',
-    gz: '/tf',
-    rosType: 'tf2_msgs/msg/TFMessage',
-    gzType: 'gz.msgs.Pose_V',
-    direction: 'GZ_TO_ROS',
-  );
+  if (includeGlobal) {
+    entry(
+      buffer,
+      ros: '/clock',
+      gz: '/clock',
+      rosType: 'rosgraph_msgs/msg/Clock',
+      gzType: 'gz.msgs.Clock',
+      direction: 'GZ_TO_ROS',
+    );
+    entry(
+      buffer,
+      ros: '/tf',
+      gz: '/tf',
+      rosType: 'tf2_msgs/msg/TFMessage',
+      gzType: 'gz.msgs.Pose_V',
+      direction: 'GZ_TO_ROS',
+    );
+  }
   if (robots.isEmpty) {
     buffer.writeln('# 등록된 로봇이 없다. RMF 설정에서 추가한다.');
   }
@@ -653,84 +656,22 @@ String buildProjectBringupXml({
       ..writeln('')
       ..writeln('  <!-- 등록된 로봇이 없다. RMF 설정에서 추가한다. -->');
   }
+  // 로봇 하나가 디렉터리 하나다. 여기서는 불러오기만 한다.
+  //
+  // 로봇마다 설정을 제 자리에 두면 한 대를 빼거나 옮길 때 그 디렉터리만
+  // 보면 된다. 이 파일에 다 적어 두면 로봇이 늘수록 어느 줄이 누구 것인지
+  // 찾기 어려워진다.
   for (final robot in robots) {
-    final x = (robot.spawnX ?? 0).toStringAsFixed(3);
-    final y = (robot.spawnY ?? 0).toStringAsFixed(3);
-    if (!robot.isMobile) {
-      // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
-      // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신
-      // ros2_control 컨트롤러를 올린다.
-      buffer
-        ..writeln('')
-        ..writeln(
-          '  <!-- ${robot.robotId} · ${robot.displayName} '
-          '· 설치 로봇 @ ${robot.chargerWaypoint ?? '자리 미지정'} -->',
-        )
-        ..writeln('  <group>')
-        // 여기서는 push-ros-namespace 를 쓴다. 아래 노드들에 네임스페이스를
-        // 따로 걸지 않으므로 두 겹이 되지 않는다. 이동 로봇 쪽은 include 하는
-        // launch 가 이미 namespace 인자를 받으므로 겹쳐 걸면 안 된다.
-        ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
-        ..writeln('    <node pkg="robot_state_publisher"')
-        ..writeln('          exec="robot_state_publisher" output="screen">')
-        ..writeln('      <param name="use_sim_time" value="True"/>')
-        ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
-        ..writeln('      <param name="robot_description"')
-        ..writeln(
-          '             value="\$(command \'xacro '
-          '\$(find-pkg-share open_manipulator_description)'
-          '/urdf/${robot.model}/${robot.model}.urdf.xacro use_sim:=true\')"/>',
-        )
-        ..writeln('    </node>')
-        ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
-        ..writeln(
-          '          args="-name ${robot.gzName} '
-          '-topic robot_description '
-          '-x $x -y $y -z 0.0 '
-          '-Y ${robot.spawnHeading.toStringAsFixed(3)} '
-          '-allow_renaming true">',
-        )
-        ..writeln('      <param name="use_sim_time" value="True"/>')
-        ..writeln('    </node>')
-        ..writeln('    <!-- 팔은 ros2_control 컨트롤러가 움직인다. -->');
-      // 모델마다 컨트롤러가 다르다. 없는 것을 올리면 spawner 가 기다리다
-      // 실패한다 — 예를 들어 omy_3m 에는 그리퍼가 없다.
-      final controllers =
-          openManipulatorControllers[robot.model] ??
-          const ['joint_state_broadcaster', 'arm_controller'];
-      for (final controller in controllers) {
-        buffer
-          ..writeln('    <node pkg="controller_manager" exec="spawner"')
-          ..writeln('          args="$controller" output="screen"/>');
-      }
-      buffer.writeln('  </group>');
-      continue;
-    }
     buffer
       ..writeln('')
-      ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')
-      ..writeln('  <group>')
       ..writeln(
-        '    <include file="\$(find-pkg-share pinky_description)'
-        '/launch/upload_robot.launch.py">',
+        '  <!-- ${robot.robotId} · ${robot.displayName} '
+        '· ${robot.kind.label} @ ${robot.chargerWaypoint ?? '자리 미지정'} -->',
       )
-      // 이 인자 하나가 세 가지를 정한다: 노드 네임스페이스, URDF 링크·프레임
-      // 접두사, 그리고 Gazebo 플러그인이 쓸 토픽 접두사. push-ros-namespace 를
-      // 겹쳐 걸면 첫 번째만 두 배가 되어 셋이 어긋난다.
-      ..writeln('      <arg name="namespace" value="${robot.gzName}"/>')
-      ..writeln('      <arg name="use_sim_time" value="True"/>')
-      ..writeln('      <arg name="is_sim" value="True"/>')
-      ..writeln('    </include>')
-      ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
       ..writeln(
-        '          args="-name ${robot.gzName} '
-        '-topic /${robot.gzName}/robot_description '
-        '-x $x -y $y -z 0.1 '
-        '-Y ${robot.spawnHeading.toStringAsFixed(3)}">',
-      )
-      ..writeln('      <param name="use_sim_time" value="True"/>')
-      ..writeln('    </node>')
-      ..writeln('  </group>');
+        '  <include file="\$(var map_dir)/'
+        '${robotDirectoryName(robot)}/spawn.launch.xml"/>',
+      );
   }
   buffer
     ..writeln('')
@@ -857,3 +798,213 @@ fi
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';
+
+/// 로봇 하나가 쓰는 디렉터리 이름. `robots/<로봇 ID>`.
+///
+/// 로봇마다 제 디렉터리를 두면 한 대를 빼거나 옮길 때 그 디렉터리만 보면 된다.
+/// 파일 이름으로 쓸 수 없는 글자는 걷어낸다 — 로봇 ID 에 슬래시가 들어가면
+/// 엉뚱한 곳에 디렉터리가 생긴다.
+String robotDirectoryName(RmfProjectRobot robot) {
+  final safe = robot.robotId.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+  return 'robots/${safe.isEmpty ? robot.gzName : safe}';
+}
+
+/// 로봇 한 대의 등록 정보. 사람이 읽고 확인하는 용도다.
+String buildRobotInfoYaml(RmfProjectRobot robot) {
+  final buffer = StringBuffer()
+    ..writeln('# ${robot.robotId} · ${robot.displayName}')
+    ..writeln('# rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면')
+    ..writeln('# 다음 저장 때 덮어써진다. 고치려면 앱의 로봇 등록에서 고친다.')
+    ..writeln('id: ${robot.robotId}')
+    ..writeln('name: ${robot.displayName}')
+    ..writeln('kind: ${robot.kind.storageValue} # ${robot.kind.label}')
+    ..writeln('model: ${robot.model}')
+    ..writeln('gz_name: ${robot.gzName} # 토픽 네임스페이스')
+    ..writeln('zones: [${robot.zones.join(', ')}]');
+  if (robot.chargerWaypoint != null) {
+    buffer.writeln(
+      robot.isMobile
+          ? 'charger_waypoint: ${robot.chargerWaypoint} # 충전 자리'
+          : 'station_waypoint: ${robot.chargerWaypoint} # 설비 자리',
+    );
+  }
+  if (robot.spawnX != null && robot.spawnY != null) {
+    buffer
+      ..writeln('spawn_x: ${_n(robot.spawnX!)}')
+      ..writeln('spawn_y: ${_n(robot.spawnY!)}');
+  }
+  buffer.writeln('spawn_heading: ${_n(robot.spawnHeading)}');
+  return buffer.toString();
+}
+
+/// 로봇 한 대만 Gazebo 에 올리는 launch.
+///
+/// 프로젝트 bringup 이 이 파일을 `<include>` 한다. 로봇을 빼려면 등록에서 지우면
+/// 되고, 한 대만 따로 시험하려면 이 파일만 돌려 보면 된다.
+String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
+  final x = (robot.spawnX ?? 0).toStringAsFixed(3);
+  final y = (robot.spawnY ?? 0).toStringAsFixed(3);
+  final heading = robot.spawnHeading.toStringAsFixed(3);
+  final buffer = StringBuffer()
+    ..writeln("<?xml version='1.0' ?>")
+    ..writeln('<!--')
+    ..writeln('  ${robot.robotId} · ${robot.displayName} (${robot.kind.label})')
+    ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('')
+    ..writeln('  이 로봇 한 대만 Gazebo 에 올린다. 프로젝트 bringup 이 이')
+    ..writeln('  파일을 include 한다. 월드는 이미 떠 있다고 본다.')
+    ..writeln('')
+    ..writeln('  혼자 시험하려면:')
+    ..writeln('    ros2 launch <이 파일>')
+    ..writeln('-->')
+    ..writeln('<launch>');
+  if (!robot.isMobile) {
+    // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
+    // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신 ros2_control
+    // 컨트롤러를 올린다.
+    buffer
+      ..writeln('  <group>')
+      // 여기서는 push-ros-namespace 를 쓴다. 아래 노드들에 네임스페이스를 따로
+      // 걸지 않으므로 두 겹이 되지 않는다. 이동 로봇 쪽은 include 하는 launch 가
+      // 이미 namespace 인자를 받으므로 겹쳐 걸면 안 된다.
+      ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+      ..writeln('    <node pkg="robot_state_publisher"')
+      ..writeln('          exec="robot_state_publisher" output="screen">')
+      ..writeln('      <param name="use_sim_time" value="True"/>')
+      ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
+      ..writeln('      <param name="robot_description"')
+      ..writeln(
+        '             value="\$(command \'xacro '
+        '\$(find-pkg-share open_manipulator_description)'
+        '/urdf/${robot.model}/${robot.model}.urdf.xacro use_sim:=true\')"/>',
+      )
+      ..writeln('    </node>')
+      ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
+      ..writeln(
+        '          args="-name ${robot.gzName} '
+        '-topic robot_description '
+        '-x $x -y $y -z 0.0 -Y $heading '
+        '-allow_renaming true">',
+      )
+      ..writeln('      <param name="use_sim_time" value="True"/>')
+      ..writeln('    </node>')
+      ..writeln('    <!-- 팔은 ros2_control 컨트롤러가 움직인다. -->');
+    // 모델마다 컨트롤러가 다르다. 없는 것을 올리면 spawner 가 기다리다
+    // 실패한다 — 예를 들어 omy_3m 에는 그리퍼가 없다.
+    final controllers =
+        openManipulatorControllers[robot.model] ??
+        const ['joint_state_broadcaster', 'arm_controller'];
+    for (final controller in controllers) {
+      buffer
+        ..writeln('    <node pkg="controller_manager" exec="spawner"')
+        ..writeln('          args="$controller" output="screen"/>');
+    }
+    buffer
+      ..writeln('  </group>')
+      ..writeln('</launch>');
+    return buffer.toString();
+  }
+  buffer
+    ..writeln('  <group>')
+    ..writeln(
+      '    <include file="\$(find-pkg-share pinky_description)'
+      '/launch/upload_robot.launch.py">',
+    )
+    // 이 인자 하나가 세 가지를 정한다: 노드 네임스페이스, URDF 링크·프레임
+    // 접두사, 그리고 Gazebo 플러그인이 쓸 토픽 접두사. push-ros-namespace 를
+    // 겹쳐 걸면 첫 번째만 두 배가 되어 셋이 어긋난다.
+    ..writeln('      <arg name="namespace" value="${robot.gzName}"/>')
+    ..writeln('      <arg name="use_sim_time" value="True"/>')
+    ..writeln('      <arg name="is_sim" value="True"/>')
+    ..writeln('    </include>')
+    ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
+    ..writeln(
+      '          args="-name ${robot.gzName} '
+      '-topic /${robot.gzName}/robot_description '
+      '-x $x -y $y -z 0.1 -Y $heading">',
+    )
+    ..writeln('      <param name="use_sim_time" value="True"/>')
+    ..writeln('    </node>')
+    ..writeln('  </group>')
+    ..writeln('</launch>');
+  return buffer.toString();
+}
+
+/// 로봇 한 대의 토픽 다리 설정.
+///
+/// 실행에는 프로젝트 전체를 묶은 `<맵이름>_gz_bridge.yaml` 을 쓴다. 이 파일은
+/// 이 로봇이 무엇을 주고받는지 한자리에서 보기 위한 것이다. 둘 다 같은 등록
+/// 정보에서 만들어지므로 어긋나지 않는다.
+String buildRobotBridgeYaml(RmfProjectRobot robot) =>
+    buildProjectGzBridgeYaml(
+          mapName: robot.robotId,
+          robots: [robot],
+          // clock 과 tf 는 월드에 하나뿐이다. 로봇별 파일에 넣어 두면 이것만
+          // 보고 돌렸을 때 같은 토픽에 다리를 두 번 놓게 된다.
+          includeGlobal: false,
+        )
+        .replaceFirst(
+          '# ${robot.robotId} 프로젝트의 ros_gz_bridge 설정.',
+          '# ${robot.robotId} 한 대의 토픽 목록.',
+        )
+        .replaceFirst(
+          '# rmf_control_ui 가 맵 프로젝트에서 생성했다.',
+          '# 실행에는 프로젝트 전체를 묶은 <맵이름>_gz_bridge.yaml 을 쓴다.\n'
+              '# clock 과 tf 는 월드에 하나뿐이라 여기 넣지 않았다.',
+        );
+
+/// 로봇 디렉터리에 함께 두는 설명.
+String buildRobotReadme(RmfProjectRobot robot, String mapName) {
+  final station = robot.chargerWaypoint ?? '미지정';
+  final buffer = StringBuffer()
+    ..writeln('# ${robot.robotId} · ${robot.displayName}')
+    ..writeln()
+    ..writeln('$mapName 프로젝트의 ${robot.kind.label}입니다.')
+    ..writeln('rmf_control_ui 가 로봇 등록에서 만들었습니다.')
+    ..writeln()
+    ..writeln('| 항목 | 값 |')
+    ..writeln('|---|---|')
+    ..writeln('| 종류 | ${robot.kind.label} |')
+    ..writeln('| 모델 | ${robot.model} |')
+    ..writeln('| Gazebo 이름 | ${robot.gzName} |')
+    ..writeln('| 토픽 네임스페이스 | `/${robot.gzName}` |')
+    ..writeln('| ${robot.isMobile ? '충전' : '설비'} 자리 | $station |');
+  if (robot.isMobile) {
+    buffer.writeln('| 구획 자격 | ${robot.zones.join(', ')} |');
+  }
+  buffer
+    ..writeln()
+    ..writeln('## 파일')
+    ..writeln()
+    ..writeln('| 파일 | 용도 |')
+    ..writeln('|---|---|')
+    ..writeln('| `robot.yaml` | 이 로봇의 등록 정보 |')
+    ..writeln('| `spawn.launch.xml` | 이 로봇만 Gazebo 에 올리는 launch |')
+    ..writeln('| `bridge.yaml` | 이 로봇이 주고받는 토픽 |')
+    ..writeln()
+    ..writeln('프로젝트 bringup 이 `spawn.launch.xml` 을 include 합니다.')
+    ..writeln('이 로봇만 따로 시험하려면 그 파일을 직접 돌리면 됩니다.')
+    ..writeln()
+    ..writeln('## 고치는 곳')
+    ..writeln()
+    ..writeln('여기 파일을 손으로 고치지 마세요. 다음 저장 때 덮어써집니다.')
+    ..writeln('앱의 `로봇` 메뉴 → `로봇 등록`에서 고칩니다.');
+  if (!robot.isMobile) {
+    buffer
+      ..writeln()
+      ..writeln('## 설치 로봇 참고')
+      ..writeln()
+      ..writeln('한자리에 고정되므로 fleet adapter 에 들어가지 않습니다.')
+      ..writeln('배차 대상이 아니라 Open-RMF 에서는 workcell 로 다룹니다.')
+      ..writeln()
+      ..writeln('올리는 컨트롤러:')
+      ..writeln();
+    final controllers =
+        openManipulatorControllers[robot.model] ??
+        const ['joint_state_broadcaster', 'arm_controller'];
+    for (final controller in controllers) {
+      buffer.writeln('- `$controller`');
+    }
+  }
+  return buffer.toString();
+}
