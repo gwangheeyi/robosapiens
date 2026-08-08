@@ -11362,7 +11362,18 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     await _refreshRmfStatus();
   }
 
+  /// 지금 내릴 대상 프로젝트. 확인 창에 그대로 보여 준다.
+  List<String> _stopTargets = const [];
+
   Future<void> _stopRmfBackend() async {
+    final running = await runningBackendProjects();
+    if (!mounted) return;
+    setState(() {
+      _stopTargets = {
+        if (widget.projectName != null) widget.projectName!,
+        ...running,
+      }.toList()..sort();
+    });
     final confirmed = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -11371,9 +11382,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
         content: SizedBox(
           width: 430,
           child: Text(
-            '${widget.projectName == null ? 'office 데모' : '`${widget.projectName}` 프로젝트와 office 데모'}'
-            '의 중지 스크립트를 실행합니다.\n\n'
-            '대상: ${_rmfStatus.nodes.join(', ')}\n\n'
+            '${_stopTargets.isEmpty ? '내릴 프로젝트를 찾지 못했습니다.' : '${_stopTargets.join(', ')} 프로젝트를 내립니다.'}\n\n'
+            '떠 있는 노드: ${_rmfStatus.nodes.join(', ')}\n\n'
             '진행 중인 작업이 있으면 함께 끊깁니다.',
           ),
         ),

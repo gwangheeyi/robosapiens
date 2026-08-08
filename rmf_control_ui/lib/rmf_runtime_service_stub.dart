@@ -11,3 +11,5 @@ Future<RmfRuntimeStatus> probeRmfRuntime() async => const RmfRuntimeStatus(
 
 Future<RmfStopResult> stopRmfBackend({String? mapName}) async =>
     const RmfStopResult(success: false, output: '웹 빌드에서는 백엔드를 내릴 수 없습니다.');
+
+Future<List<String>> runningBackendProjects() async => const [];
