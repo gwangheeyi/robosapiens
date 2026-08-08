@@ -89,10 +89,13 @@ Future<RmfConfigExportResult> exportProjectConfigFiles({
       // 파일 이름에 경로 구분자가 섞여 들어오면 디렉터리 밖으로 나갈 수 있다.
       final name = file.fileName.split(RegExp(r'[/\\]')).last;
       if (name.isEmpty || name == '.' || name == '..') continue;
-      await File(
-        '${target.path}/$name',
-      ).writeAsString(file.content, flush: true);
-      written.add(name);
+      final path = '${target.path}/$name';
+      await File(path).writeAsString(file.content, flush: true);
+      // .sh 는 실행 권한이 없으면 그대로 돌릴 수 없다.
+      if (file.executable) {
+        await Process.run('chmod', ['+x', path]);
+      }
+      written.add(file.executable ? '$name (실행 가능)' : name);
     }
     written.sort();
     return RmfConfigExportResult(

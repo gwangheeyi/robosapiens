@@ -385,3 +385,182 @@ String buildProjectLaunchXml({
     ..writeln('</launch>');
   return buffer.toString();
 }
+
+/// Gazebo 에 이 프로젝트의 월드와 로봇을 올리는 bringup launch.
+///
+/// 로봇마다 네임스페이스를 나눈다. 그래야 `/pinky_01/odom` 처럼 로봇별 토픽이
+/// 갈리고, fleet adapter 가 어느 로봇의 위치인지 구분할 수 있다.
+String buildProjectBringupXml({
+  required String mapName,
+  required List<RmfProjectRobot> robots,
+  required String mapDirectory,
+}) {
+  final buffer = StringBuffer()
+    ..writeln("<?xml version='1.0' ?>")
+    ..writeln('<!--')
+    ..writeln('  $mapName 프로젝트의 Gazebo bringup.')
+    ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('')
+    ..writeln('  월드는 배포 산출물을 쓰고, 로봇은 이 프로젝트에 등록된 것만')
+    ..writeln('  올린다. 로봇마다 네임스페이스를 나눠 토픽을 구분한다.')
+    ..writeln('-->')
+    ..writeln('<launch>')
+    ..writeln('  <arg name="headless" default="true"/>')
+    ..writeln('  <arg name="map_dir" default="$mapDirectory"/>')
+    ..writeln('  <arg name="world" default="\$(var map_dir)/$mapName.world"/>')
+    ..writeln('')
+    ..writeln('  <set_env name="GZ_SIM_RESOURCE_PATH"')
+    ..writeln(
+      '           value="\$(find-pkg-share pinky_description)/../:'
+      '\$(var map_dir)/generated_models:\$(env HOME)/.gazebo/models"/>',
+    )
+    ..writeln('')
+    ..writeln('  <!-- 화면이 없는 환경에서는 headless 로 서버만 띄운다. -->')
+    ..writeln(
+      '  <include file="\$(find-pkg-share ros_gz_sim)'
+      '/launch/gz_sim.launch.py">',
+    )
+    ..writeln('    <arg name="gz_args" value="-r -s -v2 \$(var world)"/>')
+    ..writeln('    <arg name="on_exit_shutdown" value="true"/>')
+    ..writeln('  </include>')
+    ..writeln('  <group unless="\$(var headless)">')
+    ..writeln(
+      '    <include file="\$(find-pkg-share ros_gz_sim)'
+      '/launch/gz_sim.launch.py">',
+    )
+    ..writeln('      <arg name="gz_args" value="-g -v2"/>')
+    ..writeln('    </include>')
+    ..writeln('  </group>');
+  if (robots.isEmpty) {
+    buffer
+      ..writeln('')
+      ..writeln('  <!-- 등록된 로봇이 없다. RMF 설정에서 추가한다. -->');
+  }
+  for (final robot in robots) {
+    final x = (robot.spawnX ?? 0).toStringAsFixed(3);
+    final y = (robot.spawnY ?? 0).toStringAsFixed(3);
+    buffer
+      ..writeln('')
+      ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')
+      ..writeln('  <group>')
+      ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+      ..writeln(
+        '    <include file="\$(find-pkg-share pinky_description)'
+        '/launch/upload_robot.launch.py">',
+      )
+      ..writeln('      <arg name="namespace" value="${robot.gzName}"/>')
+      ..writeln('      <arg name="use_sim_time" value="True"/>')
+      ..writeln('      <arg name="is_sim" value="True"/>')
+      ..writeln('    </include>')
+      ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
+      ..writeln(
+        '          args="-name ${robot.gzName} '
+        '-topic robot_description '
+        '-x $x -y $y -z 0.1 '
+        '-Y ${robot.spawnHeading.toStringAsFixed(3)}">',
+      )
+      ..writeln('      <param name="use_sim_time" value="True"/>')
+      ..writeln('    </node>')
+      ..writeln('    <node pkg="ros_gz_bridge" exec="parameter_bridge"')
+      ..writeln('          output="screen"')
+      ..writeln(
+        '          args="--ros-args -p config_file:='
+        '\$(find-pkg-share pinky_gz_sim)/params/pinky_bridge.yaml"/>',
+      )
+      ..writeln('  </group>');
+  }
+  buffer.writeln('</launch>');
+  return buffer.toString();
+}
+
+/// 프로젝트를 통째로 띄우는 셸 스크립트.
+///
+/// ROS 환경을 읽고 bringup 과 RMF 를 순서대로 띄운다. Gazebo 가 먼저 떠야
+/// `/clock` 이 나오고, 그래야 use_sim_time 을 쓰는 RMF 노드가 시간을 맞춘다.
+String buildProjectRunScript({
+  required String mapName,
+  required String mapDirectory,
+  String rosSetup = '/opt/ros/jazzy/setup.bash',
+  String rmfWorkspace = r'$HOME/rmf_ws',
+  String pinkyWorkspace = r'$HOME/robosapiens/pinky_pro',
+}) =>
+    '''#!/usr/bin/env bash
+# $mapName 프로젝트 실행.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다음 저장 때
+# 덮어써진다.
+#
+# 순서가 중요하다. Gazebo 가 먼저 떠야 /clock 이 나오고, 그래야 use_sim_time 을
+# 쓰는 RMF 노드가 시간을 맞춘다. 반대로 하면 RMF 가 시간이 멈춘 줄 알고 멈춰
+# 있는다.
+set -euo pipefail
+
+MAP_DIR="\${MAP_DIR:-$mapDirectory}"
+ROS_SETUP="\${ROS_SETUP:-$rosSetup}"
+RMF_WS="\${RMF_WS:-$rmfWorkspace}"
+PINKY_WS="\${PINKY_WS:-$pinkyWorkspace}"
+HEADLESS="\${HEADLESS:-true}"
+
+for required in "\$MAP_DIR/$mapName.building.yaml" "\$MAP_DIR/nav_graphs/0.yaml"; do
+  if [[ ! -f "\$required" ]]; then
+    echo "없는 파일: \$required" >&2
+    echo "앱의 맵 관리에서 배포하기와 RMF 설정 내보내기를 먼저 하세요." >&2
+    exit 1
+  fi
+done
+
+set +u
+# shellcheck disable=SC1090
+source "\$ROS_SETUP"
+[[ -f "\$RMF_WS/install/setup.bash" ]] && source "\$RMF_WS/install/setup.bash"
+[[ -f "\$PINKY_WS/install/setup.bash" ]] && source "\$PINKY_WS/install/setup.bash"
+set -u
+
+cleanup() {
+  echo "정리 중..."
+  kill \$(jobs -p) 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+echo "[1/2] Gazebo bringup"
+ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
+sleep 12
+
+echo "[2/2] Open-RMF"
+ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS"
+''';
+
+/// 이 프로젝트로 띄운 것을 내리는 셸 스크립트.
+String buildProjectStopScript({
+  required String mapName,
+  required String mapDirectory,
+}) =>
+    '''#!/usr/bin/env bash
+# $mapName 프로젝트로 띄운 프로세스를 내린다.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다.
+#
+# 이 프로젝트의 launch 경로로 시작한 것만 고른다. 다른 맵으로 띄운 RMF 나
+# 관계없는 Gazebo 는 건드리지 않는다.
+set -euo pipefail
+
+MAP_DIR="\${MAP_DIR:-$mapDirectory}"
+
+stop_matching() {
+  local label="\$1" pattern="\$2"
+  mapfile -t pids < <(pgrep -u "\$(id -u)" -f "\$pattern" 2>/dev/null || true)
+  if ((\${#pids[@]} == 0)); then
+    echo "\$label: 실행 중이 아님"
+    return
+  fi
+  echo "\$label 중지: \${pids[*]}"
+  kill -INT "\${pids[@]}" 2>/dev/null || true
+  sleep 3
+  kill -TERM "\${pids[@]}" 2>/dev/null || true
+}
+
+stop_matching "Open-RMF ($mapName)" "ros2 launch \$MAP_DIR/$mapName.launch.xml"
+stop_matching "Gazebo bringup ($mapName)" \\
+  "ros2 launch \$MAP_DIR/${mapName}_bringup.launch.xml"
+stop_matching "Gazebo 서버 ($mapName)" "gz sim.*\$MAP_DIR/$mapName.world"
+
+echo "$mapName 프로젝트 프로세스를 정리했습니다."
+''';

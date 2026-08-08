@@ -290,7 +290,13 @@ Future<void> saveMapProjectFiles(
 ) async {
   final rows = [
     for (final file in files)
-      {'fileName': file.fileName, 'kind': file.kind, 'content': file.content},
+      {
+        'fileName': file.fileName,
+        'kind': file.kind,
+        'description': file.description,
+        'executable': file.executable ? 1 : 0,
+        'content': file.content,
+      },
   ];
   await _query('''
 SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
@@ -303,14 +309,17 @@ SET @files = CAST(
 START TRANSACTION;
 DELETE FROM map_project_files WHERE project_id = @project_id;
 INSERT INTO map_project_files
-  (project_id, file_name, kind, content, generated_at)
-SELECT @project_id, f.file_name, f.kind, f.content, NOW(6)
+  (project_id, file_name, kind, description, executable, content, generated_at)
+SELECT @project_id, f.file_name, f.kind, COALESCE(f.description, ''),
+       COALESCE(f.executable, 0), f.content, NOW(6)
 FROM JSON_TABLE(
   @files,
   '\$[*]' COLUMNS (
-    file_name VARCHAR(255) PATH '\$.fileName',
-    kind      VARCHAR(32)  PATH '\$.kind',
-    content   LONGTEXT     PATH '\$.content'
+    file_name   VARCHAR(255) PATH '\$.fileName',
+    kind        VARCHAR(32)  PATH '\$.kind',
+    description VARCHAR(512) PATH '\$.description',
+    executable  INT          PATH '\$.executable',
+    content     LONGTEXT     PATH '\$.content'
   )
 ) AS f;
 COMMIT;
@@ -325,6 +334,8 @@ Future<List<MapProjectFile>> loadMapProjectFiles(String mapName) async {
       JSON_OBJECT(
         'fileName', f.file_name,
         'kind', f.kind,
+        'description', f.description,
+        'executable', f.executable,
         'content', f.content,
         'generatedAt', DATE_FORMAT(f.generated_at, '%Y-%m-%dT%H:%i:%s.%f')
       )
@@ -347,6 +358,8 @@ WHERE p.map_name = $_nameParam;
       MapProjectFile(
         fileName: row['fileName'] as String,
         kind: row['kind'] as String? ?? 'etc',
+        description: row['description'] as String? ?? '',
+        executable: (row['executable'] as num?)?.toInt() == 1,
         content: row['content'] as String? ?? '',
         generatedAt:
             DateTime.tryParse(row['generatedAt'] as String? ?? '') ??

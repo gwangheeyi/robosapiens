@@ -207,6 +207,20 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. `robots[].charger`에 충전 Waypoint 이름이 들어감 |
 | `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
 | `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
+| `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나눔 |
+| `run_<맵이름>.sh` | `script` | 전체 실행. Gazebo를 먼저 띄운 뒤 Open-RMF를 올림 |
+| `stop_<맵이름>.sh` | `script` | 이 프로젝트로 띄운 프로세스만 정리 |
+
+각 파일에는 **무엇이고 어디에 쓰이는지 설명이 함께 저장**됩니다. 이름만으로는
+`building.yaml`과 `fleet.yaml`이 각각 무엇을 하는지 알 수 없기 때문입니다.
+`.sh`는 실행 권한이 필요하다고 표시되어 내보낼 때 `chmod +x`됩니다.
+
+`run_<맵이름>.sh`는 **Gazebo를 먼저 띄우고 12초 뒤 Open-RMF를 올립니다.** Gazebo가
+먼저 떠야 `/clock`이 나오고, 그래야 `use_sim_time`을 쓰는 RMF 노드가 시간을
+맞춥니다. 반대로 하면 RMF가 시간이 멈춘 줄 알고 멈춰 있습니다.
+
+실행 전에 `building.yaml`과 `nav_graphs/0.yaml`이 있는지 먼저 확인하고, 없으면
+무엇을 해야 하는지 알려주고 멈춥니다.
 
 `nav_graphs/0.yaml`은 배포 스크립트가 `building.yaml`에서 만듭니다.
 
@@ -237,7 +251,18 @@ source $HOME/rmf_ws/install/setup.bash
 ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
 ```
 
-### 6.5 앱에서 설정하기
+### 6.5 설정 파일 메뉴
+
+왼쪽 메뉴 **`설정 파일`**에서 이 프로젝트의 파일을 설명과 함께 봅니다.
+
+- 파일마다 종류(건물 맵 / Fleet Adapter / 시뮬레이션 로봇 / 실행 / 셸 스크립트)를
+  색으로 구분하고, 무엇에 쓰이는지 한 줄 설명이 붙습니다
+- 펼치면 내용을 그대로 보고 복사할 수 있습니다
+- `디스크로 내보내기`가 `rmf_maps/<맵이름>/`에 전부 풀어 놓습니다
+
+열린 프로젝트가 없으면 그 사실과 함께 `맵 관리로` 가는 길을 알려 줍니다.
+
+### 6.6 앱에서 설정하기
 
 맵 관리 상단 `RMF 설정`에서 두 가지를 봅니다.
 
@@ -254,7 +279,7 @@ ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
 `프로젝트 저장`을 누르면 이 로봇 목록으로 설정 파일이 다시 만들어집니다. 로봇을
 고쳤으면 저장해야 반영됩니다.
 
-### 6.6 SQL로 직접 보기
+### 6.7 SQL로 직접 보기
 
 ```sql
 -- 프로젝트의 설정 파일 목록

@@ -42,12 +42,20 @@ class MapProjectFile {
     required this.kind,
     required this.content,
     required this.generatedAt,
+    this.description = '',
+    this.executable = false,
   });
 
   final String fileName;
 
-  /// building | nav_graph | fleet_adapter | fleet_sim | launch
+  /// building | fleet_adapter | fleet_sim | launch | bringup | script
   final String kind;
+
+  /// 이 파일이 무엇이고 어디에 쓰이는지. 이름만으로는 알 수 없다.
+  final String description;
+
+  /// 실행 권한이 필요한 파일(.sh). 내보낼 때 chmod +x 한다.
+  final bool executable;
   final String content;
   final DateTime generatedAt;
 }

@@ -382,8 +382,13 @@ CREATE TABLE IF NOT EXISTS `map_project_robots` (
 CREATE TABLE IF NOT EXISTS `map_project_files` (
   `project_id`   BIGINT       NOT NULL,
   `file_name`    VARCHAR(255) NOT NULL,
-  -- building | nav_graph | fleet_adapter | fleet_sim | launch | etc
+  -- building | fleet_adapter | fleet_sim | launch | bringup | script
   `kind`         VARCHAR(32)  NOT NULL,
+  -- 이 파일이 무엇이고 어디에 쓰이는지. 화면에서 파일과 함께 보여 준다 —
+  -- 이름만으로는 building.yaml 과 fleet.yaml 이 각각 무엇을 하는지 알 수 없다.
+  `description`  VARCHAR(512) NOT NULL DEFAULT '',
+  -- 실행 권한이 필요한 파일(.sh)인지. 내보낼 때 chmod +x 한다.
+  `executable`   TINYINT(1)   NOT NULL DEFAULT 0,
   `content`      LONGTEXT     NOT NULL,
   `generated_at` DATETIME(6)  NOT NULL,
   PRIMARY KEY (`project_id`, `file_name`),
@@ -468,6 +473,8 @@ CREATE TABLE IF NOT EXISTS `counters` (
 --     v4 데이터베이스는 db/migrate_v4_to_v5.sql 을 적용한다.
 -- v6: RMF 설정을 프로젝트에 귀속. map_project_fleets / map_project_robots /
 --     map_project_files 추가. v5 는 db/migrate_v5_to_v6.sql 을 적용한다.
+-- v7: 설정 파일에 설명과 실행 권한 표시 추가.
+--     v6 은 db/migrate_v6_to_v7.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 6, NOW(6))
+VALUES (1, 7, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

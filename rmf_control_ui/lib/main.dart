@@ -6032,40 +6032,96 @@ class _ControlDashboardState extends State<ControlDashboard> {
           {...robot.toJson(), 'zonesText': robot.zones.join(',')},
       ],
     );
+    final mapDirectory = _mapDirectoryFor(mapName);
+    final now = DateTime.now();
     await saveMapProjectFiles(mapName, [
       if (buildingYaml != null)
         MapProjectFile(
           fileName: _yamlFileNameFor(mapName),
           kind: 'building',
+          description:
+              'Open-RMF 건물 맵. 벽·바닥·Waypoint·Lane 을 담는다. '
+              '배포 스크립트가 이 파일에서 nav_graphs/0.yaml 을 만든다.',
           content: buildingYaml,
-          generatedAt: DateTime.now(),
+          generatedAt: now,
         ),
       MapProjectFile(
         fileName: '${fleet.fleetName}_config.yaml',
         kind: 'fleet_adapter',
+        description:
+            'Fleet adapter 설정. 로봇 속도·회전 한계, 프로필 반경(맵의 로봇 안전 '
+            '기준에서 계산), 배터리, 로봇별 충전 Waypoint 를 담는다. '
+            'ros2 launch 의 config_file 로 들어간다.',
         content: buildFleetAdapterYaml(
           fleet: fleet,
           robots: _fleetRobots,
           mapName: mapName,
         ),
-        generatedAt: DateTime.now(),
+        generatedAt: now,
       ),
       MapProjectFile(
         fileName: 'fleet.yaml',
         kind: 'fleet_sim',
+        description:
+            'Gazebo 에 띄울 로봇 목록. spawn 좌표는 이 맵의 충전 Waypoint 에서 '
+            '가져왔다. 관제 배차의 입찰 자격이 되는 3온도 구획도 여기 있다.',
         content: buildFleetSimYaml(robots: _fleetRobots, mapName: mapName),
-        generatedAt: DateTime.now(),
+        generatedAt: now,
       ),
       MapProjectFile(
         fileName: '$mapName.launch.xml',
         kind: 'launch',
+        description:
+            'Open-RMF 실행. schedule node·building map server·supervisor·'
+            'dispatcher 를 띄운 뒤 이 프로젝트의 fleet adapter 를 붙인다. '
+            '순서가 뒤집히면 fleet adapter 가 schedule node 를 못 찾는다.',
         content: buildProjectLaunchXml(
           mapName: mapName,
           fleetName: fleet.fleetName,
-          mapDirectory: _mapDirectoryFor(mapName),
+          mapDirectory: mapDirectory,
           buildingYamlName: _yamlFileNameFor(mapName),
         ),
-        generatedAt: DateTime.now(),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: '${mapName}_bringup.launch.xml',
+        kind: 'bringup',
+        description:
+            'Gazebo 에 이 맵의 월드와 로봇을 올린다. 로봇마다 네임스페이스를 '
+            '나눠 /<로봇>/odom 처럼 토픽을 구분한다.',
+        content: buildProjectBringupXml(
+          mapName: mapName,
+          robots: _fleetRobots,
+          mapDirectory: mapDirectory,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: 'run_$mapName.sh',
+        kind: 'script',
+        description:
+            '전체 실행. ROS 환경을 읽고 Gazebo bringup 을 먼저 띄운 뒤 '
+            'Open-RMF 를 올린다. Gazebo 가 먼저 떠야 /clock 이 나오고 '
+            'use_sim_time 을 쓰는 RMF 노드가 시간을 맞춘다.',
+        executable: true,
+        content: buildProjectRunScript(
+          mapName: mapName,
+          mapDirectory: mapDirectory,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: 'stop_$mapName.sh',
+        kind: 'script',
+        description:
+            '이 프로젝트로 띄운 프로세스만 내린다. 다른 맵으로 띄운 RMF 나 '
+            '관계없는 Gazebo 는 건드리지 않는다.',
+        executable: true,
+        content: buildProjectStopScript(
+          mapName: mapName,
+          mapDirectory: mapDirectory,
+        ),
+        generatedAt: now,
       ),
     ]);
     if (mounted) setState(() => _fleetSettings = fleet);
@@ -7872,6 +7928,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '맵 관리',
                         '로봇',
                         '작업',
+                        '설정 파일',
                         '운영 분석',
                       ][_selectedMenu],
                     ),
@@ -8379,12 +8436,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onDelete: _deleteMockTask,
                               onCancel: _cancelMockTask,
                             )
+                          : _selectedMenu == 4
+                          ? _ProjectFilesPage(
+                              projectName: _openProjectName,
+                              mapName: _mapName,
+                              fleetName: _fleetSettings.fleetName,
+                              robotCount: _fleetRobots.length,
+                              mapDirectory: _mapDirectoryFor(
+                                _openProjectName ?? _mapName,
+                              ),
+                              onOpenMap: () =>
+                                  setState(() => _selectedMenu = 1),
+                              onExport: _exportRmfConfig,
+                            )
                           : _ComingSoonPage(
                               title: const [
                                 '대시보드',
                                 '맵 관리',
                                 '로봇',
                                 '작업',
+                                '설정 파일',
                                 '운영 분석',
                               ][_selectedMenu],
                             ),
@@ -11038,6 +11109,7 @@ class _NavigationRail extends StatelessWidget {
       (Icons.map_outlined, '맵 관리'),
       (Icons.smart_toy_outlined, '로봇'),
       (Icons.assignment_outlined, '작업'),
+      (Icons.description_outlined, '설정 파일'),
       (Icons.analytics_outlined, '운영 분석'),
     ];
     return Container(
@@ -15150,4 +15222,350 @@ class _SettingTile extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// 프로젝트마다 만들어지는 설정 파일을 설명과 함께 보는 화면.
+///
+/// 파일 이름만으로는 building.yaml 과 fleet.yaml 이 각각 무엇을 하는지,
+/// run_*.sh 를 언제 쓰는지 알 수 없다. 무엇이고 어디에 쓰이는지 함께 보여 준다.
+class _ProjectFilesPage extends StatefulWidget {
+  const _ProjectFilesPage({
+    required this.projectName,
+    required this.mapName,
+    required this.fleetName,
+    required this.robotCount,
+    required this.mapDirectory,
+    required this.onOpenMap,
+    required this.onExport,
+  });
+
+  /// 열려 있는 맵 프로젝트. null 이면 아직 저장 전이다.
+  final String? projectName;
+  final String mapName;
+  final String fleetName;
+  final int robotCount;
+  final String mapDirectory;
+  final VoidCallback onOpenMap;
+  final Future<void> Function(String mapName, List<MapProjectFile> files)
+  onExport;
+
+  @override
+  State<_ProjectFilesPage> createState() => _ProjectFilesPageState();
+}
+
+class _ProjectFilesPageState extends State<_ProjectFilesPage> {
+  List<MapProjectFile> _files = const [];
+  bool _loading = false;
+  String? _error;
+
+  static const Map<String, (String, IconData, Color)> _kinds = {
+    'building': ('건물 맵', Icons.apartment_outlined, Color(0xFF2563EB)),
+    'fleet_adapter': (
+      'Fleet Adapter',
+      Icons.settings_input_component,
+      Color(0xFF7C3AED),
+    ),
+    'fleet_sim': ('시뮬레이션 로봇', Icons.smart_toy_outlined, Color(0xFF0891B2)),
+    'launch': (
+      '실행 (Open-RMF)',
+      Icons.rocket_launch_outlined,
+      Color(0xFF15803D),
+    ),
+    'bringup': ('실행 (Gazebo)', Icons.view_in_ar_outlined, Color(0xFFEA580C)),
+    'script': ('셸 스크립트', Icons.terminal, Color(0xFF334155)),
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_reload());
+  }
+
+  @override
+  void didUpdateWidget(_ProjectFilesPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.projectName != widget.projectName) unawaited(_reload());
+  }
+
+  Future<void> _reload() async {
+    final project = widget.projectName;
+    if (project == null) {
+      setState(() {
+        _files = const [];
+        _error = null;
+      });
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final files = await loadMapProjectFiles(project);
+      if (!mounted) return;
+      setState(() {
+        _files = files;
+        _error = null;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final project = widget.projectName;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '프로젝트 설정 파일',
+                      style: Theme.of(context).textTheme.headlineMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text('맵 프로젝트마다 같은 형식으로 만들어지며 MySQL에 보관됩니다.'),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _loading ? null : _reload,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('다시 읽기'),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: project == null || _files.isEmpty
+                    ? null
+                    : () => unawaited(widget.onExport(project, _files)),
+                icon: const Icon(Icons.drive_file_move_outline, size: 18),
+                label: const Text('디스크로 내보내기'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: project == null
+                  ? const Color(0xFFEFF6FF)
+                  : const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: project == null
+                    ? const Color(0xFF93C5FD)
+                    : const Color(0xFFE2E8F0),
+              ),
+            ),
+            child: project == null
+                ? Row(
+                    children: [
+                      const Icon(
+                        Icons.folder_off_outlined,
+                        color: Color(0xFF2563EB),
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          '열린 맵 프로젝트가 없습니다. 설정 파일은 프로젝트마다 만들어지므로 '
+                          '먼저 맵 관리에서 `프로젝트 저장`으로 등록하세요.',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: widget.onOpenMap,
+                        icon: const Icon(Icons.map_outlined, size: 18),
+                        label: const Text('맵 관리로'),
+                      ),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$project · 플릿 ${widget.fleetName} · '
+                        '로봇 ${widget.robotCount}대 · 파일 ${_files.length}개',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 6),
+                      SelectableText(
+                        '내보내는 곳: ${widget.mapDirectory}',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'ros2 launch 는 파일만 읽습니다. 실행하기 전에 한 번 내보내세요.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF2F2),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFECACA)),
+              ),
+              child: SelectableText(
+                '설정 파일을 읽지 못했습니다: $_error',
+                style: const TextStyle(color: Color(0xFF7F1D1D)),
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.all(40),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (project != null && _files.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(40),
+              child: Center(
+                child: Text(
+                  '아직 만들어진 설정 파일이 없습니다.\n'
+                  '맵 관리에서 `프로젝트 저장`을 한 번 누르면 만들어집니다.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF64748B)),
+                ),
+              ),
+            )
+          else
+            for (final file in _files) _fileCard(file),
+        ],
+      ),
+    );
+  }
+
+  Widget _fileCard(MapProjectFile file) {
+    final (label, icon, color) =
+        _kinds[file.kind] ??
+        ('기타', Icons.insert_drive_file_outlined, const Color(0xFF64748B));
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: ExpansionTile(
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: CircleAvatar(
+          backgroundColor: color.withValues(alpha: .12),
+          child: Icon(icon, color: color, size: 20),
+        ),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                file.fileName,
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
+            ),
+            Chip(
+              label: Text(label),
+              labelStyle: TextStyle(fontSize: 11, color: color),
+              backgroundColor: color.withValues(alpha: .1),
+              side: BorderSide.none,
+              visualDensity: VisualDensity.compact,
+            ),
+            if (file.executable) ...[
+              const SizedBox(width: 6),
+              const Chip(
+                label: Text('실행 가능'),
+                labelStyle: TextStyle(fontSize: 11),
+                visualDensity: VisualDensity.compact,
+                side: BorderSide.none,
+              ),
+            ],
+          ],
+        ),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 6, right: 12),
+          child: Text(
+            file.description.isEmpty ? '설명이 없습니다.' : file.description,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF475569)),
+          ),
+        ),
+        children: [
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(maxHeight: 320),
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Scrollbar(
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  file.content,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.45,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 16, bottom: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text(
+                  '${file.content.length}자 · '
+                  '${file.generatedAt.year}-'
+                  '${file.generatedAt.month.toString().padLeft(2, '0')}-'
+                  '${file.generatedAt.day.toString().padLeft(2, '0')} '
+                  '${file.generatedAt.hour.toString().padLeft(2, '0')}:'
+                  '${file.generatedAt.minute.toString().padLeft(2, '0')}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF94A3B8),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                TextButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: file.content));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('${file.fileName} 내용을 복사했습니다.')),
+                    );
+                  },
+                  icon: const Icon(Icons.content_copy_outlined, size: 16),
+                  label: const Text('복사'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
