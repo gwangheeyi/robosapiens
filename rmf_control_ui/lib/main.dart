@@ -15,6 +15,7 @@ import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'scenario_route_planner.dart';
+import 'task_dispatch.dart';
 import 'task_store.dart';
 
 void main() => runApp(const RmfControlApp());
@@ -565,12 +566,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
             .where((robot) => robot.kind.canCarry && robot.activeTaskId == null)
             .toList()
           ..sort((a, b) => b.battery.compareTo(a.battery));
-    final queued = _mockTasks
-        .where(
-          (task) =>
-              task.orderId != null && task.status == _MockTaskStatus.queued,
-        )
-        .toList();
+    // 목록은 새 작업이 위로 오게 정렬돼 있다. 그대로 꺼내 쓰면 나중에 들어온
+    // 주문이 먼저 나가고 기다리던 주문이 뒤로 밀린다.
+    final queued = dispatchOrder(
+      _mockTasks.where(
+        (task) =>
+            task.orderId != null && task.status == _MockTaskStatus.queued,
+      ),
+      (task) => task.createdAt,
+    );
     var changed = false;
     while (available.isNotEmpty && queued.isNotEmpty) {
       final robot = available.removeAt(0);
