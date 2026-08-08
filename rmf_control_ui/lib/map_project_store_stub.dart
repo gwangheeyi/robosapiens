@@ -5,7 +5,8 @@ library;
 
 import 'map_project_models.dart';
 
-const String _unsupported = '웹 빌드에서는 MySQL 맵 프로젝트 저장소를 쓸 수 없습니다. '
+const String _unsupported =
+    '웹 빌드에서는 MySQL 맵 프로젝트 저장소를 쓸 수 없습니다. '
     'Linux 데스크톱 앱에서 실행하세요.';
 
 Future<List<MapProjectSummary>> listMapProjects() async => const [];
@@ -27,3 +28,19 @@ Future<String?> loadMapProjectYaml(String mapName) async =>
 
 Future<void> deleteMapProject(String mapName) async =>
     throw UnsupportedError(_unsupported);
+
+Future<void> saveMapProjectFiles(
+  String mapName,
+  List<MapProjectFile> files,
+) async => throw UnsupportedError(_unsupported);
+
+Future<List<MapProjectFile>> loadMapProjectFiles(String mapName) async =>
+    const [];
+
+Future<void> saveMapProjectFleet(
+  String mapName, {
+  required Map<String, Object?> settings,
+  required List<Map<String, Object?>> robots,
+}) async => throw UnsupportedError(_unsupported);
+
+Future<Map<String, dynamic>?> loadMapProjectFleet(String mapName) async => null;

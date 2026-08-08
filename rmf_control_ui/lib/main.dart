@@ -14,6 +14,7 @@ import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
+import 'rmf_project_config.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
@@ -454,6 +455,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
   int _selectedMenu = 0;
+
+  /// 열린 프로젝트의 RMF 플릿 설정. 맵이 다르면 충전소 위치도 다르므로
+  /// 프로젝트를 따라간다.
+  RmfFleetSettings _fleetSettings = const RmfFleetSettings();
+
+  /// 열린 프로젝트에 등록된 로봇. Gazebo spawn 과 fleet adapter 의 robots
+  /// 항목을 함께 만든다.
+  List<RmfProjectRobot> _fleetRobots = const [];
 
   /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
   ///
@@ -5966,6 +5975,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 배포 쪽이 앱을 거치지 않고 바로 집어갈 수 있도록 YAML도 같이 넣는다.
   /// 아직 YAML로 만들 수 없는 단계(벽·Floor 미완성 등)여도 저장 자체는 막지
   /// 않는다 — 작업 중인 맵을 못 저장하게 하는 게 더 나쁘다.
+  /// 이 프로젝트에 쓸 플릿 설정. 프로필 반경은 맵의 로봇 안전 기준에서 온다.
+  ///
+  /// 같은 값을 두 곳에 적으면 어긋나므로, 사용자가 이미 넣은 로봇 폭과 위치
+  /// 오차 여유를 그대로 가져다 쓴다.
+  RmfFleetSettings _fleetSettingsFor(String mapName) {
+    final named = _fleetSettings.fleetName.trim().isEmpty
+        ? _fleetSettings.copyWith(fleetName: _fleetNameFor(mapName))
+        : _fleetSettings;
+    return named.withRobotSafety(
+      widthMeters: _robotWidthMeters,
+      localizationMarginMeters: _localizationMarginMeters,
+    );
+  }
+
+  /// 지도 이름에서 만든 기본 플릿 이름. YAML 식별자로 쓸 수 있게 다듬는다.
+  String _fleetNameFor(String mapName) {
+    final safe = mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+    return safe.isEmpty ? 'pinky' : '${safe}_pinky';
+  }
+
   Future<void> _writeMapProject(String mapName) async {
     String? buildingYaml;
     try {
@@ -5979,6 +6008,78 @@ class _ControlDashboardState extends State<ControlDashboard> {
       buildingYaml: buildingYaml,
       buildingYamlName: buildingYaml == null ? null : _yamlFileNameFor(mapName),
     );
+
+    // 플릿 설정과 그로부터 만든 설정 파일을 함께 남긴다. 프로젝트 하나만 열면
+    // 배포와 실행에 필요한 것이 다 있어야 한다.
+    final fleet = _fleetSettingsFor(mapName);
+    await saveMapProjectFleet(
+      mapName,
+      settings: fleet.toJson(),
+      robots: [
+        for (final robot in _fleetRobots)
+          {...robot.toJson(), 'zonesText': robot.zones.join(',')},
+      ],
+    );
+    await saveMapProjectFiles(mapName, [
+      if (buildingYaml != null)
+        MapProjectFile(
+          fileName: _yamlFileNameFor(mapName),
+          kind: 'building',
+          content: buildingYaml,
+          generatedAt: DateTime.now(),
+        ),
+      MapProjectFile(
+        fileName: '${fleet.fleetName}_config.yaml',
+        kind: 'fleet_adapter',
+        content: buildFleetAdapterYaml(
+          fleet: fleet,
+          robots: _fleetRobots,
+          mapName: mapName,
+        ),
+        generatedAt: DateTime.now(),
+      ),
+      MapProjectFile(
+        fileName: 'fleet.yaml',
+        kind: 'fleet_sim',
+        content: buildFleetSimYaml(robots: _fleetRobots, mapName: mapName),
+        generatedAt: DateTime.now(),
+      ),
+    ]);
+    if (mounted) setState(() => _fleetSettings = fleet);
+  }
+
+  /// 열린 프로젝트의 플릿 설정을 읽어 온다. 없으면 맵 이름에서 기본값을 만든다.
+  Future<void> _loadFleetForProject(String mapName) async {
+    Map<String, dynamic>? stored;
+    try {
+      stored = await loadMapProjectFleet(mapName);
+    } catch (_) {
+      stored = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (stored == null) {
+        _fleetSettings = RmfFleetSettings(fleetName: _fleetNameFor(mapName));
+        _fleetRobots = const [];
+        return;
+      }
+      _fleetSettings = RmfFleetSettings.fromJson(
+        stored['settings'] as Map<String, dynamic>,
+      );
+      _fleetRobots = [
+        for (final row
+            in (stored['robots'] as List<dynamic>? ?? const [])
+                .cast<Map<String, dynamic>>())
+          RmfProjectRobot.fromJson({
+            ...row,
+            'zones': (row['zonesText'] as String? ?? '')
+                .split(',')
+                .map((zone) => zone.trim())
+                .where((zone) => zone.isNotEmpty)
+                .toList(),
+          }),
+      ];
+    });
   }
 
   /// 창에서 `저장`을 눌러 확정한 중간 설정을 곧바로 프로젝트에 남긴다.
@@ -6030,6 +6131,491 @@ class _ControlDashboardState extends State<ControlDashboard> {
         duration: const Duration(seconds: 6),
         showCloseIcon: true,
       ),
+    );
+  }
+
+  /// 맵의 충전 Waypoint 이름 목록. 로봇의 charger 로 고를 후보다.
+  List<String> get _chargerWaypointNames => [
+    for (final entry in _waypointTypes.entries)
+      if (entry.value == '충전') (_waypointNames[entry.key] ?? '').trim() else '',
+  ].where((name) => name.isNotEmpty).toList()..sort();
+
+  /// 충전 Waypoint 하나마다 로봇 한 대를 만든다.
+  ///
+  /// 로봇을 손으로 하나씩 넣는 대신 맵에서 끌어온다. 충전소가 곧 그 로봇의
+  /// 자리이므로 spawn 좌표와 charger 를 한꺼번에 채울 수 있다.
+  List<RmfProjectRobot> _robotsFromChargers() {
+    final chargers = <Offset, String>{
+      for (final entry in _waypointTypes.entries)
+        if (entry.value == '충전' &&
+            (_waypointNames[entry.key] ?? '').trim().isNotEmpty)
+          entry.key: _waypointNames[entry.key]!.trim(),
+    };
+    final metersPerPixel = _metersPerPixel;
+    var index = 0;
+    return [
+      for (final entry in chargers.entries)
+        () {
+          index++;
+          final floor = _floorCoordinate(entry.key);
+          final scale = metersPerPixel ?? 1;
+          return RmfProjectRobot(
+            robotId: 'PK-${index.toString().padLeft(2, '0')}',
+            displayName: '핑키 $index호',
+            model: 'PINKY-GZ',
+            gzName: 'pinky_${index.toString().padLeft(2, '0')}',
+            zones: const ['ambient', 'chilled', 'frozen'],
+            chargerWaypoint: entry.value,
+            spawnX: floor.dx * scale,
+            spawnY: floor.dy * scale,
+          );
+        }(),
+    ];
+  }
+
+  /// 로봇 한 대를 추가하거나 고친다. 취소하면 null.
+  Future<RmfProjectRobot?> _editFleetRobot(RmfProjectRobot? existing) async {
+    final index = _fleetRobots.length + 1;
+    final idController = TextEditingController(
+      text: existing?.robotId ?? 'PK-${index.toString().padLeft(2, '0')}',
+    );
+    final nameController = TextEditingController(
+      text: existing?.displayName ?? '핑키 $index호',
+    );
+    final modelController = TextEditingController(
+      text: existing?.model ?? 'PINKY-GZ',
+    );
+    final gzController = TextEditingController(
+      text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
+    );
+    var charger = existing?.chargerWaypoint;
+    var zones = {...?existing?.zones};
+    if (zones.isEmpty) zones = {'ambient', 'chilled', 'frozen'};
+    final chargers = _chargerWaypointNames;
+    if (charger != null && !chargers.contains(charger)) charger = null;
+
+    final saved = await showMovableDialog<RmfProjectRobot>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.smart_toy_outlined, size: 32),
+          title: Text(existing == null ? '로봇 추가' : '로봇 수정'),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: idController,
+                    decoration: const InputDecoration(
+                      labelText: '로봇 ID',
+                      helperText: 'fleet adapter 의 robots 항목 이름이 됩니다.',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: '표시 이름',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: modelController,
+                    decoration: const InputDecoration(
+                      labelText: '모델',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: gzController,
+                    decoration: const InputDecoration(
+                      labelText: 'Gazebo 모델 이름',
+                      helperText: '토픽 네임스페이스로도 쓰입니다 (/이름/odom).',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: charger,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: '충전 Waypoint',
+                      helperText: chargers.isEmpty
+                          ? '맵에 충전 카테고리 Waypoint가 없습니다.'
+                          : 'spawn 위치와 복귀 지점이 됩니다.',
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (final name in chargers)
+                        DropdownMenuItem(value: name, child: Text(name)),
+                    ],
+                    onChanged: (value) => setDialogState(() => charger = value),
+                  ),
+                  const SizedBox(height: 12),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Wrap(
+                      spacing: 8,
+                      children: [
+                        for (final zone in const [
+                          'ambient',
+                          'chilled',
+                          'frozen',
+                        ])
+                          FilterChip(
+                            label: Text(zone),
+                            selected: zones.contains(zone),
+                            onSelected: (on) => setDialogState(() {
+                              if (on) {
+                                zones.add(zone);
+                              } else {
+                                zones.remove(zone);
+                              }
+                            }),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 6),
+                      child: Text(
+                        '진입 가능한 3온도 구획입니다. 관제 배차의 입찰 자격이 됩니다.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final id = idController.text.trim();
+                if (id.isEmpty) return;
+                final source = charger == null
+                    ? null
+                    : _waypointTypes.entries
+                          .where(
+                            (entry) =>
+                                entry.value == '충전' &&
+                                (_waypointNames[entry.key] ?? '').trim() ==
+                                    charger,
+                          )
+                          .map((entry) => entry.key)
+                          .firstOrNull;
+                final scale = _metersPerPixel ?? 1;
+                final floor = source == null ? null : _floorCoordinate(source);
+                Navigator.pop(
+                  dialogContext,
+                  RmfProjectRobot(
+                    robotId: id,
+                    displayName: nameController.text.trim().isEmpty
+                        ? id
+                        : nameController.text.trim(),
+                    model: modelController.text.trim().isEmpty
+                        ? 'PINKY-GZ'
+                        : modelController.text.trim(),
+                    gzName: gzController.text.trim().isEmpty
+                        ? id.toLowerCase()
+                        : gzController.text.trim(),
+                    zones: zones.toList()..sort(),
+                    chargerWaypoint: charger,
+                    spawnX: floor == null ? existing?.spawnX : floor.dx * scale,
+                    spawnY: floor == null ? existing?.spawnY : floor.dy * scale,
+                    spawnHeading: existing?.spawnHeading ?? 0,
+                  ),
+                );
+              },
+              child: const Text('저장'),
+            ),
+          ],
+        ),
+      ),
+    );
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 350)).then((_) {
+        idController.dispose();
+        nameController.dispose();
+        modelController.dispose();
+        gzController.dispose();
+      }),
+    );
+    return saved;
+  }
+
+  /// RMF 설정 창 — 로봇 목록과 생성된 설정 파일을 한자리에서 본다.
+  Future<void> _showRmfConfigDialog() async {
+    final project = _openProjectName;
+    var files = <MapProjectFile>[];
+    if (project != null) {
+      try {
+        files = await loadMapProjectFiles(project);
+      } catch (_) {
+        files = [];
+      }
+    }
+    if (!mounted) return;
+    await showMovableDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.settings_ethernet, size: 32),
+          title: Text('RMF 설정 · ${project ?? _mapName}'),
+          content: SizedBox(
+            width: 640,
+            height: 480,
+            child: DefaultTabController(
+              length: 2,
+              child: Column(
+                children: [
+                  const TabBar(
+                    tabs: [
+                      Tab(text: '로봇'),
+                      Tab(text: '설정 파일'),
+                    ],
+                  ),
+                  Expanded(
+                    child: TabBarView(
+                      children: [
+                        _fleetRobotsTab(setDialogState),
+                        _fleetFilesTab(files, project),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('닫기'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fleetRobotsTab(void Function(void Function()) setDialogState) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '플릿 ${_fleetSettings.fleetName} · 로봇 ${_fleetRobots.length}대',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: () {
+                  final generated = _robotsFromChargers();
+                  if (generated.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('맵에 이름이 있는 충전 Waypoint가 없습니다.'),
+                      ),
+                    );
+                    return;
+                  }
+                  setState(() => _fleetRobots = generated);
+                  setDialogState(() {});
+                },
+                icon: const Icon(Icons.auto_awesome, size: 18),
+                label: const Text('충전 Waypoint에서 만들기'),
+              ),
+              const SizedBox(width: 6),
+              FilledButton.icon(
+                onPressed: () async {
+                  final robot = await _editFleetRobot(null);
+                  if (robot == null) return;
+                  setState(
+                    () => _fleetRobots = [
+                      ..._fleetRobots.where((r) => r.robotId != robot.robotId),
+                      robot,
+                    ],
+                  );
+                  setDialogState(() {});
+                },
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('로봇 추가'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _fleetRobots.isEmpty
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        '등록된 로봇이 없습니다.\n'
+                        '맵에 충전 Waypoint를 만들고 `충전 Waypoint에서 만들기`를 누르면\n'
+                        'spawn 위치와 charger가 한꺼번에 채워집니다.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Color(0xFF64748B)),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: _fleetRobots.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (_, index) {
+                      final robot = _fleetRobots[index];
+                      return ListTile(
+                        leading: const Icon(Icons.smart_toy_outlined),
+                        title: Text('${robot.robotId} · ${robot.displayName}'),
+                        subtitle: Text(
+                          '${robot.model} · ${robot.gzName} · '
+                          '${robot.zones.join(', ')}\n'
+                          '충전 ${robot.chargerWaypoint ?? '미지정'}'
+                          '${robot.spawnX == null ? '' : ' · spawn '
+                                    '${robot.spawnX!.toStringAsFixed(2)}, '
+                                    '${robot.spawnY!.toStringAsFixed(2)}'}',
+                        ),
+                        isThreeLine: true,
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: '수정',
+                              onPressed: () async {
+                                final updated = await _editFleetRobot(robot);
+                                if (updated == null) return;
+                                setState(() {
+                                  final next = [..._fleetRobots];
+                                  next[index] = updated;
+                                  _fleetRobots = next;
+                                });
+                                setDialogState(() {});
+                              },
+                              icon: const Icon(Icons.edit_outlined, size: 18),
+                            ),
+                            IconButton(
+                              tooltip: '삭제',
+                              onPressed: () {
+                                setState(
+                                  () => _fleetRobots = [
+                                    for (final r in _fleetRobots)
+                                      if (r.robotId != robot.robotId) r,
+                                  ],
+                                );
+                                setDialogState(() {});
+                              },
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                size: 18,
+                                color: Color(0xFFDC2626),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              '`프로젝트 저장`을 누르면 이 목록으로 설정 파일이 다시 만들어집니다.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+          ),
+        ],
+      );
+
+  Widget _fleetFilesTab(List<MapProjectFile> files, String? project) {
+    if (project == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '열린 맵 프로젝트가 없습니다.\n`프로젝트 저장`으로 등록하면 설정 파일이 만들어집니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF64748B)),
+          ),
+        ),
+      );
+    }
+    if (files.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '아직 만들어진 설정 파일이 없습니다.\n`프로젝트 저장`을 한 번 누르세요.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Color(0xFF64748B)),
+          ),
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: files.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (_, index) {
+        final file = files[index];
+        return ExpansionTile(
+          leading: const Icon(Icons.description_outlined),
+          title: Text(file.fileName),
+          subtitle: Text('${file.kind} · ${file.content.length}자'),
+          children: [
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 240),
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE2E8F0)),
+              ),
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    file.content,
+                    style: const TextStyle(fontSize: 12, height: 1.4),
+                  ),
+                ),
+              ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 16, bottom: 8),
+                child: TextButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: file.content));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('${file.fileName} 내용을 복사했습니다.')),
+                    );
+                  },
+                  icon: const Icon(Icons.content_copy_outlined, size: 16),
+                  label: const Text('복사'),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -6270,6 +6856,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
         sourceName: picked,
         fallbackMapName: picked,
       );
+      await _loadFleetForProject(picked);
+      if (!mounted) return;
       await _switchOpenProject(picked);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -7271,6 +7859,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                             _saveProjectToDatabase,
                                         onOpenFromDatabase:
                                             _openProjectFromDatabase,
+                                        onRmfConfig: _showRmfConfigDialog,
                                       ),
                                       const SizedBox(height: 14),
                                       _MapFileStatus(
@@ -10983,6 +11572,7 @@ class _PageHeading extends StatelessWidget {
     required this.onLoadProject,
     required this.onSaveToDatabase,
     required this.onOpenFromDatabase,
+    required this.onRmfConfig,
   });
   final VoidCallback onHelp;
   final VoidCallback onUpload;
@@ -10996,6 +11586,9 @@ class _PageHeading extends StatelessWidget {
   final VoidCallback onLoadProject;
   final VoidCallback onSaveToDatabase;
   final VoidCallback onOpenFromDatabase;
+
+  /// 프로젝트별 RMF 플릿 설정과 생성된 설정 파일을 본다.
+  final VoidCallback onRmfConfig;
   @override
   Widget build(BuildContext context) => Row(
     crossAxisAlignment: CrossAxisAlignment.center,
@@ -11042,6 +11635,17 @@ class _PageHeading extends StatelessWidget {
               icon: const Icon(Icons.storage_outlined, size: 18),
               label: const Text('프로젝트 열기'),
               style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: onRmfConfig,
+              icon: const Icon(Icons.settings_ethernet, size: 18),
+              label: const Text('RMF 설정'),
+              style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 15,
                   vertical: 16,
