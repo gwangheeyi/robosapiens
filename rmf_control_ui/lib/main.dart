@@ -13,6 +13,7 @@ import 'deployed_map_service.dart';
 import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
+import 'movable_dialog.dart';
 import 'scenario_route_planner.dart';
 import 'task_store.dart';
 
@@ -990,7 +991,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String? widthError;
     String? radiusError;
     String? marginError;
-    final values = await showDialog<(double, double, double)>(
+    final values = await showMovableDialog<(double, double, double)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1807,7 +1808,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           finalCategoryCount('충전') < config.chargerCount) {
         throw const FormatException('Codex 제안에 Home·대기·충전 Waypoint가 부족합니다.');
       }
-      final apply = await showDialog<bool>(
+      final apply = await showMovableDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.psychology_alt_outlined, size: 36),
@@ -1911,7 +1912,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final dropoffController = TextEditingController(text: '1');
     var returnHome = true;
     var singleLoad = true;
-    final config = await showDialog<_MapScenarioConfig>(
+    final config = await showMovableDialog<_MapScenarioConfig>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) {
@@ -2076,7 +2077,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
-    final apply = await showDialog<bool>(
+    final apply = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.map_outlined, size: 36),
@@ -2201,7 +2202,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ],
     ].join('\n');
     if (!mounted) return;
-    await showDialog<void>(
+    await showMovableDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: Icon(
@@ -2469,7 +2470,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final recommendations = _buildLaneRecommendations();
     if (!mounted) return;
     if (recommendations.isEmpty) {
-      await showDialog<void>(
+      await showMovableDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(
@@ -2495,7 +2496,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       for (var i = 0; i < recommendations.length; i++) i: '양방향',
     };
     final result =
-        await showDialog<({Set<int> selected, Map<int, String> directions})>(
+        await showMovableDialog<({Set<int> selected, Map<int, String> directions})>(
           context: context,
           builder: (dialogContext) => StatefulBuilder(
             builder: (context, setDialogState) => AlertDialog(
@@ -2918,7 +2919,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return crossed;
   }
 
-  Future<String?> _chooseWaypointAction(Offset waypoint) => showDialog<String>(
+  Future<String?> _chooseWaypointAction(Offset waypoint) => showMovableDialog<String>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: Text(
@@ -3084,7 +3085,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _confirmDeleteWaypoint(Offset waypoint) async {
     final name = (_waypointNames[waypoint] ?? '').trim();
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.delete_outline, color: Color(0xFFDC2626)),
@@ -3149,7 +3150,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     var selectedType = _waypointTypes[waypoint] == '드롭오프'
         ? '드랍오프'
         : _waypointTypes[waypoint] ?? '대기';
-    final action = await showDialog<String>(
+    final action = await showMovableDialog<String>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -3258,7 +3259,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       text: _laneMutexGroups[lane] ?? '',
     );
     final result =
-        await showDialog<
+        await showMovableDialog<
           ({
             String action,
             String direction,
@@ -3521,7 +3522,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final nameController = TextEditingController(
       text: _nextWaypointName(selectedType),
     );
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -4020,7 +4021,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     Uint8List? selectedImageBytes;
     ui.Image? selectedImage;
     String? selectedImageName;
-    final result = await showDialog<_RobotSpawnSelection>(
+    final result = await showMovableDialog<_RobotSpawnSelection>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -4293,7 +4294,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _createMockTask() async {
     // 작업은 맵 프로젝트에 속한다. 저장할 프로젝트가 없으면 만들 수 없다.
     if (_openProjectName == null) {
-      await showDialog<void>(
+      await showMovableDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.info_outline, color: Color(0xFF2563EB)),
@@ -4324,7 +4325,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         .where((robot) => robot.kind.canCarry)
         .toList();
     if (waypoints.isEmpty) {
-      final action = await showDialog<String>(
+      final action = await showMovableDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(
@@ -4362,7 +4363,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (action == 'robots' && mounted) setState(() => _selectedMenu = 2);
       return;
     }
-    final result = await showDialog<_TaskEditorResult>(
+    final result = await showMovableDialog<_TaskEditorResult>(
       context: context,
       builder: (_) => _SequentialTaskEditorDialog(
         initialName: '연속 작업 ${_mockTasks.length + 1}',
@@ -4446,7 +4447,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _showProcessingWarning('작업 수정', '운영 맵을 먼저 준비해 주세요.');
       return;
     }
-    final result = await showDialog<_TaskEditorResult>(
+    final result = await showMovableDialog<_TaskEditorResult>(
       context: context,
       builder: (_) => _SequentialTaskEditorDialog(
         initialName: task.name,
@@ -4628,7 +4629,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _deleteMockTask(_MockTask task) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(
@@ -4675,7 +4676,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _loadMapForRobots() async {
     try {
       final mapsFuture = listDeployedMaps();
-      final selected = await showDialog<DeployedMapSummary>(
+      final selected = await showMovableDialog<DeployedMapSummary>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.map_outlined, size: 36),
@@ -4793,7 +4794,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } catch (error) {
       _showProcessingWarning('배포 맵 불러오기', error);
       if (!mounted) return;
-      await showDialog<void>(
+      await showMovableDialog<void>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.error_outline, color: Color(0xFFDC2626)),
@@ -4889,7 +4890,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       text: _measurement?.length.toString() ?? '',
     );
     var unit = _measurement?.unit ?? 'm';
-    final result = await showDialog<(double, String)>(
+    final result = await showMovableDialog<(double, String)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -5529,7 +5530,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _saveProjectAs() async {
     if (_drawing == null) return;
     final controller = TextEditingController(text: '$_mapName 복사본');
-    final newName = await showDialog<String>(
+    final newName = await showMovableDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.drive_file_rename_outline, size: 36),
@@ -5659,7 +5660,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String? helperText,
   }) async {
     final controller = TextEditingController(text: initialName);
-    final name = await showDialog<String>(
+    final name = await showMovableDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.drive_file_rename_outline, size: 36),
@@ -5711,7 +5712,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
               'Lane ${existing.laneCount}개'
               '${existing.drawingName == null ? '' : ' · 도면 ${existing.drawingName}'}'
               '\n마지막 저장: ${_projectTimestamp(existing.updatedAt)}';
-    final choice = await showDialog<MapProjectNameConflictChoice>(
+    final choice = await showMovableDialog<MapProjectNameConflictChoice>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.help_outline, size: 36),
@@ -5837,7 +5838,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         );
         return;
       }
-      final picked = await showDialog<String>(
+      final picked = await showMovableDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.storage_outlined, size: 36),
@@ -6595,7 +6596,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     if (_showMapValidationWarnings()) return;
 
-    final shouldDeploy = await showDialog<bool>(
+    final shouldDeploy = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(
@@ -6686,7 +6687,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
 
     if (shouldDeploy != true || !mounted) return;
-    showDialog<void>(
+    showMovableDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => const PopScope(
@@ -6735,7 +6736,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _showDeploymentResultDialog({
     required bool success,
     required String output,
-  }) => showDialog<void>(
+  }) => showMovableDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       icon: Icon(
@@ -10239,7 +10240,7 @@ Future<void> _showUsageGuide(
     ),
   };
 
-  await showDialog<void>(
+  await showMovableDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       icon: const Icon(Icons.menu_book_outlined, size: 38),
@@ -10626,7 +10627,7 @@ Future<void> showWaypointErrorDialog(
   BuildContext context, {
   required String title,
   required String message,
-}) => showDialog<void>(
+}) => showMovableDialog<void>(
   context: context,
   builder: (_) => _CopyableErrorDialog(title: title, message: message),
 );
