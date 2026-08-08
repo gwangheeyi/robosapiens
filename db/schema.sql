@@ -359,6 +359,10 @@ CREATE TABLE IF NOT EXISTS `map_project_robots` (
   -- 'mobile' 이면 돌아다니는 로봇, 'workcell' 이면 설비 자리에 고정된 설치 로봇.
   -- 설치 로봇은 fleet adapter 의 robots 에 들어가지 않는다. 배차 대상이 아니다.
   `kind`             VARCHAR(16)  NOT NULL DEFAULT 'mobile',
+  -- 값이 어디서 오는가. 'mock' 앱 안 · 'gazebo' 시뮬레이션 · 'real' 실물.
+  -- mock 은 fleet adapter 에도 Gazebo bringup 에도 들어가지 않는다.
+  -- real 은 fleet adapter 에는 가지만 Gazebo 에는 안 간다.
+  `data_source`      VARCHAR(16)  NOT NULL DEFAULT 'mock',
   -- Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(/<gz_name>/odom).
   `gz_name`          VARCHAR(64)  NOT NULL,
   -- TempZone.name 을 콤마로 이어 붙인 값. 예: 'ambient,chilled'
@@ -504,6 +508,8 @@ CREATE TABLE IF NOT EXISTS `map_project_changes` (
 --     fleet adapter 에 들어가지 않는다. v7 은 db/migrate_v7_to_v8.sql 을 적용한다.
 -- v9: 설정 변경 기록(map_project_changes) 추가. 운영 기록과 같은 시간축에서
 --     본다. v8 은 db/migrate_v8_to_v9.sql 을 적용한다.
+-- v10: 로봇마다 값의 출처(Mock/Gazebo/실물)를 적는다. 실행에 들어가는 자리가
+--      여기서 갈린다. v9 는 db/migrate_v9_to_v10.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 9, NOW(6))
+VALUES (1, 10, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

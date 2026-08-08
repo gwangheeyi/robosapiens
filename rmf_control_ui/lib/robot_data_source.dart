@@ -7,39 +7,7 @@ library;
 
 import 'rmf_project_config.dart';
 
-enum RobotDataSource {
-  /// 앱이 100ms 마다 직접 계산한 값. ROS 는 아예 관여하지 않는다.
-  mock,
-
-  /// Gazebo 가 물리를 돌리고 그 결과가 ROS 토픽으로 온다.
-  gazebo,
-
-  /// 실물 로봇에서 온 ROS 토픽.
-  real;
-
-  String get label => switch (this) {
-    RobotDataSource.mock => '앱 Mock 데이터',
-    RobotDataSource.gazebo => 'Gazebo 시뮬레이션',
-    RobotDataSource.real => '실제 로봇',
-  };
-
-  /// 로봇 화면의 `로봇 실행 방식` 에 쓰는 짧은 이름.
-  String get shortLabel => switch (this) {
-    RobotDataSource.mock => '앱 Mock',
-    RobotDataSource.gazebo => 'Gazebo 시뮬레이션',
-    RobotDataSource.real => '실제 로봇',
-  };
-
-  /// 이 값이 무엇인지 한 줄로.
-  String get summary => switch (this) {
-    RobotDataSource.mock => '앱이 계산한 값입니다. 실제 로봇도 Gazebo도 아닙니다.',
-    RobotDataSource.gazebo => 'Gazebo가 물리를 돌리고 그 결과를 ROS 토픽으로 주고받습니다.',
-    RobotDataSource.real => '실물 로봇이 보내는 ROS 토픽입니다.',
-  };
-
-  /// ROS 토픽을 주고받는가. Mock 은 앱 안에서만 돈다.
-  bool get usesTopics => this != RobotDataSource.mock;
-}
+export 'rmf_project_config.dart' show RobotDataSource;
 
 /// 고른 실행 방식과 실제로 값을 만들어 낸 곳은 다를 수 있다.
 ///

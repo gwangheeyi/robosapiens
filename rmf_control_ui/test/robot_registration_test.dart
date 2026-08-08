@@ -70,6 +70,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('이동 로봇'), findsOneWidget);
     expect(find.text('설치 로봇'), findsOneWidget);
+    // 값이 어디서 오는지도 등록할 때 정한다.
+    expect(find.text('값의 출처'), findsOneWidget);
 
     // 기본값이 채워져 있으므로 그대로 저장한다.
     await tester.tap(find.text('저장'));
@@ -166,5 +168,26 @@ void main() {
     expect(find.text('로봇 등록 · 1대'), findsOneWidget);
     expect(find.textContaining('OMX-01'), findsWidgets);
     expect(find.textContaining('open_manipulator_x'), findsWidgets);
+  });
+
+  testWidgets('출처는 로봇마다 정하고 화면 전체 설정은 없다', (tester) async {
+    await openRobotMenu(tester);
+    // 예전에는 화면 위에 `로봇 실행 방식` 하나가 있었다. 그러면 실물 두 대에
+    // Gazebo 한 대 같은 구성을 담을 수 없다.
+    expect(find.text('로봇 실행 방식'), findsNothing);
+
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+    expect(find.text('값의 출처'), findsOneWidget);
+    // 등록만 하고 아무것도 안 고른 로봇을 실행에 밀어 넣으면 안 되므로
+    // 기본값은 앱 Mock 이다.
+    expect(find.text('앱 Mock 데이터'), findsWidgets);
+    expect(find.textContaining('fleet adapter 에도 Gazebo 에도'), findsOneWidget);
+
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+    // 등록 카드와 위쪽 요약 모두 출처를 드러낸다.
+    expect(find.textContaining('앱 Mock 데이터'), findsWidgets);
+    expect(find.textContaining('앱 Mock 1'), findsOneWidget);
   });
 }

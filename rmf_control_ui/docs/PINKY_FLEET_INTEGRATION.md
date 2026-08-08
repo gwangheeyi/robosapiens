@@ -171,12 +171,12 @@ ros2 topic echo /odom --once --field pose.pose.position.x
 돌려 쓰면 프로젝트를 바꾸는 순간 spawn 좌표와 charger 이름이 어긋납니다.
 그래서 플릿 설정과 생성된 설정 파일을 **맵 프로젝트에 묶어 MySQL에 보관**합니다.
 
-### 6.1 저장 구조 (schema v9)
+### 6.1 저장 구조 (schema v10)
 
 | 표 | 내용 |
 |---|---|
 | `map_project_fleets` | 프로젝트당 1행. 플릿 이름과 `rmf_fleet` 블록에 대응하는 설정(JSON) |
-| `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, **종류(이동/설치)**, `gz_name`, 구획, 자리 Waypoint, spawn 좌표 |
+| `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, **종류(이동/설치)**, **값의 출처(Mock/Gazebo/실물)**, `gz_name`, 구획, 자리 Waypoint, spawn 좌표 |
 | `map_project_files` | 그 프로젝트에서 만들어진 설정 파일 전부 |
 | `map_project_changes` | **언제 무엇을 바꿨는지.** 파일은 덮어쓰기라 지금 모습만 남는다 |
 
@@ -209,7 +209,7 @@ vicinity  = 로봇 폭 / 2 + 위치 오차 여유
 | `<플릿이름>_config.yaml` | `fleet_adapter` | fleet adapter 설정. **이동 로봇만** 들어가고 `robots[].charger`에 충전 Waypoint 이름이 붙음 |
 | `fleet.yaml` | `fleet_sim` | Gazebo에 띄울 로봇 목록. spawn 좌표는 맵 Waypoint에서 가져옴 |
 | `<맵이름>.launch.xml` | `launch` | RMF core와 이 프로젝트의 fleet adapter를 함께 띄움 |
-| `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 로봇을 올림. 로봇마다 네임스페이스를 나누고, 종류에 따라 pinky/open_manipulator 설명을 씀 |
+| `<맵이름>_bringup.launch.xml` | `bringup` | Gazebo에 이 맵의 월드와 **출처가 Gazebo인 로봇만** 올림. 로봇마다 네임스페이스를 나누고, 종류에 따라 pinky/open_manipulator 설명을 씀 |
 | `<맵이름>_gz_bridge.yaml` | `bridge` | Gazebo↔ROS 토픽 다리. 로봇별 토픽을 절대 이름으로 나눔 |
 | `robots/<로봇 ID>/…` | `robot` | 로봇 한 대의 등록 정보·spawn launch·토픽·설명 (6.3.5) |
 | `run_<맵이름>.sh` | `script` | 전체 실행. Gazebo를 먼저 띄운 뒤 Open-RMF를 올림 |

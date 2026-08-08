@@ -407,12 +407,12 @@ ON DUPLICATE KEY UPDATE
 
 DELETE FROM map_project_robots WHERE project_id = @project_id;
 INSERT INTO map_project_robots (
-  project_id, robot_id, seq, display_name, model, kind, gz_name, zones,
-  charger_waypoint, spawn_x, spawn_y, spawn_heading
+  project_id, robot_id, seq, display_name, model, kind, data_source, gz_name,
+  zones, charger_waypoint, spawn_x, spawn_y, spawn_heading
 )
 SELECT
   @project_id, r.robot_id, r.seq, r.display_name, r.model,
-  COALESCE(r.kind, 'mobile'), r.gz_name,
+  COALESCE(r.kind, 'mobile'), COALESCE(r.data_source, 'mock'), r.gz_name,
   COALESCE(r.zones, ''), r.charger_waypoint, r.spawn_x, r.spawn_y,
   COALESCE(r.spawn_heading, 0)
 FROM JSON_TABLE(
@@ -423,6 +423,7 @@ FROM JSON_TABLE(
     display_name     VARCHAR(128) PATH '\$.displayName',
     model            VARCHAR(64)  PATH '\$.model',
     kind             VARCHAR(16)  PATH '\$.kind',
+    data_source      VARCHAR(16)  PATH '\$.dataSource',
     gz_name          VARCHAR(64)  PATH '\$.gzName',
     zones            VARCHAR(64)  PATH '\$.zonesText',
     charger_waypoint VARCHAR(128) PATH '\$.chargerWaypoint',
@@ -456,6 +457,7 @@ Future<Map<String, dynamic>?> loadMapProjectFleet(String mapName) async {
             'displayName', r.display_name,
             'model', r.model,
             'kind', r.kind,
+            'dataSource', r.data_source,
             'gzName', r.gz_name,
             'zonesText', r.zones,
             'chargerWaypoint', r.charger_waypoint,

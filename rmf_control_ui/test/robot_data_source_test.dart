@@ -12,6 +12,7 @@ void main() {
     displayName: '핑키 1호',
     model: 'PINKY-GZ',
     gzName: 'pinky_01',
+    dataSource: RobotDataSource.gazebo,
     zones: ['ambient'],
     chargerWaypoint: '충전1',
   );
@@ -20,6 +21,7 @@ void main() {
     displayName: '매니퓰레이터 1호',
     model: 'open_manipulator_x',
     kind: RmfRobotKind.workcell,
+    dataSource: RobotDataSource.gazebo,
     gzName: 'omx_01',
     zones: [],
     chargerWaypoint: 'OMX1',

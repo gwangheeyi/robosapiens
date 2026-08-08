@@ -12,6 +12,7 @@ void main() {
       displayName: '핑키 1호',
       model: 'PINKY-GZ-C',
       gzName: 'pinky_01',
+      dataSource: RobotDataSource.gazebo,
       zones: ['ambient', 'chilled', 'frozen'],
       chargerWaypoint: '충전1',
       spawnX: 12.5,
@@ -22,6 +23,7 @@ void main() {
       displayName: '핑키 2호',
       model: 'PINKY-GZ',
       gzName: 'pinky_02',
+      dataSource: RobotDataSource.gazebo,
       zones: ['ambient'],
       chargerWaypoint: '충전2',
       spawnX: 20,
@@ -222,7 +224,7 @@ void main() {
         mapDirectory: '/maps/gwanghee',
       );
       expect(xml, contains('</launch>'));
-      expect(xml, contains('등록된 로봇이 없다'));
+      expect(xml, contains('Gazebo 로 돌릴 로봇이 없다'));
     });
   });
 
@@ -288,6 +290,7 @@ void main() {
       displayName: '매니퓰레이터 1호',
       model: 'open_manipulator_x',
       kind: RmfRobotKind.workcell,
+      dataSource: RobotDataSource.gazebo,
       gzName: 'omx_01',
       zones: [],
       chargerWaypoint: 'OMX1',
@@ -317,7 +320,7 @@ void main() {
         robots: const [workcell],
         mapName: 'gwanghee',
       );
-      expect(yaml, contains('{} # 등록된 이동 로봇이 없다.'));
+      expect(yaml, contains('{} # 관제 대상 이동 로봇이 없다.'));
     });
 
     test('bringup 은 open_manipulator 쪽 설명을 쓴다', () {
@@ -351,6 +354,7 @@ void main() {
           displayName: '팔 1호',
           model: 'omy_3m',
           kind: RmfRobotKind.workcell,
+          dataSource: RobotDataSource.gazebo,
           gzName: 'omy_01',
           zones: [],
           chargerWaypoint: 'OMX1',
@@ -420,6 +424,7 @@ void main() {
       displayName: '매니퓰레이터 1호',
       model: 'open_manipulator_x',
       kind: RmfRobotKind.workcell,
+      dataSource: RobotDataSource.gazebo,
       gzName: 'omx_01',
       zones: [],
       chargerWaypoint: 'OMX1',
@@ -472,6 +477,143 @@ void main() {
         for (final robot in [...robots, workcell]) robotDirectoryName(robot),
       };
       expect(names, {'robots/PK-01', 'robots/PK-02', 'robots/OMX-01'});
+    });
+  });
+
+  group('값의 출처', () {
+    const mock = RmfProjectRobot(
+      robotId: 'MK-01',
+      displayName: '연습용 1호',
+      model: 'PINKY-GZ',
+      gzName: 'mock_01',
+      zones: ['ambient'],
+      chargerWaypoint: '충전9',
+      spawnX: 1,
+      spawnY: 1,
+    );
+    const real = RmfProjectRobot(
+      robotId: 'RP-01',
+      displayName: '실물 1호',
+      model: 'PINKY-GZ',
+      dataSource: RobotDataSource.real,
+      gzName: 'real_01',
+      zones: ['ambient'],
+      chargerWaypoint: '충전8',
+      spawnX: 2,
+      spawnY: 2,
+    );
+    // 이동 로봇 둘은 Gazebo, 여기에 Mock 하나와 실물 하나를 더한다.
+    const mixed = [...robots, mock, real];
+
+    test('기본값은 Mock 이다', () {
+      // 등록만 하고 아무것도 안 고른 로봇을 실행에 밀어 넣으면 안 된다.
+      expect(mock.dataSource, RobotDataSource.mock);
+      expect(mock.isManagedByRmf, isFalse);
+      expect(mock.runsInGazebo, isFalse);
+    });
+
+    test('Mock 은 fleet adapter 에 넣지 않는다', () {
+      // 앱이 제 안에서 굴리는 것이라 실제로는 없다. 넣으면 fleet adapter 가
+      // 오지 않을 로봇의 상태를 계속 기다린다.
+      final yaml = buildFleetAdapterYaml(
+        fleet: const RmfFleetSettings(),
+        robots: mixed,
+        mapName: 'gwanghee',
+      );
+      expect(yaml, contains('    PK-01:'));
+      expect(yaml, contains('    RP-01:'), reason: '실물은 관제 대상이다');
+      expect(yaml, isNot(contains('    MK-01:')));
+      expect(yaml, contains('# 앱 Mock 로봇은 플릿에 넣지 않는다'));
+      expect(yaml, contains('#   MK-01 · 연습용 1호'));
+    });
+
+    test('Gazebo 로 돌릴 것만 시뮬레이터에 올린다', () {
+      // 실물을 시뮬레이터에 또 띄우면 같은 이름이 두 번 뜬다.
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: mixed,
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, contains('robots/PK-01/spawn.launch.xml'));
+      expect(xml, contains('robots/PK-02/spawn.launch.xml'));
+      expect(xml, isNot(contains('robots/MK-01/')));
+      expect(xml, isNot(contains('robots/RP-01/')));
+    });
+
+    test('Gazebo 에 없는 로봇에는 다리를 놓지 않는다', () {
+      // 오지 않을 토픽을 기다리는 다리가 조용히 남는다.
+      final yaml = buildProjectGzBridgeYaml(
+        mapName: 'gwanghee',
+        robots: mixed,
+      );
+      expect(yaml, contains('/pinky_01/odom'));
+      expect(yaml, isNot(contains('mock_01')));
+      expect(yaml, isNot(contains('real_01')));
+    });
+
+    test('Gazebo 로 돌릴 것이 하나도 없으면 그렇다고 적는다', () {
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: const [mock, real],
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, contains('Gazebo 로 돌릴 로봇이 없다'));
+      expect(xml, contains('출처를 Gazebo 로 골라야'));
+      expect(xml, contains('</launch>'));
+    });
+
+    test('로봇 디렉터리에 출처를 적는다', () {
+      expect(
+        buildRobotInfoYaml(mock),
+        contains('data_source: mock # 앱 Mock 데이터'),
+      );
+      expect(
+        buildRobotInfoYaml(real),
+        contains('data_source: real # 실제 로봇'),
+      );
+    });
+
+    test('bringup 이 부르지 않는 이유를 그 파일에 적는다', () {
+      // 파일만 보고 왜 안 올라오는지 헤매지 않아야 한다.
+      final xml = buildRobotSpawnLaunchXml(mock);
+      expect(xml, contains('값의 출처: 앱 Mock 데이터'));
+      expect(xml, contains('bringup 이 부르지 않는다'));
+      // Gazebo 것은 부른다고 적는다.
+      expect(
+        buildRobotSpawnLaunchXml(robots.first),
+        contains('bringup 이 이 파일을 include 한다'),
+      );
+    });
+
+    test('설명이 어디에 들어가고 안 들어가는지 알려 준다', () {
+      expect(
+        buildRobotReadme(mock, 'gwanghee'),
+        contains('fleet adapter 에도 Gazebo 에도 들어가지 않습니다'),
+      );
+      expect(
+        buildRobotReadme(real, 'gwanghee'),
+        contains('실물이 이미 있으므로 Gazebo 에는 올리지 않습니다'),
+      );
+      expect(
+        buildRobotReadme(robots.first, 'gwanghee'),
+        contains('Gazebo 에 올립니다'),
+      );
+    });
+
+    test('출처가 JSON 을 오가도 유지된다', () {
+      expect(
+        RmfProjectRobot.fromJson(real.toJson()).dataSource,
+        RobotDataSource.real,
+      );
+      // v10 이전 기록에는 출처가 없다. 전부 앱 Mock 으로 보고 있었다.
+      expect(
+        RmfProjectRobot.fromJson(const {
+          'robotId': 'OLD-01',
+          'model': 'PINKY-GZ',
+          'gzName': 'old_01',
+        }).dataSource,
+        RobotDataSource.mock,
+      );
     });
   });
 

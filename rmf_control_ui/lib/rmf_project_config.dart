@@ -6,6 +6,58 @@
 /// 여기서 만든 결과는 `map_project_files` 에 프로젝트별로 보관한다.
 library;
 
+/// 이 로봇의 값이 어디서 오는가.
+///
+/// 로봇마다 다를 수 있다. 실물 두 대를 돌리면서 한 대만 Gazebo 로 시험하는 일이
+/// 흔하다. 앱 전체에 하나로 두면 그런 구성을 담을 수 없다.
+///
+/// 무엇을 고르느냐에 따라 실행에 들어가는 자리가 갈린다.
+///
+/// | | fleet adapter | Gazebo bringup | 토픽 다리 |
+/// |---|---|---|---|
+/// | mock   | 안 감 | 안 감 | 안 감 |
+/// | gazebo | 감 | 감 | 감 |
+/// | real   | 감 | 안 감 | 안 감 |
+enum RobotDataSource {
+  /// 앱이 100ms 마다 직접 계산한 값. ROS 는 아예 관여하지 않는다.
+  mock,
+
+  /// Gazebo 가 물리를 돌리고 그 결과가 ROS 토픽으로 온다.
+  gazebo,
+
+  /// 실물 로봇에서 온 ROS 토픽.
+  real;
+
+  String get label => switch (this) {
+    RobotDataSource.mock => '앱 Mock 데이터',
+    RobotDataSource.gazebo => 'Gazebo 시뮬레이션',
+    RobotDataSource.real => '실제 로봇',
+  };
+
+  /// 로봇 화면의 `로봇 실행 방식` 에 쓰는 짧은 이름.
+  String get shortLabel => switch (this) {
+    RobotDataSource.mock => '앱 Mock',
+    RobotDataSource.gazebo => 'Gazebo 시뮬레이션',
+    RobotDataSource.real => '실제 로봇',
+  };
+
+  /// 이 값이 무엇인지 한 줄로.
+  String get summary => switch (this) {
+    RobotDataSource.mock => '앱이 계산한 값입니다. 실제 로봇도 Gazebo도 아닙니다.',
+    RobotDataSource.gazebo => 'Gazebo가 물리를 돌리고 그 결과를 ROS 토픽으로 주고받습니다.',
+    RobotDataSource.real => '실물 로봇이 보내는 ROS 토픽입니다.',
+  };
+
+  /// ROS 토픽을 주고받는가. Mock 은 앱 안에서만 돈다.
+  bool get usesTopics => this != RobotDataSource.mock;
+
+  static RobotDataSource parse(String? value) => switch (value) {
+    'gazebo' => RobotDataSource.gazebo,
+    'real' => RobotDataSource.real,
+    _ => RobotDataSource.mock,
+  };
+}
+
 /// 로봇이 돌아다니는지 한자리에 붙어 있는지.
 ///
 /// 둘은 등록 정보도 실행 방법도 다르다. 이동 로봇은 충전소가 있어야 하고
@@ -39,6 +91,7 @@ class RmfProjectRobot {
     required this.gzName,
     required this.zones,
     this.kind = RmfRobotKind.mobile,
+    this.dataSource = RobotDataSource.mock,
     this.chargerWaypoint,
     this.spawnX,
     this.spawnY,
@@ -51,6 +104,9 @@ class RmfProjectRobot {
 
   /// 돌아다니는 로봇인지 한자리에 붙은 설비인지.
   final RmfRobotKind kind;
+
+  /// 이 로봇의 값이 어디서 오는가. 실행에 들어가는 자리가 여기서 갈린다.
+  final RobotDataSource dataSource;
 
   /// Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(`/<gzName>/odom`).
   final String gzName;
@@ -70,11 +126,18 @@ class RmfProjectRobot {
 
   bool get isMobile => kind == RmfRobotKind.mobile;
 
+  /// Gazebo 에 올릴 로봇인가. Mock 은 앱 안에만 있고, 실물은 이미 있다.
+  bool get runsInGazebo => dataSource == RobotDataSource.gazebo;
+
+  /// Open-RMF 가 관제하는가. Mock 은 앱이 직접 굴리므로 플릿에 넣지 않는다.
+  bool get isManagedByRmf => dataSource != RobotDataSource.mock;
+
   Map<String, Object?> toJson() => {
     'robotId': robotId,
     'displayName': displayName,
     'model': model,
     'kind': kind.storageValue,
+    'dataSource': dataSource.name,
     'gzName': gzName,
     'zones': zones,
     'chargerWaypoint': chargerWaypoint,
@@ -88,6 +151,7 @@ class RmfProjectRobot {
     displayName: data['displayName'] as String? ?? data['robotId'] as String,
     model: data['model'] as String? ?? 'PINKY',
     kind: RmfRobotKind.parse(data['kind'] as String?),
+    dataSource: RobotDataSource.parse(data['dataSource'] as String?),
     gzName: data['gzName'] as String? ?? data['robotId'] as String,
     zones: [
       for (final zone in (data['zones'] as List<dynamic>? ?? const []))
@@ -329,12 +393,15 @@ String buildFleetAdapterYaml({
   // 플릿은 돌아다니는 로봇의 모임이다. 한자리에 붙은 설치 로봇을 여기 넣으면
   // fleet adapter 가 배차 대상으로 보고 갈 수 없는 곳으로 보내려 한다.
   // Open-RMF 에서 그런 것은 플릿이 아니라 workcell 로 다룬다.
+  //
+  // Mock 로봇도 넣지 않는다. 앱이 제 안에서 굴리는 것이라 실제로는 없다.
+  // 넣으면 fleet adapter 가 오지 않을 로봇의 상태를 계속 기다린다.
   final mobile = [
     for (final robot in robots)
-      if (robot.isMobile) robot,
+      if (robot.isMobile && robot.isManagedByRmf) robot,
   ];
   if (mobile.isEmpty) {
-    buffer.writeln('    {} # 등록된 이동 로봇이 없다.');
+    buffer.writeln('    {} # 관제 대상 이동 로봇이 없다.');
   } else {
     for (final robot in mobile) {
       buffer
@@ -344,7 +411,7 @@ String buildFleetAdapterYaml({
   }
   final workcells = [
     for (final robot in robots)
-      if (!robot.isMobile) robot,
+      if (!robot.isMobile && robot.isManagedByRmf) robot,
   ];
   if (workcells.isNotEmpty) {
     buffer
@@ -356,6 +423,19 @@ String buildFleetAdapterYaml({
         '#   ${robot.robotId} · ${robot.displayName} '
         '(${robot.model}) @ ${robot.chargerWaypoint ?? '자리 미지정'}',
       );
+    }
+  }
+  final appOnly = [
+    for (final robot in robots)
+      if (!robot.isManagedByRmf) robot,
+  ];
+  if (appOnly.isNotEmpty) {
+    buffer
+      ..writeln('')
+      ..writeln('# 앱 Mock 로봇은 플릿에 넣지 않는다. 실제로는 없는 로봇이다.')
+      ..writeln('# 이 프로젝트의 Mock 로봇:');
+    for (final robot in appOnly) {
+      buffer.writeln('#   ${robot.robotId} · ${robot.displayName}');
     }
   }
   buffer
@@ -532,10 +612,16 @@ String buildProjectGzBridgeYaml({
       direction: 'GZ_TO_ROS',
     );
   }
-  if (robots.isEmpty) {
-    buffer.writeln('# 등록된 로봇이 없다. RMF 설정에서 추가한다.');
+  // Gazebo 와 ROS 사이의 다리다. Mock 과 실물은 Gazebo 에 없으므로 놓을 다리도
+  // 없다. 넣어 두면 오지 않을 토픽을 기다리는 다리가 조용히 남는다.
+  final bridged = [
+    for (final robot in robots)
+      if (robot.runsInGazebo) robot,
+  ];
+  if (bridged.isEmpty) {
+    buffer.writeln('# Gazebo 로 돌릴 로봇이 없다.');
   }
-  for (final robot in robots) {
+  for (final robot in bridged) {
     final ns = '/${robot.gzName}';
     buffer.writeln(
       '# ${robot.robotId} · ${robot.displayName} (${robot.kind.label})',
@@ -651,17 +737,24 @@ String buildProjectBringupXml({
     ..writeln('      <arg name="gz_args" value="-g -v2"/>')
     ..writeln('    </include>')
     ..writeln('  </group>');
-  if (robots.isEmpty) {
+  // Gazebo 로 돌리기로 한 것만 올린다. Mock 은 앱 안에만 있고, 실물은 이미
+  // 있으므로 시뮬레이터에 또 띄우면 같은 이름이 두 번 뜬다.
+  final spawned = [
+    for (final robot in robots)
+      if (robot.runsInGazebo) robot,
+  ];
+  if (spawned.isEmpty) {
     buffer
       ..writeln('')
-      ..writeln('  <!-- 등록된 로봇이 없다. RMF 설정에서 추가한다. -->');
+      ..writeln('  <!-- Gazebo 로 돌릴 로봇이 없다. -->')
+      ..writeln('  <!-- 로봇 등록에서 값의 출처를 Gazebo 로 골라야 올라온다. -->');
   }
   // 로봇 하나가 디렉터리 하나다. 여기서는 불러오기만 한다.
   //
   // 로봇마다 설정을 제 자리에 두면 한 대를 빼거나 옮길 때 그 디렉터리만
   // 보면 된다. 이 파일에 다 적어 두면 로봇이 늘수록 어느 줄이 누구 것인지
   // 찾기 어려워진다.
-  for (final robot in robots) {
+  for (final robot in spawned) {
     buffer
       ..writeln('')
       ..writeln(
@@ -818,6 +911,7 @@ String buildRobotInfoYaml(RmfProjectRobot robot) {
     ..writeln('id: ${robot.robotId}')
     ..writeln('name: ${robot.displayName}')
     ..writeln('kind: ${robot.kind.storageValue} # ${robot.kind.label}')
+    ..writeln('data_source: ${robot.dataSource.name} # ${robot.dataSource.label}')
     ..writeln('model: ${robot.model}')
     ..writeln('gz_name: ${robot.gzName} # 토픽 네임스페이스')
     ..writeln('zones: [${robot.zones.join(', ')}]');
@@ -851,8 +945,19 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('  ${robot.robotId} · ${robot.displayName} (${robot.kind.label})')
     ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다.')
     ..writeln('')
-    ..writeln('  이 로봇 한 대만 Gazebo 에 올린다. 프로젝트 bringup 이 이')
-    ..writeln('  파일을 include 한다. 월드는 이미 떠 있다고 본다.')
+    ..writeln('  이 로봇 한 대만 Gazebo 에 올린다. 월드는 이미 떠 있다고 본다.')
+    ..writeln('')
+    ..writeln('  값의 출처: ${robot.dataSource.label}');
+  if (robot.runsInGazebo) {
+    buffer.writeln('  프로젝트 bringup 이 이 파일을 include 한다.');
+  } else {
+    // 출처가 Gazebo 가 아니면 bringup 이 이 파일을 부르지 않는다. 파일만 보고
+    // 왜 안 올라오는지 헤매지 않도록 여기 적어 둔다.
+    buffer
+      ..writeln('  값의 출처가 Gazebo 가 아니라서 bringup 이 부르지 않는다.')
+      ..writeln('  Gazebo 로 돌리려면 로봇 등록에서 출처를 Gazebo 로 바꾼다.');
+  }
+  buffer
     ..writeln('')
     ..writeln('  혼자 시험하려면:')
     ..writeln('    ros2 launch <이 파일>')
@@ -965,12 +1070,28 @@ String buildRobotReadme(RmfProjectRobot robot, String mapName) {
     ..writeln('| 항목 | 값 |')
     ..writeln('|---|---|')
     ..writeln('| 종류 | ${robot.kind.label} |')
+    ..writeln('| 값의 출처 | ${robot.dataSource.label} |')
     ..writeln('| 모델 | ${robot.model} |')
     ..writeln('| Gazebo 이름 | ${robot.gzName} |')
     ..writeln('| 토픽 네임스페이스 | `/${robot.gzName}` |')
     ..writeln('| ${robot.isMobile ? '충전' : '설비'} 자리 | $station |');
   if (robot.isMobile) {
     buffer.writeln('| 구획 자격 | ${robot.zones.join(', ')} |');
+  }
+  buffer
+    ..writeln()
+    ..writeln(robot.dataSource.summary)
+    ..writeln();
+  if (robot.runsInGazebo) {
+    buffer.writeln('프로젝트 bringup 이 이 로봇을 Gazebo 에 올립니다.');
+  } else if (robot.dataSource == RobotDataSource.real) {
+    buffer
+      ..writeln('실물이 이미 있으므로 Gazebo 에는 올리지 않습니다.')
+      ..writeln('fleet adapter 에는 들어갑니다.');
+  } else {
+    buffer
+      ..writeln('앱 안에서만 도는 로봇입니다.')
+      ..writeln('fleet adapter 에도 Gazebo 에도 들어가지 않습니다.');
   }
   buffer
     ..writeln()

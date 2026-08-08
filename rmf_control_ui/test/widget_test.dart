@@ -47,7 +47,10 @@ void main() {
     expect(find.text('warehouse.building.yaml'), findsOneWidget);
     expect(find.text('로봇 Spawn'), findsOneWidget);
     expect(find.text('배포 맵 불러오기'), findsOneWidget);
-    expect(find.text('Gazebo · RViz 끔'), findsOneWidget);
+    // 실행 방식은 화면 전체가 아니라 로봇마다 정한다. 등록이 없으면 표시할
+    // 구성도 없다.
+    expect(find.text('로봇 실행 방식'), findsNothing);
+    expect(find.textContaining('로봇 등록 ·'), findsOneWidget);
 
     await tester.tap(find.text('사용법'));
     await tester.pumpAndSettle();

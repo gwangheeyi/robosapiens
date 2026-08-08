@@ -493,12 +493,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 항목을 함께 만든다.
   List<RmfProjectRobot> _fleetRobots = const [];
 
-  /// 지금 보고 있는 로봇 값이 어디서 오는가.
-  ///
-  /// 로봇 화면의 `로봇 실행 방식` 에서 고른다. 작업 상세도 같은 값을 봐야
-  /// 하므로 화면 안에 두지 않고 여기에 둔다.
-  RobotDataSource _dataSource = RobotDataSource.mock;
-
   /// MySQL에 저장된 채로 지금 열려 있는 맵 프로젝트의 지도 이름.
   ///
   /// 대시보드의 작업은 이 프로젝트에 속한다. 프로젝트를 저장하거나 열기 전에는
@@ -4131,23 +4125,27 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
   /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
   /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
-  Future<void> _showTaskDetail(_MockTask task) => showMovableDialog<void>(
-    context: context,
-    builder: (_) => _TaskDetailDialog(
+  Future<void> _showTaskDetail(_MockTask task) {
+    final registered = _fleetRobots
+        .where((robot) => robot.robotId == task.robotId)
+        .firstOrNull;
+    return showMovableDialog<void>(
+      context: context,
+      builder: (_) => _TaskDetailDialog(
       task: task,
       robotOf: (id) => _mockRobots.where((robot) => robot.id == id).firstOrNull,
       toFloor: _floorCoordinate,
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
-      dataSource: _dataSource,
-      // 4단계(rmf-web 연결)가 아직이라 어떤 방식을 골라도 구독은 없다.
+      // 출처는 로봇마다 다르다. 등록에 적힌 것을 그대로 쓴다.
+      dataSource: registered?.dataSource ?? RobotDataSource.mock,
+      // 4단계(rmf-web 연결)가 아직이라 어떤 출처를 골라도 구독은 없다.
       // 붙는 날 이 값만 바꾸면 띠가 따라온다.
       topicsConnected: false,
-      registeredRobot: _fleetRobots
-          .where((robot) => robot.robotId == task.robotId)
-          .firstOrNull,
-    ),
-  );
+      registeredRobot: registered,
+      ),
+    );
+  }
 
   /// 로봇을 최초 위치까지 데려갈 Lane 경로. 갈 길이 없으면 null.
   List<Offset>? _routeToSpawn(_MockRobot robot) {
@@ -6800,6 +6798,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
     );
     var kind = existing?.kind ?? RmfRobotKind.mobile;
+    var dataSource = existing?.dataSource ?? RobotDataSource.mock;
     var charger = existing?.chargerWaypoint;
     var zones = {...?existing?.zones};
     if (zones.isEmpty && kind == RmfRobotKind.mobile) {
@@ -6880,6 +6879,39 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       style: const TextStyle(
                         fontSize: 12,
                         color: Color(0xFF64748B),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // 값이 어디서 오는가. 무엇을 고르느냐에 따라 실행에
+                    // 들어가는 자리가 갈린다.
+                    DropdownButtonFormField<RobotDataSource>(
+                      initialValue: dataSource,
+                      isExpanded: true,
+                      decoration: InputDecoration(
+                        labelText: '값의 출처',
+                        helperText: switch (dataSource) {
+                          RobotDataSource.mock =>
+                            '앱 안에서만 돕니다. fleet adapter 에도 Gazebo 에도 '
+                                '들어가지 않습니다.',
+                          RobotDataSource.gazebo =>
+                            'Gazebo 가 물리를 돌리고 토픽으로 주고받습니다. '
+                                'bringup 과 토픽 다리에 들어갑니다.',
+                          RobotDataSource.real =>
+                            '실물이 이미 있습니다. fleet adapter 에는 들어가고 '
+                                'Gazebo 에는 올리지 않습니다.',
+                        },
+                        helperMaxLines: 3,
+                        border: const OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final value in RobotDataSource.values)
+                          DropdownMenuItem(
+                            value: value,
+                            child: Text(value.label),
+                          ),
+                      ],
+                      onChanged: (value) => setDialogState(
+                        () => dataSource = value ?? RobotDataSource.mock,
                       ),
                     ),
                     const SizedBox(height: 14),
@@ -7046,6 +7078,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                 : openManipulatorModels.first)
                           : modelController.text.trim(),
                       kind: kind,
+                      dataSource: dataSource,
                       gzName: gzController.text.trim().isEmpty
                           ? id.toLowerCase()
                           : gzController.text.trim(),
@@ -9151,9 +9184,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               projectName: _openProjectName,
                               fleetName: _fleetSettings.fleetName,
                               registeredRobots: _fleetRobots,
-                              dataSource: _dataSource,
-                              onDataSourceChanged: (source) =>
-                                  setState(() => _dataSource = source),
                               onLoadMap: _loadMapForRobots,
                               onSpawn: _spawnMockRobot,
                               onToggle: _toggleMockRobot,
@@ -11120,8 +11150,6 @@ class _RobotManagementPage extends StatefulWidget {
     required this.projectName,
     required this.fleetName,
     required this.registeredRobots,
-    required this.dataSource,
-    required this.onDataSourceChanged,
     required this.onLoadMap,
     required this.onSpawn,
     required this.onToggle,
@@ -11148,9 +11176,6 @@ class _RobotManagementPage extends StatefulWidget {
   /// 프로젝트에 등록된 로봇. 스폰과 Gazebo bringup 이 이것을 본다.
   final List<RmfProjectRobot> registeredRobots;
 
-  /// 화면에 보이는 로봇 값이 어디서 오는가.
-  final RobotDataSource dataSource;
-  final ValueChanged<RobotDataSource> onDataSourceChanged;
   final VoidCallback onLoadMap;
   final VoidCallback onSpawn;
   final ValueChanged<_MockRobot> onToggle;
@@ -11444,8 +11469,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                '${robot.kind.label} · ${robot.model} '
-                                '· ${robot.gzName}\n'
+                                '${robot.dataSource.label} · '
+                                '${robot.kind.label} · ${robot.model}\n'
                                 '${robot.isMobile ? '충전' : '설비'} '
                                 '${robot.chargerWaypoint ?? '미지정'}'
                                 '${robot.spawnX == null
@@ -11516,34 +11541,23 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               label: const Text('사용법'),
             ),
             const SizedBox(width: 10),
-            SizedBox(
-              width: 220,
-              child: DropdownButtonFormField<RobotDataSource>(
-                initialValue: widget.dataSource,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '로봇 실행 방식',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: [
-                  for (final source in RobotDataSource.values)
-                    DropdownMenuItem(
-                      value: source,
-                      child: Text(source.shortLabel),
+            // 출처는 이제 로봇마다 다르다. 여기서는 지금 어떤 구성인지만
+            // 보여 준다. 화면 전체에 하나로 두면 실물 두 대에 Gazebo 한 대
+            // 같은 구성을 담을 수 없다.
+            for (final source in RobotDataSource.values)
+              if (widget.registeredRobots.any((r) => r.dataSource == source))
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Chip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      '${source.shortLabel} '
+                      '${widget.registeredRobots.where((r) => r.dataSource == source).length}',
+                      style: const TextStyle(fontSize: 12),
                     ),
-                ],
-                onChanged: (value) {
-                  if (value != null) widget.onDataSourceChanged(value);
-                },
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Chip(
-              avatar: Icon(Icons.visibility_off_outlined, size: 17),
-              label: Text('Gazebo · RViz 끔'),
-            ),
-            const SizedBox(width: 12),
+                  ),
+                ),
+            const SizedBox(width: 6),
             OutlinedButton.icon(
               onPressed: widget.onLoadMap,
               icon: const Icon(Icons.folder_open_outlined),
@@ -11553,11 +11567,9 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
             Tooltip(
               message: widget.registeredRobots.isEmpty
                   ? '먼저 아래에서 로봇을 등록하세요.'
-                  : '등록된 로봇을 지도에 올립니다.',
+                  : '등록된 로봇을 앱 지도에 올려 봅니다.',
               child: FilledButton.icon(
-                onPressed:
-                    widget.dataSource == RobotDataSource.mock &&
-                        widget.registeredRobots.isNotEmpty
+                onPressed: widget.registeredRobots.isNotEmpty
                     ? widget.onSpawn
                     : null,
                 icon: const Icon(Icons.add_circle_outline),
@@ -11577,21 +11589,6 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
           buildingYamlName: widget.activeBuildingYamlName,
           pendingDeployment: widget.pendingDeployment,
         ),
-        const SizedBox(height: 12),
-        if (widget.dataSource != RobotDataSource.mock)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFEFF6FF),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '${widget.dataSource.label} 모드는 외부 백엔드 연결용입니다. '
-              '이 화면의 Spawn은 앱 Mock 모드에서 사용하세요.',
-              style: const TextStyle(color: Color(0xFF1D4ED8)),
-            ),
-          ),
         const SizedBox(height: 18),
         Expanded(
           child: LayoutBuilder(
