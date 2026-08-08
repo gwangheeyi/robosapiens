@@ -10061,6 +10061,7 @@ Future<void> _showUsageGuide(
             '교차로, 회전 전후, 픽업 위치와 하차 위치에는 별도 Waypoint를 만듭니다.',
             '시작점을 잡은 뒤 다음 Waypoint를 찍으면 그 지점이 끝점이 되어 Lane이 이어집니다. 계속 찍으면 계속 이어집니다.',
             'Esc를 누르면 현재 레인을 끝냅니다. Waypoint 삭제처럼 다른 작업은 레인을 끝낸 뒤 그 지점을 눌러 선택합니다.',
+            'Waypoint 입력 모드를 끄면 기존 Waypoint를 끌어 옮길 수 있습니다. Shift를 누른 채 끌면 가로 또는 세로 한 방향으로만 움직입니다.',
             '대기는 경로상의 정지·통과 지점(holding point), 주차는 작업이 없을 때 로봇을 세워 두는 전용 위치(parking spot)입니다.',
             'Lane을 양방향·정방향·역방향 중 실제 운영 규칙에 맞게 지정합니다.',
             'Lane 설정에서 속도 제한, 정면·후진 자세 제약과 좁은 통로 Mutex 그룹을 필요에 따라 지정합니다.',
@@ -11500,11 +11501,54 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
   Offset? _movingWallVertex;
   Offset? _movingWallScreenPoint;
   Offset? _movingWaypoint;
-  Offset? _movingWaypointScreenPoint;
+
+  /// 드래그를 시작한 순간의 Waypoint 화면 좌표. Shift 직선 이동의 기준이다.
+  Offset? _movingWaypointOrigin;
+
+  /// 제약 없이 커서를 따라간 좌표. 화면에 그리고 실제로 놓는 자리는
+  /// [_movingWaypointScreenPoint] 가 정한다.
+  Offset? _movingWaypointRawPoint;
   Offset? _waypointCursor;
   Offset? _hoveredWaypoint;
   Offset? _waypointHoverPosition;
   bool _movingWallHorizontally = true;
+
+  /// Shift를 누르고 있으면 시작점에서 가로 또는 세로 한 방향으로만 움직인다.
+  ///
+  /// 더 많이 끈 축을 남기고 다른 축은 시작값으로 묶는다. 통로를 따라 일직선으로
+  /// 늘어놓을 때 눈대중으로 맞추지 않아도 된다. 끌던 도중에 Shift를 눌렀다
+  /// 떼도 원래 좌표가 남아 있으므로 그대로 되돌아온다.
+  Offset? get _movingWaypointScreenPoint {
+    final raw = _movingWaypointRawPoint;
+    final origin = _movingWaypointOrigin;
+    if (raw == null || origin == null) return raw;
+    if (!HardwareKeyboard.instance.isShiftPressed) return raw;
+    return constrainToAxis(origin, raw);
+  }
+
+  /// Shift를 누르거나 떼는 순간 미리보기가 따라오게 한다. 마우스를 움직이지
+  /// 않으면 다시 그릴 일이 없어 눌러도 반응이 없는 것처럼 보인다.
+  bool _handleKeyEvent(KeyEvent event) {
+    if (_movingWaypoint == null) return false;
+    if (event.logicalKey != LogicalKeyboardKey.shiftLeft &&
+        event.logicalKey != LogicalKeyboardKey.shiftRight) {
+      return false;
+    }
+    setState(() {});
+    return false;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
+    super.dispose();
+  }
 
   Rect? get _selection => _start == null || _current == null
       ? null
@@ -11770,7 +11814,8 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
     final updated = _screenToImage(screenPoint, canvasSize);
     setState(() {
       _movingWaypoint = null;
-      _movingWaypointScreenPoint = null;
+      _movingWaypointOrigin = null;
+      _movingWaypointRawPoint = null;
       _hoveredWaypoint = null;
       _waypointHoverPosition = null;
     });
@@ -12036,22 +12081,22 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                     dragStartBehavior: DragStartBehavior.down,
                     onTap: () => widget.onEditWaypoint(waypoint),
                     onPanStart: (_) => setState(() {
+                      final origin = _vertexToScreen(waypoint, size);
                       _movingWaypoint = waypoint;
-                      _movingWaypointScreenPoint = _vertexToScreen(
-                        waypoint,
-                        size,
-                      );
+                      _movingWaypointOrigin = origin;
+                      _movingWaypointRawPoint = origin;
                     }),
                     onPanUpdate: (details) => setState(() {
-                      final current = _movingWaypointScreenPoint;
+                      final current = _movingWaypointRawPoint;
                       if (current != null) {
-                        _movingWaypointScreenPoint = current + details.delta;
+                        _movingWaypointRawPoint = current + details.delta;
                       }
                     }),
                     onPanEnd: (_) => _finishWaypointMove(size),
                     onPanCancel: () => setState(() {
                       _movingWaypoint = null;
-                      _movingWaypointScreenPoint = null;
+                      _movingWaypointOrigin = null;
+                      _movingWaypointRawPoint = null;
                     }),
                   ),
                 ),

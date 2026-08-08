@@ -146,3 +146,15 @@ WaypointMoveIssue? waypointMoveIssue({
   }
   return null;
 }
+
+/// [point] 를 [origin] 기준 가로 또는 세로 한 방향으로 묶는다.
+///
+/// Waypoint 를 Shift 와 함께 끌 때 쓴다. 더 많이 끈 축을 남기고 다른 축은
+/// 시작값으로 되돌리므로, 통로를 따라 일직선으로 늘어놓을 때 눈대중으로 맞추지
+/// 않아도 된다. 가로·세로 이동량이 같으면 가로를 남긴다.
+Offset constrainToAxis(Offset origin, Offset point) {
+  final delta = point - origin;
+  return delta.dx.abs() >= delta.dy.abs()
+      ? Offset(point.dx, origin.dy)
+      : Offset(origin.dx, point.dy);
+}

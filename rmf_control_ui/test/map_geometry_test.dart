@@ -118,11 +118,7 @@ void main() {
         issueFor(
           const Offset(200, 500),
           const Offset(300, 500),
-          waypoints: const [
-            Offset(200, 500),
-            Offset(700, 10),
-            Offset(900, 10),
-          ],
+          waypoints: const [Offset(200, 500), Offset(700, 10), Offset(900, 10)],
           lanes: const [(Offset(700, 10), Offset(900, 10))],
         ),
         isNull,
@@ -147,6 +143,43 @@ void main() {
         ),
         WaypointMoveIssue.laneTouchesWall,
       );
+    });
+  });
+
+  group('constrainToAxis', () {
+    const origin = Offset(100, 100);
+
+    test('가로로 더 많이 끌면 세로는 시작값에 묶인다', () {
+      expect(
+        constrainToAxis(origin, const Offset(160, 130)),
+        const Offset(160, 100),
+      );
+    });
+
+    test('세로로 더 많이 끌면 가로는 시작값에 묶인다', () {
+      expect(
+        constrainToAxis(origin, const Offset(130, 160)),
+        const Offset(100, 160),
+      );
+    });
+
+    test('반대 방향으로 끌어도 축은 이동량 크기로 고른다', () {
+      expect(
+        constrainToAxis(origin, const Offset(40, 80)),
+        const Offset(40, 100),
+        reason: '가로 60 · 세로 20 이므로 가로가 남는다',
+      );
+    });
+
+    test('가로·세로 이동량이 같으면 가로를 남긴다', () {
+      expect(
+        constrainToAxis(origin, const Offset(150, 150)),
+        const Offset(150, 100),
+      );
+    });
+
+    test('움직이지 않았으면 그대로 둔다', () {
+      expect(constrainToAxis(origin, origin), origin);
     });
   });
 }
