@@ -227,12 +227,16 @@ class _MockRobot {
     required this.position,
     required this.color,
     required this.kind,
+    Offset? spawnPosition,
     this.imageBytes,
     this.image,
-  });
+  }) : spawnPosition = spawnPosition ?? position;
 
   final String id;
   Offset position;
+
+  /// Spawn 할 때 고른 Waypoint. `로봇 원위치`가 되돌려 놓는 자리다.
+  final Offset spawnPosition;
   final Color color;
   final _RobotKind kind;
   final Uint8List? imageBytes;
@@ -240,6 +244,10 @@ class _MockRobot {
   Offset? previousWaypoint;
   Offset? targetWaypoint;
   bool moving = false;
+
+  /// 최초 위치로 돌아가는 중. 작업 없이 움직이는 로봇은 평소 Lane을 따라
+  /// 배회하는데, 원위치 이동은 도착하면 멈춰야 하므로 구분한다.
+  bool returningToSpawn = false;
   double battery = 100;
   final List<Offset> assignedRoute = [];
   String? activeTaskId;
@@ -3778,6 +3786,131 @@ class _ControlDashboardState extends State<ControlDashboard> {
     unawaited(_saveMockTasks());
   }
 
+  /// 로봇을 최초 위치까지 데려갈 Lane 경로. 갈 길이 없으면 null.
+  List<Offset>? _routeToSpawn(_MockRobot robot) {
+    final waypoints = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    if (waypoints.isEmpty) return null;
+    final start = waypoints.reduce(
+      (a, b) => (a - robot.position).distance <= (b - robot.position).distance
+          ? a
+          : b,
+    );
+    final path = _shortestRobotPath(start, robot.spawnPosition);
+    if (path == null) return null;
+    return path.skip(1).toList();
+  }
+
+  /// 이동 로봇을 Spawn 할 때 고른 Waypoint로 되돌린다.
+  ///
+  /// 진행 중이던 작업은 대기로 되돌린다. 로봇만 치우고 작업을 진행 중으로 두면
+  /// 아무도 손대지 않는 작업이 남는다.
+  Future<void> _returnRobotsToSpawn() async {
+    final movable = _mockRobots.where((robot) => robot.kind.isMobile).toList();
+    if (movable.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('되돌릴 이동 로봇이 없습니다.')),
+      );
+      return;
+    }
+    final running = movable.where((robot) => robot.activeTaskId != null).length;
+    final confirmed = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.replay, size: 34),
+        title: const Text('로봇을 최초 위치로'),
+        content: SizedBox(
+          width: 420,
+          child: Text(
+            '이동 로봇 ${movable.length}대를 Spawn 할 때 고른 Waypoint로 되돌립니다.'
+            '${running == 0 ? '' : '\n\n진행 중인 작업 $running건은 대기 상태로 돌아가 다시 배차됩니다.'}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.replay, size: 18),
+            label: const Text('원위치'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    var routed = 0;
+    var teleported = 0;
+    var already = 0;
+    setState(() {
+      for (final robot in movable) {
+        final task = robot.activeTaskId == null
+            ? null
+            : _mockTasks
+                  .where((item) => item.id == robot.activeTaskId)
+                  .firstOrNull;
+        if (task != null && task.status == _MockTaskStatus.active) {
+          task
+            ..status = _MockTaskStatus.queued
+            ..currentStepIndex = 0
+            ..completedAt = null;
+          for (final step in task.steps) {
+            step
+              ..status = _TaskStepStatus.pending
+              ..remainingSeconds = 0
+              ..failureReason = null;
+          }
+        }
+        robot
+          ..activeTaskId = null
+          ..targetWaypoint = null
+          ..previousWaypoint = null
+          ..assignedRoute.clear();
+        _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+
+        if ((robot.position - robot.spawnPosition).distance <= .01) {
+          robot
+            ..moving = false
+            ..returningToSpawn = false;
+          already++;
+          continue;
+        }
+        final path = _routeToSpawn(robot);
+        if (path == null || path.isEmpty) {
+          // Lane으로 갈 길이 없으면 그 자리에 세워 둔다. 못 돌아간 채로 두면
+          // 버튼을 눌러도 아무 일이 없는 것처럼 보인다.
+          robot
+            ..position = robot.spawnPosition
+            ..moving = false
+            ..returningToSpawn = false;
+          teleported++;
+          continue;
+        }
+        robot
+          ..assignedRoute.addAll(path)
+          ..moving = true
+          ..returningToSpawn = true;
+        routed++;
+      }
+    });
+    _startMockRobotTimer();
+    await _saveMockTasks();
+    if (!mounted) return;
+    final detail = [
+      if (routed > 0) '$routed대 복귀 중',
+      if (teleported > 0) '$teleported대는 경로가 없어 즉시 이동',
+      if (already > 0) '$already대는 이미 최초 위치',
+    ].join(' · ');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('로봇 원위치 — $detail'),
+        duration: const Duration(seconds: 5),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
   Map<Offset, String> get _homeWaypoints {
     final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
     return {
@@ -3953,6 +4086,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (target == null) {
           if (robot.assignedRoute.isNotEmpty) {
             target = robot.assignedRoute.removeAt(0);
+          } else if (robot.returningToSpawn) {
+            // 최초 위치에 닿았다. 여기서 멈추지 않으면 아래의 배회 경로를 타고
+            // 다시 떠돌기 시작한다.
+            robot
+              ..position = robot.spawnPosition
+              ..returningToSpawn = false
+              ..moving = false
+              ..previousWaypoint = null;
+            changed = true;
+            continue;
           } else if (task != null) {
             _completeCurrentTaskStep(robot, task);
             changed = true;
@@ -4259,6 +4402,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _MockRobot(
           id: result.name,
           position: result.position,
+          spawnPosition: result.position,
           color: colors[_mockRobots.length % colors.length],
           kind: result.kind,
           imageBytes: result.imageBytes,
@@ -7316,6 +7460,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onOpenRobots: () =>
                                   setState(() => _selectedMenu = 2),
                               onCreate: _createMockTask,
+                              onReturnRobots: _returnRobotsToSpawn,
                               onRun: _runMockTask,
                               onEdit: _editMockTask,
                               onDelete: _deleteMockTask,
@@ -8036,6 +8181,7 @@ class _TaskManagementPage extends StatelessWidget {
     required this.onLoadMap,
     required this.onOpenRobots,
     required this.onCreate,
+    required this.onReturnRobots,
     required this.onRun,
     required this.onEdit,
     required this.onDelete,
@@ -8056,6 +8202,9 @@ class _TaskManagementPage extends StatelessWidget {
   final VoidCallback onLoadMap;
   final VoidCallback onOpenRobots;
   final VoidCallback onCreate;
+
+  /// 이동 로봇을 Spawn 위치로 되돌린다.
+  final VoidCallback onReturnRobots;
   final ValueChanged<_MockTask> onRun;
   final ValueChanged<_MockTask> onEdit;
   final ValueChanged<_MockTask> onDelete;
@@ -8128,6 +8277,14 @@ class _TaskManagementPage extends StatelessWidget {
                 onPressed: onLoadMap,
                 icon: const Icon(Icons.folder_open_outlined),
                 label: const Text('배포 맵 불러오기'),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: robots.any((robot) => robot.kind.isMobile)
+                    ? onReturnRobots
+                    : null,
+                icon: const Icon(Icons.replay),
+                label: const Text('로봇 원위치'),
               ),
               const SizedBox(width: 10),
               FilledButton.icon(
@@ -10181,6 +10338,7 @@ Future<void> _showUsageGuide(
             '화면의 준비 안내에서 운영 맵이 선택되었는지 확인합니다.',
             'Pinky 또는 Mock 주행로봇이 Spawn되어 정지 중인지 확인합니다.',
             '실제 적재 작업이면 담당 OMX-AI와 픽업 스테이션의 연결 상태를 확인합니다.',
+            '로봇이 엉뚱한 곳에 흩어져 있으면 상단 `로봇 원위치`로 Spawn 할 때 고른 Waypoint로 되돌립니다. 진행 중이던 작업은 대기로 돌아가 다시 배차됩니다.',
           ],
           doneWhen: '상단에 작업 준비 완료와 가용 로봇 수가 표시되면 완료입니다.',
         ),

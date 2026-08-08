@@ -1,4 +1,4 @@
-import 'dart:ui';
+import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/main.dart';
@@ -69,6 +69,19 @@ void main() {
     expect(find.text('warehouse.building.yaml'), findsOneWidget);
     expect(find.text('현재 운영 맵'), findsOneWidget);
     expect(find.text('새 작업'), findsOneWidget);
+    // 로봇을 Spawn 하기 전에는 되돌릴 대상이 없어 눌리지 않는다.
+    expect(find.text('로봇 원위치'), findsOneWidget);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.ancestor(
+              of: find.text('로봇 원위치'),
+              matching: find.byType(OutlinedButton),
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
     expect(find.text('생성된 작업이 없습니다.'), findsOneWidget);
     expect(find.text('1단계: 배포 맵을 불러오세요.'), findsOneWidget);
 
