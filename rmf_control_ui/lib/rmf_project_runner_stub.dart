@@ -16,3 +16,11 @@ Future<RmfRunResult> startProject(String mapName) async => const RmfRunResult(
 
 Future<RmfRunResult> stopProject([String? mapName]) async =>
     const RmfRunResult(success: false, message: '웹 빌드에서는 중지할 것이 없습니다.');
+
+class OrphanedProject {
+  const OrphanedProject({required this.mapName, required this.pgid});
+  final String mapName;
+  final int pgid;
+}
+
+Future<List<OrphanedProject>> findOrphanedProjects() async => const [];

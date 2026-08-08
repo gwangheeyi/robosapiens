@@ -496,8 +496,69 @@ class _ControlDashboardState extends State<ControlDashboard> {
       (_) => unawaited(_pollPendingOrders()),
     );
     // 창을 닫을 때 앱이 띄운 프로젝트를 정리한다. 강제 종료(kill·전원)까지는
-    // 막을 수 없다 — 그때는 남은 프로세스를 다음 실행에서 알아채고 정리한다.
+    // 막을 수 없으므로, 그때 남은 것을 시작하면서 알아챈다.
     _exitListener = AppLifecycleListener(onExitRequested: _handleExitRequest);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => unawaited(_checkOrphanedProjects()),
+    );
+  }
+
+  /// 지난 실행에서 정리되지 않고 남은 프로젝트를 알린다.
+  ///
+  /// 강제 종료되면 종료 훅이 돌지 않아 ros2 launch 가 그대로 남는다. 모르고 새로
+  /// 띄우면 schedule node 가 부딪혀 엉뚱한 오류로 나타난다.
+  Future<void> _checkOrphanedProjects() async {
+    List<OrphanedProject> orphans;
+    try {
+      orphans = await findOrphanedProjects();
+    } catch (_) {
+      return;
+    }
+    if (!mounted || orphans.isEmpty) return;
+    final cleanUp = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.running_with_errors, size: 34),
+        title: const Text('정리되지 않은 프로젝트가 있습니다'),
+        content: SizedBox(
+          width: 460,
+          child: Text(
+            '지난 실행이 정상적으로 끝나지 않아 아직 돌고 있는 프로젝트가 있습니다.\n\n'
+            '${orphans.map((o) => '· ${o.mapName} (프로세스 그룹 ${o.pgid})').join('\n')}\n\n'
+            '그대로 두고 새로 띄우면 schedule node 가 부딪혀 엉뚱한 오류로 나타납니다.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('그대로 두기'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.cleaning_services_outlined, size: 18),
+            label: const Text('정리'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (cleanUp != true || !mounted) return;
+    final report = StringBuffer();
+    for (final orphan in orphans) {
+      final result = await stopProject(orphan.mapName);
+      report
+        ..writeln('[${orphan.mapName}]')
+        ..writeln(result.message)
+        ..writeln();
+    }
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: '정리 결과',
+      message: report.toString().trim(),
+    );
   }
 
   /// 창을 닫을 때 앱이 띄운 프로젝트를 내린다.

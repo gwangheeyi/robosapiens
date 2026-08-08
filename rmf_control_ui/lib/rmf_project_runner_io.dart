@@ -119,13 +119,76 @@ Future<RmfRunResult> stopProject([String? mapName]) async {
       buffer.writeln('중지 스크립트 실패: $error');
     }
   } else {
-    buffer.writeln('${script.path} 가 없어 프로세스 그룹만 정리합니다.');
+    buffer.writeln('${script.path} 가 없습니다. 프로세스 그룹만 정리합니다.');
   }
-  // 프로세스 그룹 정리는 중지 스크립트가 한다. 앱이 detached 로 띄우면 여기서
-  // 받은 pid 는 그룹 리더가 아니어서, 그 번호로 그룹을 끊으면 엉뚱한 그룹을
-  // 건드린다. 실행 스크립트가 자기 PGID 를 파일로 남기고 중지 스크립트가 그걸
-  // 읽는다.
+  // 중지 스크립트가 없거나 놓친 것이 있으면 여기서 마무리한다.
+  //
+  // 그룹 번호는 실행 스크립트가 남긴 파일에서 읽는다. Process.start 가 돌려준
+  // pid 는 그룹 리더가 아니라서 그 번호로 그룹을 끊으면 엉뚱한 곳을 건드린다.
+  final pgidFile = File('$directory/.$target.pgid');
+  if (pgidFile.existsSync()) {
+    final pgid = int.tryParse((await pgidFile.readAsString()).trim());
+    if (pgid != null) {
+      final alive = await Process.run('kill', ['-0', '--', '-$pgid']);
+      if (alive.exitCode == 0) {
+        await Process.run('kill', ['-INT', '--', '-$pgid']);
+        await Future<void>.delayed(const Duration(seconds: 3));
+        await Process.run('kill', ['-TERM', '--', '-$pgid']);
+        buffer.writeln('프로세스 그룹 $pgid 를 정리했습니다.');
+      }
+    }
+    if (pgidFile.existsSync()) await pgidFile.delete();
+  }
   _startedProject = null;
   _startedPid = null;
   return RmfRunResult(success: true, message: buffer.toString().trim());
+}
+
+/// 지난 실행에서 정리되지 않고 남은 프로젝트.
+class OrphanedProject {
+  const OrphanedProject({required this.mapName, required this.pgid});
+
+  final String mapName;
+  final int pgid;
+}
+
+/// 강제 종료로 남은 프로젝트를 찾는다.
+///
+/// 실행 스크립트가 남긴 `.<맵이름>.pgid` 를 훑어 그 프로세스 그룹이 아직 살아
+/// 있는지 본다. 앱이 강제로 죽으면(kill -9·전원) 종료 훅이 돌지 않으므로 이
+/// 파일과 프로세스가 그대로 남는다.
+///
+/// 프로세스가 이미 없는 파일은 조용히 지운다. 남지도 않은 것을 두고 알릴 일은
+/// 아니다.
+Future<List<OrphanedProject>> findOrphanedProjects() async {
+  final root = _findProjectRoot();
+  if (root == null) return const [];
+  final maps = Directory('${root.path}/rmf_maps');
+  if (!maps.existsSync()) return const [];
+  final found = <OrphanedProject>[];
+  for (final entry in maps.listSync()) {
+    if (entry is! Directory) continue;
+    for (final file in entry.listSync()) {
+      if (file is! File) continue;
+      final name = file.uri.pathSegments.last;
+      if (!name.startsWith('.') || !name.endsWith('.pgid')) continue;
+      final mapName = name.substring(1, name.length - '.pgid'.length);
+      // 앱이 지금 띄워 둔 것은 남은 것이 아니다.
+      if (mapName == _startedProject) continue;
+      final pgid = int.tryParse((await file.readAsString()).trim());
+      if (pgid == null) {
+        await file.delete();
+        continue;
+      }
+      // 음수는 프로세스 그룹. 시그널 0 은 살아 있는지만 확인한다.
+      final alive = await Process.run('kill', ['-0', '--', '-$pgid']);
+      if (alive.exitCode != 0) {
+        await file.delete();
+        continue;
+      }
+      found.add(OrphanedProject(mapName: mapName, pgid: pgid));
+    }
+  }
+  found.sort((a, b) => a.mapName.compareTo(b.mapName));
+  return found;
 }
