@@ -88,17 +88,18 @@ void main() {
 
     test('같은 이름으로 저장하면 새로 만들지 않고 그 프로젝트를 덮어쓴다', () async {
       await saveMapProject(mapName: first, payloadJson: payload(first, 6));
-      final before = (await listMapProjects()).length;
-
       await saveMapProject(mapName: first, payloadJson: payload(first, 2));
 
-      final after = await listMapProjects();
-      expect(after.length, before, reason: '프로젝트 수가 늘면 안 된다');
-      final updated = after.firstWhere((project) => project.mapName == first);
+      // 전체 개수가 아니라 이 이름의 개수를 센다. 데이터베이스에는 다른 테스트
+      // 파일과 사용자가 만든 프로젝트도 함께 있다.
+      final mine = (await listMapProjects())
+          .where((project) => project.mapName == first)
+          .toList();
+      expect(mine.length, 1, reason: '같은 이름이 두 벌 생기면 안 된다');
       // 조회용 사본은 증분이 아니라 통째로 다시 만든다. 줄어든 Waypoint 수가
       // 그대로 반영돼야 예전 지점이 남아 도는 일이 없다.
-      expect(updated.waypointCount, 2);
-      expect(updated.laneCount, 1);
+      expect(mine.single.waypointCount, 2);
+      expect(mine.single.laneCount, 1);
     });
 
     test('도면 원본과 building.yaml 을 함께 보관한다', () async {

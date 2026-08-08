@@ -948,95 +948,129 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final marginController = TextEditingController(
       text: _localizationMarginMeters.toStringAsFixed(2),
     );
+    String? widthError;
+    String? radiusError;
+    String? marginError;
     final values = await showDialog<(double, double, double)>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        icon: const Icon(Icons.precision_manufacturing_outlined, size: 34),
-        title: const Text('로봇 주행 안전 기준'),
-        content: SizedBox(
-          width: 390,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: widthController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.precision_manufacturing_outlined, size: 34),
+          title: const Text('로봇 주행 안전 기준'),
+          content: SizedBox(
+            width: 390,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: widthController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: '로봇 최대 폭 (m)',
+                      helperText:
+                          '좌우로 가장 넓은 실제 폭입니다. 적재물·돌출 센서·보호 범퍼를 포함한 최대값을 입력하세요.',
+                      helperMaxLines: 2,
+                      errorText: widthError,
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
-                  decoration: const InputDecoration(
-                    labelText: '로봇 최대 폭 (m)',
-                    helperText:
-                        '좌우로 가장 넓은 실제 폭입니다. 적재물·돌출 센서·보호 범퍼를 포함한 최대값을 입력하세요.',
-                    helperMaxLines: 2,
-                    border: OutlineInputBorder(),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: radiusController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: '최소 회전 반경 (m)',
+                      helperText:
+                          '로봇이 주행하며 회전할 때 필요한 최소 반경입니다. 제자리 회전이 가능하면 0을 입력할 수 있습니다.',
+                      helperMaxLines: 2,
+                      errorText: radiusError,
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: radiusController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: marginController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: '위치 오차·안전 여유 (m)',
+                      helperText:
+                          'Localization 오차, 제어 편차와 벽 충돌 방지를 위해 로봇 외곽에 추가할 거리입니다.',
+                      helperMaxLines: 2,
+                      errorText: marginError,
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
-                  decoration: const InputDecoration(
-                    labelText: '최소 회전 반경 (m)',
-                    helperText:
-                        '로봇이 주행하며 회전할 때 필요한 최소 반경입니다. 제자리 회전이 가능하면 0을 입력할 수 있습니다.',
-                    helperMaxLines: 2,
-                    border: OutlineInputBorder(),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
+                    style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
                   ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: marginController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: '위치 오차·안전 여유 (m)',
-                    helperText:
-                        'Localization 오차, 제어 편차와 벽 충돌 방지를 위해 로봇 외곽에 추가할 거리입니다.',
-                    helperMaxLines: 2,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
-                  style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final width = _parseMeters(widthController.text);
+                final radius = _parseMeters(radiusController.text);
+                final margin = _parseMeters(marginController.text);
+                final nextWidthError = width == null
+                    ? '숫자로 입력하세요. 예: 0.20'
+                    : width <= 0
+                    ? '0보다 커야 합니다.'
+                    : null;
+                final nextRadiusError = radius == null
+                    ? '숫자로 입력하세요. 예: 0.15'
+                    : radius < 0
+                    ? '0 이상이어야 합니다.'
+                    : null;
+                final nextMarginError = margin == null
+                    ? '숫자로 입력하세요. 예: 0.05'
+                    : margin < 0
+                    ? '0 이상이어야 합니다.'
+                    : null;
+                // 예전에는 여기서 그냥 return 했다. 버튼을 눌러도 아무 일이
+                // 일어나지 않아 값이 저장되지 않는 것처럼 보였다.
+                if (nextWidthError != null ||
+                    nextRadiusError != null ||
+                    nextMarginError != null) {
+                  setDialogState(() {
+                    widthError = nextWidthError;
+                    radiusError = nextRadiusError;
+                    marginError = nextMarginError;
+                  });
+                  return;
+                }
+                Navigator.pop(dialogContext, (width!, radius!, margin!));
+              },
+              child: const Text('기준 저장'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final width = double.tryParse(widthController.text.trim());
-              final radius = double.tryParse(radiusController.text.trim());
-              final margin = double.tryParse(marginController.text.trim());
-              if (width == null ||
-                  radius == null ||
-                  margin == null ||
-                  width <= 0 ||
-                  radius < 0 ||
-                  margin < 0) {
-                return;
-              }
-              Navigator.pop(dialogContext, (width, radius, margin));
-            },
-            child: const Text('기준 저장'),
-          ),
-        ],
       ),
     );
-    widthController.dispose();
-    radiusController.dispose();
-    marginController.dispose();
+    // 창이 닫히는 애니메이션이 끝나기 전에 컨트롤러를 버리면, 사라지는 중인
+    // TextField 가 이미 버려진 컨트롤러를 다시 읽어 예외가 난다. 애니메이션이
+    // 끝난 뒤에 버리되, 그동안 사용자를 기다리게 하지는 않는다.
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 350)).then((_) {
+        widthController.dispose();
+        radiusController.dispose();
+        marginController.dispose();
+      }),
+    );
     if (values == null || !mounted) return;
     _recordUndo();
     setState(() {
@@ -1045,8 +1079,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _localizationMarginMeters = values.$3;
       _isDeployed = false;
     });
+    // 여기까지는 편집 중인 상태만 바뀐다. 어디에 보존되는지 알려 주지 않으면
+    // 창을 닫고 다시 열었을 때 값이 돌아온 것처럼 보인다.
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '로봇 안전 기준을 적용했습니다 — 폭 ${values.$1.toStringAsFixed(2)}m · '
+          '회전 반경 ${values.$2.toStringAsFixed(2)}m · 여유 ${values.$3.toStringAsFixed(2)}m. '
+          '`프로젝트 저장`을 눌러야 맵 프로젝트에 보존됩니다.',
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
     await _showValidationDialog();
   }
+
+  /// 미터 값을 읽는다. `0,2` 처럼 쉼표를 소수점으로 쓴 입력도 받는다 —
+  /// 숫자 자판과 붙여넣기에서 흔하고, 거절해 봐야 사용자가 알 방법이 없다.
+  static double? _parseMeters(String raw) =>
+      double.tryParse(raw.trim().replaceAll(',', '.'));
 
   List<_ScenarioWaypointAssignment>? _buildScenarioAssignments(
     _MapScenarioConfig config,
