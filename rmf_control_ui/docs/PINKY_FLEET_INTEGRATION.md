@@ -631,11 +631,14 @@ v5 데이터베이스는 `db/migrate_v5_to_v6.sql`을 적용합니다. 기존에
 
 | 노드 | 하는 일 |
 |---|---|
-| `rmf_traffic_schedule` | 모든 로봇의 경로를 한자리에서 잡아 충돌을 막음 |
-| `rmf_building_map_server` | `building.yaml` 을 읽어 맵을 뿌림 |
+| `rmf_traffic_schedule_primary` | 모든 로봇의 경로를 한자리에서 잡아 충돌을 막음 |
+| `building_map_server` | `building.yaml` 을 읽어 맵을 뿌림 |
 | `rmf_dispatcher_node` | 작업을 어느 로봇에 줄지 입찰로 정함 |
-| `rmf_traffic_blockade` | 좁은 길에서 서로 막히는 것을 푼다 |
+| `rmf_traffic_blockade_node` | 좁은 길에서 서로 막히는 것을 푼다 |
 | `*_fleet_adapter` | 이 프로젝트의 로봇을 RMF 에 이어 줌 |
+
+노드 하나하나가 무엇을 맡고 무엇이 없으면 무엇이 안 되는지는
+[관제 노드별 하는 일](RMF_NODES.md)에 따로 정리했습니다.
 
 **떠 있는 백엔드가 없습니다** 는 이것들이 하나도 없다는 뜻입니다. 앱 Mock 로봇만
 쓸 때는 정상입니다 — Mock 은 앱이 제 안에서 굴리므로 RMF 가 필요 없습니다.
@@ -738,6 +741,8 @@ rmf-web WebSocket ws://127.0.0.1:8000/_internal
 
 - [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) — 등록 정보가 어떤 파일로
   흘러가는지, `robots/<로봇 ID>/` 에 무엇이 들어 있는지
+- [관제 노드별 하는 일](RMF_NODES.md) — 백엔드를 띄우면 어떤 노드가 올라오고
+  무엇이 없으면 무엇이 안 되는지
 - [맵 작성 및 배포 가이드](MAP_AUTHORING_AND_DEPLOYMENT.md) — 맵을 만들고
   `nav_graphs/0.yaml`을 얻는 과정
 - [앱 전용 Mock 로봇 가이드](APP_MOCK_ROBOTS.md) — 지금의 Mock 주행 범위
