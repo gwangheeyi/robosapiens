@@ -213,6 +213,10 @@ class _ScenarioWaypointAssignment {
 
 enum _RobotKind { mockMobile, pinky, omxManipulator, mockHumanoid, human }
 
+/// Spawn 창에서 `등록 없이 배치`를 고른 것. 관제 대상이 아닌 사람·휴머노이드만
+/// 이 길로 올린다. 로봇은 등록해야 Gazebo 와 fleet adapter 가 함께 안다.
+const String _unregisteredSpawn = '__unregistered__';
+
 extension on _RobotKind {
   String get label => switch (this) {
     _RobotKind.mockMobile => 'Mock 주행로봇',
@@ -4453,17 +4457,62 @@ class _ControlDashboardState extends State<ControlDashboard> {
     });
   }
 
+  /// 등록한 모델 이름에서 지도에 그릴 종류를 고른다.
+  ///
+  /// 등록은 Open-RMF 쪽 정보(모델·gz 이름·충전 자리)를 담고, 지도 표시는 앱
+  /// 쪽 개념이다. 둘을 따로 물으면 같은 것을 두 번 적게 된다.
+  static _RobotKind _kindForModel(String model) {
+    final upper = model.toUpperCase();
+    if (upper.contains('OMX') || upper.contains('MANIPULATOR')) {
+      return _RobotKind.omxManipulator;
+    }
+    if (upper.contains('HUMANOID')) return _RobotKind.mockHumanoid;
+    if (upper.contains('PINKY')) return _RobotKind.pinky;
+    return _RobotKind.mockMobile;
+  }
+
   Future<void> _spawnMockRobot() async {
     final runtimeWaypoints = (_robotDeployedMap?.waypoints ?? _laneWaypoints)
         .toSet()
         .toList();
     final runtimeLanes = _robotDeployedMap?.lanes ?? _recommendedLanes;
     final runtimeNames = _robotDeployedMap?.waypointNames ?? _waypointNames;
-    if (runtimeWaypoints.isEmpty) {
-      _showProcessingWarning('Mock 로봇 Spawn', '먼저 Lane과 Waypoint를 만들어 주세요.');
+    // 스폰은 등록된 로봇을 지도에 올리는 일이다. 무엇이 있는지 먼저 정해야
+    // Gazebo bringup 과 fleet adapter 가 같은 로봇을 본다.
+    //
+    // 여기서 막힐 때는 팝업으로 알린다. `_processingWarning` 은 대시보드에만
+    // 보여서, 로봇 메뉴에서 누르면 아무 일도 없는 것처럼 보인다.
+    if (_fleetRobots.isEmpty) {
+      await showWaypointErrorDialog(
+        context,
+        title: '로봇 Spawn',
+        message:
+            '등록된 로봇이 없습니다.\n\n'
+            '`로봇 등록`에서 먼저 등록해 주세요.\n'
+            '맵에 충전 카테고리 Waypoint가 있다면 '
+            '`충전 Waypoint에서 만들기`로 한 번에 채울 수 있습니다.',
+      );
       return;
     }
-    var kind = _RobotKind.mockMobile;
+    if (runtimeWaypoints.isEmpty) {
+      await showWaypointErrorDialog(
+        context,
+        title: '로봇 Spawn',
+        message:
+            '로봇을 올릴 Waypoint가 없습니다.\n\n'
+            '맵 관리에서 도면을 올리고 Waypoint와 Lane을 만든 뒤, '
+            '`배포 맵 불러오기`로 이 화면에 불러오세요.',
+      );
+      return;
+    }
+    final unspawned = [
+      for (final robot in _fleetRobots)
+        if (!_mockRobots.any((mock) => mock.id == robot.robotId)) robot,
+    ];
+    RmfProjectRobot? registered = unspawned.firstOrNull;
+    var kind = registered == null
+        ? _RobotKind.mockHumanoid
+        : _kindForModel(registered.model);
     bool isLaneConnected(Offset point) => runtimeLanes.any(
       (lane) =>
           (lane.$1 - point).distance <= .01 ||
@@ -4483,10 +4532,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return runtimeWaypoints.where(isLaneConnected).toList();
     }
 
+    /// 등록된 로봇의 충전 Waypoint 를 지도에서 찾는다. 등록할 때 고른 자리가
+    /// 그대로 출발점이 되어야 spawn 좌표와 어긋나지 않는다.
+    Offset? chargerPoint(RmfProjectRobot? robot) {
+      final name = robot?.chargerWaypoint?.trim();
+      if (name == null || name.isEmpty) return null;
+      return runtimeWaypoints
+          .where((point) => (runtimeNames[point] ?? '').trim() == name)
+          .firstOrNull;
+    }
+
+    /// 고를 수 있는 출발 Waypoint. 등록된 충전 자리는 Lane 에 붙어 있지 않더라도
+    /// 반드시 목록에 넣는다. 그러지 않으면 골라 둔 자리가 목록에 없어 빈칸으로
+    /// 보인다.
+    List<Offset> startCandidates(_RobotKind robotKind) {
+      final charger = chargerPoint(registered);
+      final base = candidatesFor(robotKind);
+      if (charger == null || base.contains(charger)) return base;
+      return [charger, ...base];
+    }
+
     final controller = TextEditingController(
-      text: 'mock-${_mockRobots.length + 1}',
+      text: registered?.robotId ?? '사람-${_mockRobots.length + 1}',
     );
-    var start = candidatesFor(kind).firstOrNull ?? runtimeWaypoints.first;
+    var start =
+        chargerPoint(registered) ??
+        candidatesFor(kind).firstOrNull ??
+        runtimeWaypoints.first;
     Uint8List? selectedImageBytes;
     ui.Image? selectedImage;
     String? selectedImageName;
@@ -4501,41 +4573,105 @@ class _ControlDashboardState extends State<ControlDashboard> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                DropdownButtonFormField<_RobotKind>(
-                  initialValue: kind,
-                  decoration: const InputDecoration(
-                    labelText: '로봇 유형',
-                    border: OutlineInputBorder(),
+                DropdownButtonFormField<String>(
+                  initialValue: registered?.robotId ?? _unregisteredSpawn,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: '등록된 로봇',
+                    helperText: unspawned.isEmpty
+                        ? '등록된 로봇이 모두 배치되어 있습니다.'
+                        : '로봇 등록에서 정한 ID·모델·충전 자리를 그대로 씁니다.',
+                    border: const OutlineInputBorder(),
                   ),
                   items: [
-                    for (final value in _RobotKind.values)
-                      DropdownMenuItem(value: value, child: Text(value.label)),
+                    for (final robot in unspawned)
+                      DropdownMenuItem(
+                        value: robot.robotId,
+                        child: Text(
+                          '${robot.robotId} · ${robot.displayName}'
+                          ' (${robot.model})',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    const DropdownMenuItem(
+                      value: _unregisteredSpawn,
+                      child: Text('등록 없이 배치 — 사람 · 휴머노이드'),
+                    ),
                   ],
                   onChanged: (value) {
-                    if (value == null) return;
                     setDialogState(() {
-                      kind = value;
-                      final prefix = switch (value) {
-                        _RobotKind.mockMobile => 'mock',
-                        _RobotKind.pinky => 'pinky',
-                        _RobotKind.omxManipulator => 'omx',
-                        _RobotKind.mockHumanoid => 'humanoid',
-                        _RobotKind.human => 'human',
-                      };
-                      controller.text = '$prefix-${_mockRobots.length + 1}';
-                      final candidates = candidatesFor(value);
-                      if (candidates.isNotEmpty) start = candidates.first;
+                      registered = value == _unregisteredSpawn
+                          ? null
+                          : unspawned
+                                .where((robot) => robot.robotId == value)
+                                .firstOrNull;
+                      // 등록된 로봇은 무엇인지 이미 정해져 있다. 등록 없이
+                      // 배치하는 것은 관제 대상이 아닌 사람·휴머노이드뿐이다.
+                      kind = registered == null
+                          ? _RobotKind.mockHumanoid
+                          : _kindForModel(registered!.model);
+                      controller.text =
+                          registered?.robotId ??
+                          '사람-${_mockRobots.length + 1}';
+                      start =
+                          chargerPoint(registered) ??
+                          candidatesFor(kind).firstOrNull ??
+                          start;
                     });
                   },
                 ),
                 const SizedBox(height: 14),
-                TextField(
-                  controller: controller,
-                  decoration: const InputDecoration(
-                    labelText: '로봇 이름',
-                    border: OutlineInputBorder(),
+                if (registered == null) ...[
+                  DropdownButtonFormField<_RobotKind>(
+                    initialValue: kind,
+                    decoration: const InputDecoration(
+                      labelText: '유형',
+                      helperText: '관제 대상 로봇은 등록해야 스폰할 수 있습니다.',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: _RobotKind.mockHumanoid,
+                        child: Text('휴머노이드'),
+                      ),
+                      DropdownMenuItem(
+                        value: _RobotKind.human,
+                        child: Text('사람'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setDialogState(() {
+                        kind = value;
+                        final prefix = value == _RobotKind.human
+                            ? '사람'
+                            : '휴머노이드';
+                        controller.text = '$prefix-${_mockRobots.length + 1}';
+                        final candidates = candidatesFor(value);
+                        if (candidates.isNotEmpty) start = candidates.first;
+                      });
+                    },
                   ),
-                ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: controller,
+                    decoration: const InputDecoration(
+                      labelText: '이름',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ] else
+                  InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: '배치할 로봇',
+                      border: OutlineInputBorder(),
+                    ),
+                    child: Text(
+                      '${registered!.robotId} · ${kind.label}'
+                      ' · ${registered!.gzName}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
@@ -4642,23 +4778,25 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 ),
                 const SizedBox(height: 14),
                 DropdownButtonFormField<Offset>(
-                  key: ValueKey(kind),
-                  initialValue: candidatesFor(kind).contains(start)
+                  key: ValueKey('$kind${registered?.robotId}'),
+                  initialValue: startCandidates(kind).contains(start)
                       ? start
                       : null,
                   decoration: InputDecoration(
                     labelText: kind.isMobile ? '시작 Waypoint' : '고정 설치 Waypoint',
-                    helperText: candidatesFor(kind).isEmpty
+                    helperText: startCandidates(kind).isEmpty
                         ? kind.isMobile
                               ? 'Lane에 연결된 이동 Waypoint가 없습니다.'
                               : '설비 Waypoint가 없습니다.'
+                        : registered?.chargerWaypoint != null
+                        ? '등록된 충전 자리 ${registered!.chargerWaypoint} 로 맞춰 두었습니다.'
                         : kind == _RobotKind.omxManipulator
                         ? 'Lane이 없는 설비 Waypoint를 우선 표시합니다.'
                         : null,
                     border: OutlineInputBorder(),
                   ),
                   items: [
-                    for (final point in candidatesFor(kind))
+                    for (final point in startCandidates(kind))
                       DropdownMenuItem(
                         value: point,
                         child: Text(
@@ -4683,18 +4821,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
             FilledButton.icon(
               onPressed: () {
                 final name = controller.text.trim();
-                if (name.isNotEmpty && candidatesFor(kind).contains(start)) {
-                  Navigator.pop(
-                    dialogContext,
-                    _RobotSpawnSelection(
-                      name: name,
-                      position: start,
-                      kind: kind,
-                      imageBytes: selectedImageBytes,
-                      image: selectedImage,
-                    ),
+                // 등록된 로봇의 충전 자리는 Lane 에 붙어 있지 않을 수도 있다.
+                // 그때도 지도 위의 Waypoint 이기만 하면 올려 준다. 예전처럼
+                // 아무 말 없이 버튼이 먹지 않으면 왜인지 알 길이 없다.
+                if (name.isEmpty) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(content: Text('이름을 입력해 주세요.')),
                   );
+                  return;
                 }
+                if (!runtimeWaypoints.contains(start)) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    const SnackBar(content: Text('올릴 Waypoint를 골라 주세요.')),
+                  );
+                  return;
+                }
+                Navigator.pop(
+                  dialogContext,
+                  _RobotSpawnSelection(
+                    name: name,
+                    position: start,
+                    kind: kind,
+                    imageBytes: selectedImageBytes,
+                    image: selectedImage,
+                  ),
+                );
               },
               icon: const Icon(Icons.add, size: 18),
               label: const Text('Spawn'),
@@ -6529,6 +6680,115 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return saved;
   }
 
+  /// 로봇을 프로젝트에 등록한다. 등록해야 Gazebo 에 스폰되고 fleet adapter 가
+  /// 그 로봇을 안다.
+  ///
+  /// 등록은 맵 관리의 RMF 설정 창에도 있지만, 로봇을 다루러 온 사람이 먼저 찾는
+  /// 곳은 로봇 메뉴다. 두 곳이 같은 [_fleetRobots] 를 본다.
+  Future<void> _registerFleetRobot() async {
+    final robot = await _editFleetRobot(null);
+    if (robot == null) return;
+    setState(
+      () => _fleetRobots = [
+        ..._fleetRobots.where((r) => r.robotId != robot.robotId),
+        robot,
+      ],
+    );
+    await _saveSettingToOpenProject(
+      label: '로봇 등록',
+      detail: '${robot.robotId} · ${robot.displayName}',
+    );
+  }
+
+  /// 등록된 로봇 하나를 고친다.
+  Future<void> _updateFleetRobot(RmfProjectRobot existing) async {
+    final updated = await _editFleetRobot(existing);
+    if (updated == null) return;
+    setState(
+      () => _fleetRobots = [
+        for (final robot in _fleetRobots)
+          if (robot.robotId == existing.robotId) updated else robot,
+      ],
+    );
+    await _saveSettingToOpenProject(
+      label: '로봇 수정',
+      detail: '${updated.robotId} · ${updated.displayName}',
+    );
+  }
+
+  /// 등록을 지운다. 이미 스폰해 둔 로봇이 있으면 함께 사라진다는 것을 먼저
+  /// 알린다. 등록이 없어지면 다음 실행에서 그 로봇은 올라오지 않는다.
+  Future<void> _unregisterFleetRobot(RmfProjectRobot robot) async {
+    final spawned = _mockRobots.where((m) => m.id == robot.robotId).toList();
+    final confirmed = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.delete_outline, size: 32),
+        title: const Text('로봇 등록 해제'),
+        content: SizedBox(
+          width: 420,
+          child: Text(
+            '${robot.robotId} · ${robot.displayName} 의 등록을 지웁니다.\n\n'
+            '이 로봇은 Gazebo 에 올라오지 않고 fleet adapter 에서도 빠집니다.'
+            '${spawned.isEmpty ? '' : '\n\n지금 배치되어 있는 이 로봇도 함께 내립니다.'}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+            child: const Text('등록 해제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    for (final mock in spawned) {
+      _removeMockRobot(mock);
+    }
+    setState(
+      () => _fleetRobots = [
+        for (final r in _fleetRobots)
+          if (r.robotId != robot.robotId) r,
+      ],
+    );
+    await _saveSettingToOpenProject(
+      label: '로봇 등록 해제',
+      detail: '${robot.robotId} · ${robot.displayName}',
+    );
+  }
+
+  /// 충전 Waypoint 마다 로봇을 한 대씩 만들어 등록한다. spawn 좌표와 charger 가
+  /// 한꺼번에 채워지므로 손으로 넣다 어긋날 일이 없다.
+  Future<void> _registerRobotsFromChargers() async {
+    final generated = _robotsFromChargers();
+    if (generated.isEmpty) {
+      // 팝업으로 알린다. 대시보드에만 뜨는 경고로 두면 로봇 메뉴에서는 눌러도
+      // 아무 일이 없는 것처럼 보인다.
+      await showWaypointErrorDialog(
+        context,
+        title: '충전 Waypoint에서 만들기',
+        message:
+            '이름이 있는 충전 카테고리 Waypoint가 없습니다.\n\n'
+            '맵 관리에서 Waypoint를 찍고 카테고리를 `충전`으로 바꾼 뒤 '
+            '이름을 넣어 주세요. 그 자리가 로봇의 충전소이자 '
+            'Gazebo spawn 좌표가 됩니다.',
+      );
+      return;
+    }
+    setState(() => _fleetRobots = generated);
+    await _saveSettingToOpenProject(
+      label: '로봇 등록',
+      detail: '충전 Waypoint에서 ${generated.length}대',
+    );
+  }
+
   /// RMF 설정 창 — 로봇 목록과 생성된 설정 파일을 한자리에서 본다.
   Future<void> _showRmfConfigDialog() async {
     final project = _openProjectName;
@@ -6597,17 +6857,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 ),
               ),
               TextButton.icon(
-                onPressed: () {
-                  final generated = _robotsFromChargers();
-                  if (generated.isEmpty) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('맵에 이름이 있는 충전 Waypoint가 없습니다.'),
-                      ),
-                    );
-                    return;
-                  }
-                  setState(() => _fleetRobots = generated);
+                onPressed: () async {
+                  await _registerRobotsFromChargers();
                   setDialogState(() {});
                 },
                 icon: const Icon(Icons.auto_awesome, size: 18),
@@ -6616,18 +6867,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
               const SizedBox(width: 6),
               FilledButton.icon(
                 onPressed: () async {
-                  final robot = await _editFleetRobot(null);
-                  if (robot == null) return;
-                  setState(
-                    () => _fleetRobots = [
-                      ..._fleetRobots.where((r) => r.robotId != robot.robotId),
-                      robot,
-                    ],
-                  );
+                  await _registerFleetRobot();
                   setDialogState(() {});
                 },
                 icon: const Icon(Icons.add, size: 18),
-                label: const Text('로봇 추가'),
+                label: const Text('로봇 등록'),
               ),
             ],
           ),
@@ -6669,26 +6913,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             IconButton(
                               tooltip: '수정',
                               onPressed: () async {
-                                final updated = await _editFleetRobot(robot);
-                                if (updated == null) return;
-                                setState(() {
-                                  final next = [..._fleetRobots];
-                                  next[index] = updated;
-                                  _fleetRobots = next;
-                                });
+                                await _updateFleetRobot(robot);
                                 setDialogState(() {});
                               },
                               icon: const Icon(Icons.edit_outlined, size: 18),
                             ),
                             IconButton(
-                              tooltip: '삭제',
-                              onPressed: () {
-                                setState(
-                                  () => _fleetRobots = [
-                                    for (final r in _fleetRobots)
-                                      if (r.robotId != robot.robotId) r,
-                                  ],
-                                );
+                              tooltip: '등록 해제',
+                              onPressed: () async {
+                                await _unregisterFleetRobot(robot);
                                 setDialogState(() {});
                               },
                               icon: const Icon(
@@ -8516,10 +8749,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   _robotDeployedMap?.waypointNames ??
                                   _waypointNames,
                               robots: _mockRobots,
+                              projectName: _openProjectName,
+                              fleetName: _fleetSettings.fleetName,
+                              registeredRobots: _fleetRobots,
                               onLoadMap: _loadMapForRobots,
                               onSpawn: _spawnMockRobot,
                               onToggle: _toggleMockRobot,
                               onRemove: _removeMockRobot,
+                              onRegisterRobot: () =>
+                                  unawaited(_registerFleetRobot()),
+                              onEditRegisteredRobot: (robot) =>
+                                  unawaited(_updateFleetRobot(robot)),
+                              onUnregisterRobot: (robot) =>
+                                  unawaited(_unregisterFleetRobot(robot)),
+                              onRegisterFromChargers: () =>
+                                  unawaited(_registerRobotsFromChargers()),
                             )
                           : _selectedMenu == 3
                           ? _TaskManagementPage(
@@ -10434,6 +10678,31 @@ class _MapFileStatusItem extends StatelessWidget {
   );
 }
 
+/// 등록된 로봇이 지금 지도에 올라와 있는지 한눈에 보여 준다.
+class _RegistrationBadge extends StatelessWidget {
+  const _RegistrationBadge({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: .12),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      label,
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        color: color,
+      ),
+    ),
+  );
+}
+
 class _RobotManagementPage extends StatefulWidget {
   const _RobotManagementPage({
     required this.drawing,
@@ -10444,10 +10713,17 @@ class _RobotManagementPage extends StatefulWidget {
     required this.waypoints,
     required this.waypointNames,
     required this.robots,
+    required this.projectName,
+    required this.fleetName,
+    required this.registeredRobots,
     required this.onLoadMap,
     required this.onSpawn,
     required this.onToggle,
     required this.onRemove,
+    required this.onRegisterRobot,
+    required this.onEditRegisteredRobot,
+    required this.onUnregisterRobot,
+    required this.onRegisterFromChargers,
   });
 
   final UploadedDrawing? drawing;
@@ -10458,10 +10734,21 @@ class _RobotManagementPage extends StatefulWidget {
   final List<Offset> waypoints;
   final Map<Offset, String> waypointNames;
   final List<_MockRobot> robots;
+
+  /// 열린 맵 프로젝트. 없으면 등록해도 남길 곳이 없다.
+  final String? projectName;
+  final String fleetName;
+
+  /// 프로젝트에 등록된 로봇. 스폰과 Gazebo bringup 이 이것을 본다.
+  final List<RmfProjectRobot> registeredRobots;
   final VoidCallback onLoadMap;
   final VoidCallback onSpawn;
   final ValueChanged<_MockRobot> onToggle;
   final ValueChanged<_MockRobot> onRemove;
+  final VoidCallback onRegisterRobot;
+  final ValueChanged<RmfProjectRobot> onEditRegisteredRobot;
+  final ValueChanged<RmfProjectRobot> onUnregisterRobot;
+  final VoidCallback onRegisterFromChargers;
 
   @override
   State<_RobotManagementPage> createState() => _RobotManagementPageState();
@@ -10629,6 +10916,168 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     );
   }
 
+  /// 로봇 등록 카드.
+  ///
+  /// 스폰은 등록된 로봇을 지도에 올리는 일이다. 무엇이 있는지 정하는 곳이 먼저
+  /// 있어야 한다. 여기 등록한 로봇이 Gazebo 에 올라가고 fleet adapter 의
+  /// `robots` 항목이 된다 — 맵 관리의 RMF 설정 창과 같은 목록이다.
+  Widget _registrationCard() {
+    final robots = widget.registeredRobots;
+    final spawnedIds = {for (final robot in widget.robots) robot.id};
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.app_registration, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '로봇 등록 · ${robots.length}대',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      widget.projectName == null
+                          ? '열린 프로젝트가 없습니다. 등록해도 지금은 앱 안에만 남습니다.'
+                          : '`${widget.projectName}` 프로젝트 · 플릿 ${widget.fleetName}'
+                                ' — 여기 등록한 로봇이 Gazebo에 올라가고'
+                                ' fleet adapter에 들어갑니다.',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: widget.onRegisterFromChargers,
+                icon: const Icon(Icons.auto_awesome, size: 18),
+                label: const Text('충전 Waypoint에서 만들기'),
+              ),
+              const SizedBox(width: 6),
+              FilledButton.icon(
+                onPressed: widget.onRegisterRobot,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('로봇 등록'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (robots.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 14),
+              child: Text(
+                '등록된 로봇이 없습니다. 등록해야 스폰할 수 있습니다.\n'
+                '맵에 충전 카테고리 Waypoint를 만들어 두었다면 '
+                '`충전 Waypoint에서 만들기`로 한 번에 채울 수 있습니다.',
+                style: TextStyle(color: Color(0xFF64748B), height: 1.5),
+              ),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final robot in robots)
+                  Container(
+                    width: 320,
+                    padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      '${robot.robotId} · ${robot.displayName}',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  if (spawnedIds.contains(robot.robotId))
+                                    const _RegistrationBadge(
+                                      label: '배치됨',
+                                      color: Color(0xFF16A34A),
+                                    )
+                                  else
+                                    const _RegistrationBadge(
+                                      label: '대기',
+                                      color: Color(0xFF94A3B8),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                '${robot.model} · ${robot.gzName}\n'
+                                '충전 ${robot.chargerWaypoint ?? '미지정'}'
+                                '${robot.spawnX == null
+                                    ? ''
+                                    : ' · spawn '
+                                          '${robot.spawnX!.toStringAsFixed(2)}, '
+                                          '${robot.spawnY!.toStringAsFixed(2)}'}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF64748B),
+                                  height: 1.4,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: '수정',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () =>
+                              widget.onEditRegisteredRobot(robot),
+                          icon: const Icon(Icons.edit_outlined, size: 17),
+                        ),
+                        IconButton(
+                          tooltip: '등록 해제',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => widget.onUnregisterRobot(robot),
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            size: 17,
+                            color: Color(0xFFDC2626),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.all(28),
@@ -10691,13 +11140,24 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               label: const Text('배포 맵 불러오기'),
             ),
             const SizedBox(width: 10),
-            FilledButton.icon(
-              onPressed: _runtimeMode == '앱 Mock' ? widget.onSpawn : null,
-              icon: const Icon(Icons.add_circle_outline),
-              label: const Text('로봇 Spawn'),
+            Tooltip(
+              message: widget.registeredRobots.isEmpty
+                  ? '먼저 아래에서 로봇을 등록하세요.'
+                  : '등록된 로봇을 지도에 올립니다.',
+              child: FilledButton.icon(
+                onPressed:
+                    _runtimeMode == '앱 Mock' &&
+                        widget.registeredRobots.isNotEmpty
+                    ? widget.onSpawn
+                    : null,
+                icon: const Icon(Icons.add_circle_outline),
+                label: const Text('로봇 Spawn'),
+              ),
             ),
           ],
         ),
+        const SizedBox(height: 12),
+        _registrationCard(),
         const SizedBox(height: 12),
         _rmfStatusCard(),
         const SizedBox(height: 12),
