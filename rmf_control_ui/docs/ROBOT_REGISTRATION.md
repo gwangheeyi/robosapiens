@@ -345,6 +345,33 @@ ORDER BY file_name;
 로봇 목록은 `seq` 로 되돌려 읽습니다. `JSON_ARRAYAGG` 는 순서를 보장하지 않아,
 정렬하지 않으면 프로젝트를 다시 열 때마다 차례가 뒤바뀝니다.
 
+## 6.1 설정을 바꾼 기록은 따로 남는다
+
+`map_project_files` 는 저장할 때마다 덮어쓰므로 **지금 모습만** 있습니다. 언제
+무엇을 바꿨는지는 `map_project_changes` 에 따로 쌓입니다.
+
+```sql
+SELECT c.at, c.category, c.action, c.target, c.summary
+FROM map_project_changes c
+JOIN map_projects p ON p.id = c.project_id
+WHERE p.map_name = 'gwanghee'
+ORDER BY c.at DESC;
+```
+
+| 갈래 | 남는 것 |
+|---|---|
+| `robot` | 로봇 추가·수정·해제. 무엇이 무엇으로 바뀌었는지까지 |
+| `fleet` | 플릿 설정 변경. 값이 달라진 항목만 |
+| `file` | 생성 파일이 새로 생기거나 내용이 달라지거나 없어진 것 |
+| `project` | 프로젝트를 처음 저장한 것 |
+
+**바뀐 것이 없으면 남기지 않습니다.** 저장을 누를 때마다 줄이 늘면 무엇이 실제로
+달라졌는지 오히려 안 보입니다.
+
+앱의 `운영 분석` 메뉴에서 이 기록을 작업·주문·사건과 **같은 시간축**에 놓고
+봅니다. 어제까지 되던 것이 오늘 안 되면 그 사이에 무엇을 바꿨는지 함께 봐야
+합니다.
+
 ## 7. 로봇을 다루는 법
 
 ### 7.1 한꺼번에 만들기

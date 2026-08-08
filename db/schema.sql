@@ -470,6 +470,26 @@ CREATE TABLE IF NOT EXISTS `counters` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+CREATE TABLE IF NOT EXISTS `map_project_changes` (
+  `id`         BIGINT       NOT NULL AUTO_INCREMENT,
+  `project_id` BIGINT       NOT NULL,
+  `at`         DATETIME(6)  NOT NULL,
+  -- 'robot' 로봇 등록 · 'fleet' 플릿 설정 · 'file' 생성 파일 · 'project' 프로젝트
+  `category`   VARCHAR(32)  NOT NULL,
+  -- 'added' 추가 · 'changed' 변경 · 'removed' 삭제
+  `action`     VARCHAR(16)  NOT NULL,
+  -- 무엇이 바뀌었나. 로봇 ID, 파일 이름 등.
+  `target`     VARCHAR(255) NOT NULL,
+  `summary`    VARCHAR(512) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `idx_map_changes_at` (`project_id`, `at`),
+  KEY `idx_map_changes_day` (`at`),
+  CONSTRAINT `fk_map_changes_project`
+    FOREIGN KEY (`project_id`) REFERENCES `map_projects` (`id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 -- v3: 맵 프로젝트 테이블(map_projects / map_project_waypoints /
 --     map_project_lanes) 추가. 여러 창고 맵을 지도 이름으로 구분해 담는다.
 -- v4: rmf_ui_tasks / rmf_ui_task_history 를 맵 프로젝트에 귀속.
@@ -482,6 +502,8 @@ CREATE TABLE IF NOT EXISTS `counters` (
 --     v6 은 db/migrate_v6_to_v7.sql 을 적용한다.
 -- v8: 로봇에 종류(이동/설치) 추가. 설치 로봇은 설비 Waypoint 에 고정되고
 --     fleet adapter 에 들어가지 않는다. v7 은 db/migrate_v7_to_v8.sql 을 적용한다.
+-- v9: 설정 변경 기록(map_project_changes) 추가. 운영 기록과 같은 시간축에서
+--     본다. v8 은 db/migrate_v8_to_v9.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 8, NOW(6))
+VALUES (1, 9, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

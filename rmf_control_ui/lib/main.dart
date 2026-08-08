@@ -17,6 +17,8 @@ import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
+import 'operations_log.dart';
+import 'operations_log_models.dart';
 import 'robot_data_source.dart';
 import 'rmf_project_runner.dart';
 import 'rmf_runtime_service.dart';
@@ -6268,6 +6270,177 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return safe.isEmpty ? 'pinky' : '${safe}_pinky';
   }
 
+  /// 이번 저장에서 무엇이 달라졌는지 알아낸다.
+  ///
+  /// map_project_files 는 덮어쓰기라 지금 모습만 남는다. 언제 무엇을 바꿨는지
+  /// 따로 적어 두지 않으면, 어제까지 되던 것이 오늘 안 될 때 그 사이에 무엇이
+  /// 달라졌는지 알 길이 없다.
+  ///
+  /// 바뀐 것이 없으면 빈 목록을 준다. 저장을 누를 때마다 줄이 늘면 무엇이
+  /// 실제로 달라졌는지 오히려 안 보인다.
+  Future<List<MapProjectChange>> _diffMapProject(
+    String mapName,
+    RmfFleetSettings fleet,
+    List<MapProjectFile> files,
+  ) async {
+    Map<String, dynamic>? storedFleet;
+    var storedFiles = <MapProjectFile>[];
+    var isNew = false;
+    try {
+      storedFleet = await loadMapProjectFleet(mapName);
+      storedFiles = await loadMapProjectFiles(mapName);
+      isNew = storedFleet == null && storedFiles.isEmpty;
+    } catch (_) {
+      // 읽지 못하면 비교할 것이 없다. 기록을 남기지 못해도 저장은 막지 않는다.
+      return const [];
+    }
+    final changes = <MapProjectChange>[];
+    if (isNew) {
+      changes.add(
+        MapProjectChange(
+          category: 'project',
+          action: 'added',
+          target: mapName,
+          summary: '프로젝트를 처음 저장했습니다.',
+        ),
+      );
+    }
+
+    // 로봇 등록
+    final before = <String, RmfProjectRobot>{
+      for (final row
+          in ((storedFleet?['robots'] as List<dynamic>?) ?? const [])
+              .cast<Map<String, dynamic>>())
+        row['robotId'] as String: RmfProjectRobot.fromJson({
+          ...row,
+          'zones': (row['zonesText'] as String? ?? '')
+              .split(',')
+              .map((zone) => zone.trim())
+              .where((zone) => zone.isNotEmpty)
+              .toList(),
+        }),
+    };
+    final after = {for (final robot in _fleetRobots) robot.robotId: robot};
+    for (final id in after.keys) {
+      final now = after[id]!;
+      final old = before[id];
+      if (old == null) {
+        changes.add(
+          MapProjectChange(
+            category: 'robot',
+            action: 'added',
+            target: id,
+            summary:
+                '${now.displayName} · ${now.kind.label} · ${now.model} · '
+                '자리 ${now.chargerWaypoint ?? '미지정'}',
+          ),
+        );
+        continue;
+      }
+      final diffs = <String>[
+        if (old.displayName != now.displayName)
+          '이름 ${old.displayName} → ${now.displayName}',
+        if (old.kind != now.kind) '종류 ${old.kind.label} → ${now.kind.label}',
+        if (old.model != now.model) '모델 ${old.model} → ${now.model}',
+        if (old.gzName != now.gzName) 'gz 이름 ${old.gzName} → ${now.gzName}',
+        if (old.chargerWaypoint != now.chargerWaypoint)
+          '자리 ${old.chargerWaypoint ?? '미지정'} → '
+              '${now.chargerWaypoint ?? '미지정'}',
+        if (old.zones.join(',') != now.zones.join(','))
+          '구획 ${old.zones.join('·')} → ${now.zones.join('·')}',
+      ];
+      if (diffs.isNotEmpty) {
+        changes.add(
+          MapProjectChange(
+            category: 'robot',
+            action: 'changed',
+            target: id,
+            summary: diffs.join(' · '),
+          ),
+        );
+      }
+    }
+    for (final id in before.keys) {
+      if (after.containsKey(id)) continue;
+      changes.add(
+        MapProjectChange(
+          category: 'robot',
+          action: 'removed',
+          target: id,
+          summary: '${before[id]!.displayName} 등록을 해제했습니다.',
+        ),
+      );
+    }
+
+    // 플릿 설정 — 값이 바뀐 항목만 적는다.
+    final oldFleet = storedFleet == null
+        ? null
+        : RmfFleetSettings.fromJson(
+            storedFleet['settings'] as Map<String, dynamic>,
+          );
+    if (oldFleet != null) {
+      final oldJson = oldFleet.toJson();
+      final newJson = fleet.toJson();
+      final fields = <String>[
+        for (final key in newJson.keys)
+          if ('${oldJson[key]}' != '${newJson[key]}')
+            '$key ${oldJson[key]} → ${newJson[key]}',
+      ];
+      if (fields.isNotEmpty) {
+        changes.add(
+          MapProjectChange(
+            category: 'fleet',
+            action: 'changed',
+            target: fleet.fleetName,
+            summary: fields.join(' · '),
+          ),
+        );
+      }
+    }
+
+    // 생성 파일 — 내용이 달라진 것만.
+    final oldContents = {
+      for (final file in storedFiles) file.fileName: file.content,
+    };
+    for (final file in files) {
+      final old = oldContents[file.fileName];
+      if (old == null) {
+        if (!isNew) {
+          changes.add(
+            MapProjectChange(
+              category: 'file',
+              action: 'added',
+              target: file.fileName,
+              summary: file.description,
+            ),
+          );
+        }
+      } else if (old != file.content) {
+        changes.add(
+          MapProjectChange(
+            category: 'file',
+            action: 'changed',
+            target: file.fileName,
+            summary: '내용이 달라졌습니다.',
+          ),
+        );
+      }
+    }
+    final newNames = {for (final file in files) file.fileName};
+    for (final name in oldContents.keys) {
+      if (newNames.contains(name)) continue;
+      changes.add(
+        MapProjectChange(
+          category: 'file',
+          action: 'removed',
+          target: name,
+          summary: '더 이상 만들어지지 않습니다.',
+        ),
+      );
+    }
+    return changes;
+  }
+
   Future<void> _writeMapProject(String mapName) async {
     String? buildingYaml;
     try {
@@ -6295,7 +6468,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     final mapDirectory = _mapDirectoryFor(mapName);
     final now = DateTime.now();
-    await saveMapProjectFiles(mapName, [
+    final files = <MapProjectFile>[
       if (buildingYaml != null)
         MapProjectFile(
           fileName: _yamlFileNameFor(mapName),
@@ -6440,7 +6613,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         generatedAt: now,
       ),
-    ]);
+    ];
+    // 저장하기 전에 견줘 봐야 무엇이 달라졌는지 알 수 있다.
+    final changes = await _diffMapProject(mapName, fleet, files);
+    await saveMapProjectFiles(mapName, files);
+    // 무엇이 달라졌는지 남긴다. 실패해도 저장 자체는 이미 끝났으므로 막지
+    // 않는다 — 기록이 없다고 프로젝트를 못 쓰게 만들 일은 아니다.
+    try {
+      await recordMapProjectChanges(mapName, changes);
+    } catch (_) {}
     if (mounted) setState(() => _fleetSettings = fleet);
   }
 
@@ -9038,6 +9219,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRun: _runProjectScript,
                               onStop: _stopProjectScript,
                             )
+                          : _selectedMenu == 5
+                          ? const _OperationsAnalyticsPage()
                           : _ComingSoonPage(
                               title: const [
                                 '대시보드',
@@ -16575,6 +16758,560 @@ class _ProjectFilesPageState extends State<_ProjectFilesPage> {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 운영 분석 — 설정 기록과 운영 기록을 같은 시간축에서 본다.
+///
+/// 어제까지 되던 것이 오늘 안 되면 그 사이에 무엇을 바꿨는지 함께 봐야 한다.
+/// 설정만 따로, 운영만 따로 보면 "설정을 바꾼 직후에 작업이 실패했다" 같은 것이
+/// 눈에 띄지 않는다.
+class _OperationsAnalyticsPage extends StatefulWidget {
+  const _OperationsAnalyticsPage();
+
+  @override
+  State<_OperationsAnalyticsPage> createState() =>
+      _OperationsAnalyticsPageState();
+}
+
+class _OperationsAnalyticsPageState extends State<_OperationsAnalyticsPage> {
+  List<OperationMonth> _months = const [];
+  List<OperationDay> _days = const [];
+  List<OperationEntry> _entries = const [];
+  OperationMonth? _month;
+  DateTime? _day;
+  final Set<OperationLogKind> _hidden = {};
+  bool _loading = false;
+  String? _error;
+
+  static const Map<OperationLogKind, Color> _colors = {
+    OperationLogKind.setting: Color(0xFF7C3AED),
+    OperationLogKind.task: Color(0xFF2563EB),
+    OperationLogKind.order: Color(0xFF0891B2),
+    OperationLogKind.event: Color(0xFF64748B),
+    OperationLogKind.incident: Color(0xFFDC2626),
+    OperationLogKind.stock: Color(0xFF15803D),
+  };
+
+  static const Map<OperationLogKind, IconData> _icons = {
+    OperationLogKind.setting: Icons.tune,
+    OperationLogKind.task: Icons.assignment_outlined,
+    OperationLogKind.order: Icons.receipt_long_outlined,
+    OperationLogKind.event: Icons.article_outlined,
+    OperationLogKind.incident: Icons.warning_amber_rounded,
+    OperationLogKind.stock: Icons.inventory_2_outlined,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadMonths());
+  }
+
+  Future<void> _loadMonths() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final months = await loadOperationMonths();
+      if (!mounted) return;
+      setState(() {
+        _months = months;
+        _loading = false;
+      });
+      if (months.isNotEmpty) await _selectMonth(months.first);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _selectMonth(OperationMonth month) async {
+    setState(() {
+      _month = month;
+      _loading = true;
+      _day = null;
+      _entries = const [];
+    });
+    try {
+      final days = await loadOperationDays(month.year, month.month);
+      if (!mounted) return;
+      setState(() {
+        _days = days;
+        _loading = false;
+      });
+      // 기록이 있는 마지막 날을 먼저 보여 준다. 빈 화면으로 시작하면 무엇을
+      // 눌러야 하는지 알기 어렵다.
+      if (days.isNotEmpty) await _selectDay(days.last.date);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _selectDay(DateTime day) async {
+    setState(() {
+      _day = day;
+      _loading = true;
+    });
+    try {
+      final entries = await loadOperationEntries(day);
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  List<OperationEntry> get _visible => [
+    for (final entry in _entries)
+      if (!_hidden.contains(entry.kind)) entry,
+  ];
+
+  /// 화면에 보이는 것과 같은 내용을 글로 만든다. 복사해서 붙일 수 있어야 한다.
+  String _asText() {
+    final day = _day;
+    if (day == null) return '';
+    final lines = <String>[
+      '${day.year}-${day.month.toString().padLeft(2, '0')}-'
+          '${day.day.toString().padLeft(2, '0')} 운영 기록',
+      '',
+    ];
+    for (final entry in _visible) {
+      lines.add(
+        '${entry.timeLabel}  [${entry.kind.label}] ${entry.title}'
+        '${entry.detail.isEmpty ? '' : '\n            ${entry.detail}'}'
+        '${entry.project == null ? '' : '\n            프로젝트 ${entry.project}'}',
+      );
+    }
+    return lines.join('\n');
+  }
+
+  Widget _monthStrip() => SizedBox(
+    height: 74,
+    child: ListView.separated(
+      scrollDirection: Axis.horizontal,
+      itemCount: _months.length,
+      separatorBuilder: (_, _) => const SizedBox(width: 8),
+      itemBuilder: (_, index) {
+        final month = _months[index];
+        final selected = _month?.key == month.key;
+        return InkWell(
+          onTap: () => unawaited(_selectMonth(month)),
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 132,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: selected ? const Color(0xFF1E293B) : Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: selected
+                    ? const Color(0xFF1E293B)
+                    : const Color(0xFFE2E8F0),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  month.label,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                    color: selected ? Colors.white : const Color(0xFF0F172A),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '기록 ${month.total}건',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: selected
+                        ? const Color(0xFFCBD5E1)
+                        : const Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ),
+  );
+
+  /// 날짜별 막대. 높이가 그날의 기록 수, 색이 갈래다.
+  Widget _dayChart() {
+    if (_days.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 26),
+        child: Text(
+          '이 달에는 기록이 없습니다.',
+          style: TextStyle(color: Color(0xFF64748B)),
+        ),
+      );
+    }
+    final peak = _days
+        .map((day) => day.total)
+        .reduce((a, b) => a > b ? a : b)
+        .toDouble();
+    return SizedBox(
+      height: 152,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            for (final day in _days)
+              Builder(
+                builder: (context) {
+                  final selected =
+                      _day != null &&
+                      _day!.year == day.date.year &&
+                      _day!.month == day.date.month &&
+                      _day!.day == day.date.day;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: InkWell(
+                      onTap: () => unawaited(_selectDay(day.date)),
+                      borderRadius: BorderRadius.circular(6),
+                      child: Tooltip(
+                        message: [
+                          '${day.date.month}월 ${day.date.day}일 · ${day.total}건',
+                          for (final kind in OperationLogKind.values)
+                            if ((day.counts[kind] ?? 0) > 0)
+                              '${kind.label} ${day.counts[kind]}',
+                        ].join('\n'),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            Text(
+                              '${day.total}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF475569),
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            // 갈래별로 쌓아 올린다. 그날 무엇이 많았는지 색으로
+                            // 바로 보인다.
+                            SizedBox(
+                              width: 26,
+                              height: 96,
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  for (final kind in OperationLogKind.values)
+                                    if ((day.counts[kind] ?? 0) > 0)
+                                      Container(
+                                        width: 26,
+                                        height:
+                                            96 *
+                                            (day.counts[kind]! / peak).clamp(
+                                              .04,
+                                              1,
+                                            ),
+                                        color: _colors[kind],
+                                      ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            Container(
+                              width: 26,
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? const Color(0xFF1E293B)
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                '${day.date.day}',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: selected
+                                      ? FontWeight.w800
+                                      : FontWeight.w500,
+                                  color: selected
+                                      ? Colors.white
+                                      : const Color(0xFF64748B),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _legend() {
+    final month = _month;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final kind in OperationLogKind.values)
+          FilterChip(
+            selected: !_hidden.contains(kind),
+            showCheckmark: false,
+            avatar: Icon(_icons[kind], size: 16, color: _colors[kind]),
+            label: Text(
+              '${kind.label} ${month?.counts[kind] ?? 0}',
+              style: const TextStyle(fontSize: 13),
+            ),
+            selectedColor: _colors[kind]!.withValues(alpha: .12),
+            side: BorderSide(
+              color: _hidden.contains(kind)
+                  ? const Color(0xFFE2E8F0)
+                  : _colors[kind]!.withValues(alpha: .5),
+            ),
+            onSelected: (on) => setState(() {
+              if (on) {
+                _hidden.remove(kind);
+              } else {
+                _hidden.add(kind);
+              }
+            }),
+          ),
+      ],
+    );
+  }
+
+  Widget _timeline() {
+    final day = _day;
+    if (day == null) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 26),
+        child: Text(
+          '날짜를 고르면 그날의 기록이 나옵니다.',
+          style: TextStyle(color: Color(0xFF64748B)),
+        ),
+      );
+    }
+    final entries = _visible;
+    if (entries.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 26),
+        child: Text(
+          _entries.isEmpty
+              ? '이 날에는 기록이 없습니다.'
+              : '고른 갈래에 해당하는 기록이 없습니다. 위에서 갈래를 켜 보세요.',
+          style: const TextStyle(color: Color(0xFF64748B)),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final entry in entries)
+          Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 48,
+                  child: Text(
+                    entry.timeLabel,
+                    style: const TextStyle(
+                      fontFeatures: [FontFeature.tabularFigures()],
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF475569),
+                    ),
+                  ),
+                ),
+                Container(
+                  width: 3,
+                  height: 34,
+                  margin: const EdgeInsets.only(right: 12),
+                  decoration: BoxDecoration(
+                    color: _colors[entry.kind],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(_icons[entry.kind], size: 15,
+                              color: _colors[entry.kind]),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: SelectableText(
+                              entry.title,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (entry.severity != null) ...[
+                            const SizedBox(width: 8),
+                            _RegistrationBadge(
+                              label: entry.severity!,
+                              color: _colors[entry.kind]!,
+                            ),
+                          ],
+                          if (entry.project != null) ...[
+                            const SizedBox(width: 6),
+                            _RegistrationBadge(
+                              label: entry.project!,
+                              color: const Color(0xFF64748B),
+                            ),
+                          ],
+                        ],
+                      ),
+                      if (entry.detail.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        SelectableText(
+                          entry.detail,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF64748B),
+                            height: 1.45,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final day = _day;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '운영 분석',
+                      style: Theme.of(context).textTheme.headlineMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '설정을 언제 바꿨는지와 그날 무슨 일이 있었는지를 같은 '
+                      '시간축에서 봅니다.',
+                    ),
+                  ],
+                ),
+              ),
+              if (day != null)
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: _asText()));
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('이 날의 기록을 복사했습니다.')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy_outlined, size: 18),
+                  label: const Text('복사'),
+                ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: _loading ? null : () => unawaited(_loadMonths()),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('다시 읽기'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          if (_error != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFEF2F2),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFECACA)),
+              ),
+              child: SelectableText(
+                '기록을 읽지 못했습니다.\n$_error',
+                style: const TextStyle(color: Color(0xFFB91C1C)),
+              ),
+            )
+          else if (_months.isEmpty && !_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Text(
+                '아직 남은 기록이 없습니다.\n'
+                '프로젝트를 저장하거나 작업을 실행하면 여기에 쌓입니다.',
+                style: TextStyle(color: Color(0xFF64748B), height: 1.6),
+              ),
+            )
+          else ...[
+            _monthStrip(),
+            const SizedBox(height: 18),
+            _legend(),
+            const SizedBox(height: 14),
+            _dayChart(),
+            const SizedBox(height: 20),
+            if (day != null)
+              Text(
+                '${day.year}년 ${day.month}월 ${day.day}일 · '
+                '${_visible.length}건',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                ),
+              ),
+            const SizedBox(height: 10),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 26),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else
+              _timeline(),
+          ],
         ],
       ),
     );

@@ -171,13 +171,14 @@ ros2 topic echo /odom --once --field pose.pose.position.x
 돌려 쓰면 프로젝트를 바꾸는 순간 spawn 좌표와 charger 이름이 어긋납니다.
 그래서 플릿 설정과 생성된 설정 파일을 **맵 프로젝트에 묶어 MySQL에 보관**합니다.
 
-### 6.1 저장 구조 (schema v8)
+### 6.1 저장 구조 (schema v9)
 
 | 표 | 내용 |
 |---|---|
 | `map_project_fleets` | 프로젝트당 1행. 플릿 이름과 `rmf_fleet` 블록에 대응하는 설정(JSON) |
 | `map_project_robots` | 프로젝트별 로봇. id, 표시 이름, 모델, **종류(이동/설치)**, `gz_name`, 구획, 자리 Waypoint, spawn 좌표 |
 | `map_project_files` | 그 프로젝트에서 만들어진 설정 파일 전부 |
+| `map_project_changes` | **언제 무엇을 바꿨는지.** 파일은 덮어쓰기라 지금 모습만 남는다 |
 
 `map_project_files`가 핵심입니다. `building.yaml`, fleet adapter 설정, Gazebo
 spawn 목록, launch를 한자리에 모아 두므로 **프로젝트 하나만 열면 배포와 실행에
