@@ -1079,19 +1079,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _localizationMarginMeters = values.$3;
       _isDeployed = false;
     });
-    // 여기까지는 편집 중인 상태만 바뀐다. 어디에 보존되는지 알려 주지 않으면
-    // 창을 닫고 다시 열었을 때 값이 돌아온 것처럼 보인다.
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '로봇 안전 기준을 적용했습니다 — 폭 ${values.$1.toStringAsFixed(2)}m · '
-          '회전 반경 ${values.$2.toStringAsFixed(2)}m · 여유 ${values.$3.toStringAsFixed(2)}m. '
-          '`프로젝트 저장`을 눌러야 맵 프로젝트에 보존됩니다.',
-        ),
-        duration: const Duration(seconds: 6),
-        showCloseIcon: true,
-      ),
+    await _saveSettingToOpenProject(
+      label: '로봇 안전 기준',
+      detail:
+          '폭 ${values.$1.toStringAsFixed(2)}m · '
+          '회전 반경 ${values.$2.toStringAsFixed(2)}m · '
+          '여유 ${values.$3.toStringAsFixed(2)}m',
     );
+    if (!mounted) return;
     await _showValidationDialog();
   }
 
@@ -4942,8 +4937,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _stage = MapStage.measurement;
       _isDeployed = false;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('기준 길이 ${result.$1} ${result.$2}를 저장했습니다.')),
+    await _saveSettingToOpenProject(
+      label: 'Measurement',
+      detail: '기준 길이 ${result.$1} ${result.$2}',
     );
   }
 
@@ -5523,6 +5519,78 @@ class _ControlDashboardState extends State<ControlDashboard> {
     });
   }
 
+  /// 지금 편집 상태를 [mapName] 프로젝트로 MySQL에 쓴다.
+  ///
+  /// 배포 쪽이 앱을 거치지 않고 바로 집어갈 수 있도록 YAML도 같이 넣는다.
+  /// 아직 YAML로 만들 수 없는 단계(벽·Floor 미완성 등)여도 저장 자체는 막지
+  /// 않는다 — 작업 중인 맵을 못 저장하게 하는 게 더 나쁘다.
+  Future<void> _writeMapProject(String mapName) async {
+    String? buildingYaml;
+    try {
+      buildingYaml = _buildBuildingYaml(mapName: mapName);
+    } catch (_) {
+      buildingYaml = null;
+    }
+    await saveMapProject(
+      mapName: mapName,
+      payloadJson: jsonEncode(_buildProjectData(mapName: mapName)),
+      buildingYaml: buildingYaml,
+      buildingYamlName: buildingYaml == null ? null : _yamlFileNameFor(mapName),
+    );
+  }
+
+  /// 창에서 `저장`을 눌러 확정한 중간 설정을 곧바로 프로젝트에 남긴다.
+  ///
+  /// 로봇 안전 기준이나 축척처럼 그 자리에서 확정하는 값은, `프로젝트 저장`을
+  /// 따로 눌러야만 남는다면 저장했는데 왜 되돌아왔느냐는 혼란이 반복된다.
+  /// 열린 프로젝트가 없으면 남길 곳이 없으므로 그 사실을 함께 알린다.
+  ///
+  /// [label] 은 무엇을 저장했는지(예: `로봇 안전 기준`), [detail] 은 적용된
+  /// 값의 요약이다.
+  Future<void> _saveSettingToOpenProject({
+    required String label,
+    required String detail,
+  }) async {
+    final project = _openProjectName;
+    if (project != null && _drawing != null) {
+      try {
+        await _writeMapProject(project);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$label 적용 · $detail\n`$project` 프로젝트에 바로 저장했습니다.'),
+            duration: const Duration(seconds: 5),
+            showCloseIcon: true,
+          ),
+        );
+        return;
+      } catch (error) {
+        if (!mounted) return;
+        _showProcessingWarning('$label 저장', error);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$label 적용 · $detail\n프로젝트에 저장하지 못했습니다: $error'),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 8),
+            showCloseIcon: true,
+          ),
+        );
+        return;
+      }
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '$label 적용 · $detail\n'
+          '아직 맵 프로젝트가 없습니다. `프로젝트 저장`으로 만들면 이후 변경은 바로 저장됩니다.',
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
   /// 맵 프로젝트 이름을 입력받는다. 취소하면 null.
   Future<String?> _askMapProjectName({
     required String title,
@@ -5674,23 +5742,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (renamed == null || !mounted) return;
         mapName = renamed;
       }
-      // 배포 쪽이 앱을 거치지 않고 바로 집어갈 수 있도록 YAML도 같이 넣는다.
-      // 아직 YAML로 만들 수 없는 단계(벽·Floor 미완성 등)여도 저장 자체는
-      // 막지 않는다 — 작업 중인 맵을 못 저장하게 하는 게 더 나쁘다.
-      String? buildingYaml;
-      try {
-        buildingYaml = _buildBuildingYaml(mapName: mapName);
-      } catch (_) {
-        buildingYaml = null;
-      }
-      await saveMapProject(
-        mapName: mapName,
-        payloadJson: jsonEncode(_buildProjectData(mapName: mapName)),
-        buildingYaml: buildingYaml,
-        buildingYamlName: buildingYaml == null
-            ? null
-            : _yamlFileNameFor(mapName),
-      );
+      await _writeMapProject(mapName);
       if (!mounted) return;
       setState(() {
         _mapNameOverride = mapName;

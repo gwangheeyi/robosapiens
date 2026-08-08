@@ -71,7 +71,7 @@ void main() {
     );
   });
 
-  testWidgets('적용한 값과 어디에 보존되는지 알려 준다', (tester) async {
+  testWidgets('열린 프로젝트가 없으면 어디에도 남지 않는다고 알린다', (tester) async {
     await openSafetyDialog(tester);
 
     await tester.enterText(fieldByLabel('로봇 최대 폭 (m)'), '0.20');
@@ -79,7 +79,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 주행 안전 기준'), findsNothing);
-    expect(find.textContaining('`프로젝트 저장`을 눌러야'), findsOneWidget);
+    // 프로젝트가 열려 있으면 이 자리에서 바로 저장한다. 없으면 그 사실을
+    // 알려 주어야 값이 사라진 것처럼 보이지 않는다.
+    expect(find.textContaining('아직 맵 프로젝트가 없습니다'), findsOneWidget);
 
     // 다시 열면 방금 넣은 값이 그대로 있어야 한다.
     await tester.tap(find.text('로봇 안전 기준'));

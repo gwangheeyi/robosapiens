@@ -102,6 +102,33 @@ void main() {
       expect(mine.single.laneCount, 1);
     });
 
+    test('중간 설정만 바꿔 다시 저장하면 그 값이 곧바로 반영된다', () async {
+      String withSafety(double width) => jsonEncode({
+        ...jsonDecode(payload(first, 3)) as Map<String, dynamic>,
+        'robotSafety': {
+          'widthMeters': width,
+          'turningRadiusMeters': 0.15,
+          'localizationMarginMeters': 0.05,
+        },
+      });
+
+      await saveMapProject(mapName: first, payloadJson: withSafety(0.6));
+      // 로봇 안전 기준 창에서 `기준 저장`을 누른 순간에 해당한다. 프로젝트
+      // 저장을 따로 누르지 않아도 열린 프로젝트에 그대로 덮어써야 한다.
+      await saveMapProject(mapName: first, payloadJson: withSafety(0.2));
+
+      final back =
+          jsonDecode((await loadMapProject(first))!) as Map<String, dynamic>;
+      expect((back['robotSafety'] as Map)['widthMeters'], 0.2);
+      expect(
+        (await listMapProjects())
+            .where((project) => project.mapName == first)
+            .length,
+        1,
+        reason: '중간 저장이 프로젝트를 새로 만들면 안 된다',
+      );
+    });
+
     test('도면 원본과 building.yaml 을 함께 보관한다', () async {
       const yaml = 'name: "테스트 창고 A"\nlevels:\n  L1:\n    elevation: 0\n';
       await saveMapProject(
