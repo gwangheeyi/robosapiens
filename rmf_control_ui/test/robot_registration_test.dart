@@ -170,6 +170,38 @@ void main() {
     expect(find.textContaining('open_manipulator_x'), findsWidgets);
   });
 
+  testWidgets('백엔드가 없으면 띄우는 버튼을 보여 준다', (tester) async {
+    await openRobotMenu(tester);
+    // 확인이 끝날 때까지 기다린다.
+    await tester.pump(const Duration(seconds: 13));
+    await tester.pumpAndSettle();
+
+    // 내리는 버튼만 있고 띄우는 버튼이 없으면, 없다는 것만 알려주고 어떻게
+    // 하라는 말은 없는 셈이 된다.
+    expect(find.text('백엔드 띄우기'), findsOneWidget);
+    expect(find.text('백엔드 중지'), findsNothing);
+
+    // 프로젝트가 없으면 띄울 수 없다. 왜인지 툴팁으로 알린다.
+    final start = tester.widget<FilledButton>(
+      find.ancestor(
+        of: find.text('백엔드 띄우기'),
+        matching: find.byType(FilledButton),
+      ),
+    );
+    expect(start.onPressed, isNull);
+    expect(
+      tester
+          .widget<Tooltip>(
+            find.ancestor(
+              of: find.text('백엔드 띄우기'),
+              matching: find.byType(Tooltip),
+            ),
+          )
+          .message,
+      contains('맵 프로젝트'),
+    );
+  });
+
   testWidgets('출처는 로봇마다 정하고 화면 전체 설정은 없다', (tester) async {
     await openRobotMenu(tester);
     // 예전에는 화면 위에 `로봇 실행 방식` 하나가 있었다. 그러면 실물 두 대에

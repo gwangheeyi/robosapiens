@@ -7458,6 +7458,66 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 로봇 화면에서 곧바로 백엔드를 띄운다.
+  ///
+  /// 설정 파일 메뉴의 `프로젝트 실행` 과 같은 일을 한다. 백엔드가 없다는 것을
+  /// 알게 된 자리에서 바로 띄울 수 있어야지, 다른 메뉴로 찾아가라고 하면
+  /// 무엇을 눌러야 하는지 또 헤맨다.
+  ///
+  /// `ros2 launch` 는 파일만 읽으므로 띄우기 전에 설정을 디스크로 풀어 놓는다.
+  /// 내보내기를 깜빡해 `파일이 없습니다` 로 막히는 것이 잦다.
+  Future<void> _startBackendForOpenProject() async {
+    final project = _openProjectName;
+    if (project == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: 'Open-RMF 백엔드 띄우기',
+        message:
+            '열린 맵 프로젝트가 없습니다.\n\n'
+            '맵 관리에서 `프로젝트 열기` 로 불러오거나 `프로젝트 저장` 으로 '
+            '만든 뒤 다시 눌러 주세요.',
+      );
+      return;
+    }
+    List<MapProjectFile> files;
+    try {
+      files = await loadMapProjectFiles(project);
+    } catch (error) {
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: 'Open-RMF 백엔드 띄우기',
+        message: '설정 파일을 읽지 못했습니다.\n$error',
+      );
+      return;
+    }
+    if (files.isEmpty) {
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: 'Open-RMF 백엔드 띄우기',
+        message:
+            '`$project` 프로젝트에 만들어진 설정 파일이 없습니다.\n\n'
+            '맵 관리에서 `프로젝트 저장` 을 한 번 눌러 주세요.',
+      );
+      return;
+    }
+    final exported = await exportProjectConfigFiles(
+      mapName: project,
+      files: files,
+    );
+    if (!mounted) return;
+    if (!exported.success) {
+      await showWaypointErrorDialog(
+        context,
+        title: '설정을 디스크에 풀지 못했습니다',
+        message: exported.message,
+      );
+      return;
+    }
+    await _runProjectScript(project);
+  }
+
   Future<void> _stopProjectScript() async {
     final result = await stopProject();
     if (!mounted) return;
@@ -9196,6 +9256,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   unawaited(_unregisterFleetRobot(robot)),
                               onRegisterFromChargers: () =>
                                   unawaited(_registerRobotsFromChargers()),
+                              onStartBackend: _startBackendForOpenProject,
                             )
                           : _selectedMenu == 3
                           ? _TaskManagementPage(
@@ -11158,6 +11219,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onEditRegisteredRobot,
     required this.onUnregisterRobot,
     required this.onRegisterFromChargers,
+    required this.onStartBackend,
   });
 
   final UploadedDrawing? drawing;
@@ -11185,6 +11247,9 @@ class _RobotManagementPage extends StatefulWidget {
   final ValueChanged<RmfProjectRobot> onUnregisterRobot;
   final VoidCallback onRegisterFromChargers;
 
+  /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
+  final Future<void> Function() onStartBackend;
+
   @override
   State<_RobotManagementPage> createState() => _RobotManagementPageState();
 }
@@ -11209,6 +11274,19 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
       _rmfStatus = status;
       _rmfBusy = false;
     });
+  }
+
+  /// 백엔드를 띄우고, 올라올 때쯤 스스로 다시 확인한다.
+  ///
+  /// 실행 스크립트는 Gazebo 를 먼저 띄우고 12초 뒤 Open-RMF 를 올린다. 바로
+  /// 확인하면 아직 아무것도 없어서 실패한 것처럼 보인다.
+  Future<void> _startBackend() async {
+    await widget.onStartBackend();
+    if (!mounted) return;
+    setState(() => _rmfBusy = true);
+    await Future<void>.delayed(const Duration(seconds: 16));
+    if (!mounted) return;
+    await _refreshRmfStatus();
   }
 
   Future<void> _stopRmfBackend() async {
@@ -11301,6 +11379,22 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                   'Open-RMF 백엔드 · ${_rmfStatus.message}',
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
+                if (!running && _rmfStatus.available) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.projectName == null
+                        ? '관제·경로계획을 맡는 ROS 노드입니다. 띄우려면 먼저 '
+                              '맵 프로젝트를 열거나 저장하세요.'
+                        : '관제·경로계획을 맡는 ROS 노드(schedule · building map '
+                              'server · dispatcher)입니다. `${widget.projectName}` '
+                              '프로젝트로 띄우면 Gazebo 와 함께 올라옵니다.',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF64748B),
+                      height: 1.45,
+                    ),
+                  ),
+                ],
                 if (running) ...[
                   const SizedBox(height: 4),
                   SelectableText(
@@ -11336,14 +11430,31 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               label: const Text('다시 확인'),
             ),
             const SizedBox(width: 8),
-            FilledButton.icon(
-              onPressed: running ? _stopRmfBackend : null,
-              icon: const Icon(Icons.stop_circle_outlined, size: 18),
-              label: const Text('백엔드 중지'),
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFFDC2626),
+            // 내리는 버튼만 있고 띄우는 버튼이 없으면, 없다는 것만 알려주고
+            // 어떻게 하라는 말은 없는 셈이 된다.
+            if (running)
+              FilledButton.icon(
+                onPressed: _stopRmfBackend,
+                icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                label: const Text('백엔드 중지'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFDC2626),
+                ),
+              )
+            else
+              Tooltip(
+                message: widget.projectName == null
+                    ? '먼저 맵 프로젝트를 열거나 저장하세요.'
+                    : '`${widget.projectName}` 프로젝트로 Gazebo 와 Open-RMF 를 '
+                          '함께 띄웁니다.',
+                child: FilledButton.icon(
+                  onPressed: widget.projectName == null
+                      ? null
+                      : () => unawaited(_startBackend()),
+                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                  label: const Text('백엔드 띄우기'),
+                ),
               ),
-            ),
           ],
         ],
       ),

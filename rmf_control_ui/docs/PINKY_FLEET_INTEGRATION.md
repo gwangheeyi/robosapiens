@@ -622,40 +622,73 @@ WHERE p.map_name = 'gwanghee' ORDER BY r.seq;
 v5 데이터베이스는 `db/migrate_v5_to_v6.sql`을 적용합니다. 기존에 보관하던
 `building.yaml`은 설정 파일 목록으로 함께 옮겨집니다.
 
-## 7. 떠 있는 백엔드 정리
+## 7. Open-RMF 백엔드 — 무엇이고 어떻게 띄우나
 
-새 백엔드를 띄우기 전에 이전 세션의 노드가 남아 있는지 확인해야 합니다. 남은
-schedule node나 fleet adapter가 새로 뜨는 것과 부딪히면, 실제 원인과 무관한
-오류로 나타납니다.
+### 7.1 백엔드란
 
-실제로 겪은 예 — `openrmf/.runtime/fleet_adapter.log`:
+로봇 화면의 `Open-RMF 백엔드` 카드는 `ros2 node list` 를 읽어 **관제를 맡는 ROS
+노드가 떠 있는지** 봅니다.
 
-```text
-AssertionError: Unable to initialize fleet adapter.
-Please ensure RMF Schedule Node is running
+| 노드 | 하는 일 |
+|---|---|
+| `rmf_traffic_schedule` | 모든 로봇의 경로를 한자리에서 잡아 충돌을 막음 |
+| `rmf_building_map_server` | `building.yaml` 을 읽어 맵을 뿌림 |
+| `rmf_dispatcher_node` | 작업을 어느 로봇에 줄지 입찰로 정함 |
+| `rmf_traffic_blockade` | 좁은 길에서 서로 막히는 것을 푼다 |
+| `*_fleet_adapter` | 이 프로젝트의 로봇을 RMF 에 이어 줌 |
+
+**떠 있는 백엔드가 없습니다** 는 이것들이 하나도 없다는 뜻입니다. 앱 Mock 로봇만
+쓸 때는 정상입니다 — Mock 은 앱이 제 안에서 굴리므로 RMF 가 필요 없습니다.
+
+Gazebo나 실제 로봇을 쓰려면 백엔드가 있어야 합니다.
+
+### 7.2 앱에서 띄우기
+
+카드의 **`백엔드 띄우기`** 를 누릅니다. 열린 프로젝트의 설정을 디스크로 풀어
+놓고 `run_<맵이름>.sh` 를 돌립니다.
+
+```
+설정을 디스크로 내보내기  →  Gazebo bringup  →  (12초)  →  Open-RMF
 ```
 
-앱의 **로봇 운영** 화면 상단에 현황이 표시됩니다.
+Gazebo가 먼저 떠야 `/clock` 이 나오고, 그래야 `use_sim_time` 을 쓰는 RMF 노드가
+시간을 맞춥니다. 반대로 하면 RMF 가 시간이 멈춘 줄 알고 멈춰 있습니다.
 
-- 떠 있는 RMF 노드 목록
-- `다시 확인` — `ros2 node list`로 다시 조회
-- `백엔드 중지` — `openrmf/scripts/stop_office.sh` 실행 후 출력을 그대로 표시
+띄운 뒤 16초쯤 지나 카드가 스스로 다시 확인합니다.
 
-앱은 보통 ROS를 source하지 않은 셸에서 실행되므로, 조회 전에 `setup.bash`를
-읽습니다. 경로가 다르면 환경 변수로 지정합니다.
+**프로젝트가 없으면 버튼이 잠깁니다.** 어떤 맵으로 띄울지 정해지지 않았기
+때문입니다. 맵 관리에서 `프로젝트 열기` 또는 `프로젝트 저장` 을 먼저 하세요.
+
+설정 파일 메뉴의 `프로젝트 실행` 과 같은 일을 합니다. 백엔드가 없다는 것을 알게
+된 자리에서 바로 띄울 수 있어야지, 다른 메뉴로 찾아가라고 하면 무엇을 눌러야
+하는지 또 헤맵니다.
+
+### 7.3 터미널에서 띄우기
 
 ```bash
-export ROS_SETUP=/opt/ros/jazzy/setup.bash
-export RMF_WS=$HOME/rmf_ws
-export RMF_ROOT=$HOME/robosapiens     # stop_office.sh 를 찾는 기준
+rmf_maps/gwanghee/run_gwanghee.sh
 ```
 
-명령으로 직접 확인·중지할 수도 있습니다.
+화면 없이 돌리려면 `HEADLESS=true` 를 앞에 붙입니다.
+
+office 데모를 띄우려면 `openrmf/scripts/start_backend.sh` 를 씁니다. 이쪽은
+rmf-web api-server 를 Docker 로 함께 올리며, **이 프로젝트의 맵이 아니라 office
+데모 맵**을 씁니다.
+
+### 7.4 남아 있는 백엔드 정리
+
+떠 있는 것을 모르고 새로 띄우면 schedule node 와 fleet adapter 가 서로 부딪혀
+엉뚱한 오류로 나타납니다. 카드에 노드 목록이 보이면 `백엔드 중지` 로 내립니다.
+
+터미널에서는:
 
 ```bash
-ros2 node list
-./openrmf/scripts/stop_office.sh
+./openrmf/scripts/stop_office.sh     # office 데모
+rmf_maps/gwanghee/stop_gwanghee.sh   # 이 프로젝트로 띄운 것
 ```
+
+앱이 띄운 것은 **창을 닫을 때 자동으로 정리**됩니다. 강제 종료로 남은 것은 다음
+실행에서 알아채고 물어봅니다(6.6).
 
 ## 8. 다음 단계에서 만들어야 하는 것
 
