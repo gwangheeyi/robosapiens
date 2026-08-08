@@ -83,6 +83,7 @@ SELECT ${_toBase64('''CAST(
         'drawingName', drawing_name,
         'waypointCount', waypoint_count,
         'laneCount', lane_count,
+        'hasBuildingYaml', building_yaml IS NOT NULL,
         'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s.%f')
       )
     ),
@@ -101,6 +102,8 @@ FROM map_projects;
         drawingName: row['drawingName'] as String?,
         waypointCount: (row['waypointCount'] as num).toInt(),
         laneCount: (row['laneCount'] as num).toInt(),
+        // JSON_OBJECT 안의 `IS NOT NULL` 은 JSON boolean 으로 나온다.
+        hasBuildingYaml: row['hasBuildingYaml'] as bool? ?? false,
         updatedAt:
             DateTime.tryParse(row['updatedAt'] as String? ?? '') ??
             DateTime.fromMillisecondsSinceEpoch(0),
@@ -129,19 +132,40 @@ SELECT COUNT(*) FROM map_projects WHERE map_name = $_nameParam;
 /// `payload` 는 편집 화면을 그대로 되살릴 수 있는 프로젝트 JSON 전체다.
 /// 조회용 사본(map_project_waypoints / map_project_lanes)은 그 payload 에서
 /// 다시 뽑아 채우므로 두 곳이 어긋날 수 없다.
+/// [buildingYaml] 은 배포 쪽이 Flutter 앱을 거치지 않고 바로 집어갈 수 있도록
+/// 함께 넣어 둔다. 맵이 아직 YAML 로 만들 수 있는 상태가 아니면 null 이다.
 Future<void> saveMapProject({
   required String mapName,
   required String payloadJson,
+  String? buildingYaml,
+  String? buildingYamlName,
 }) async {
+  // 도면 바이트는 payload 안에 이미 base64 로 있으니 SQL 에서 뽑아 쓴다.
+  // 같은 이미지를 두 번 실어 보낼 이유가 없다.
+  final yaml = buildingYaml == null
+      ? 'NULL'
+      : "CONVERT(FROM_BASE64('${_encode(buildingYaml)}') USING utf8mb4)";
+  final yamlName = buildingYamlName == null
+      ? 'NULL'
+      : "CONVERT(FROM_BASE64('${_encode(buildingYamlName)}') USING utf8mb4)";
   await _query('''
 SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
 SET @payload = CAST(
   CONVERT(FROM_BASE64('${_encode(payloadJson)}') USING utf8mb4) AS JSON
 );
+-- 도면이 없는 프로젝트도 있다. JSON null 을 그대로 FROM_BASE64 에 넘기면
+-- 'null' 이라는 문자열을 디코딩해 쓰레기 바이트가 들어가므로 타입을 본다.
+SET @drawing_bytes = CASE
+  WHEN JSON_TYPE(JSON_EXTRACT(@payload, '\$.drawing.bytes')) = 'STRING'
+  THEN FROM_BASE64(JSON_UNQUOTE(JSON_EXTRACT(@payload, '\$.drawing.bytes')))
+  ELSE NULL
+END;
 START TRANSACTION;
 
 INSERT INTO map_projects (
-  map_name, format_version, payload, drawing_name,
+  map_name, format_version, payload,
+  drawing_name, drawing_extension, drawing_bytes, drawing_width, drawing_height,
+  building_yaml, building_yaml_name,
   waypoint_count, lane_count, created_at, updated_at
 )
 VALUES (
@@ -149,17 +173,29 @@ VALUES (
   COALESCE(CAST(JSON_EXTRACT(@payload, '\$.version') AS UNSIGNED), 0),
   @payload,
   JSON_UNQUOTE(JSON_EXTRACT(@payload, '\$.drawing.name')),
+  JSON_UNQUOTE(JSON_EXTRACT(@payload, '\$.drawing.extension')),
+  @drawing_bytes,
+  JSON_EXTRACT(@payload, '\$.drawing.pixelWidth'),
+  JSON_EXTRACT(@payload, '\$.drawing.pixelHeight'),
+  $yaml,
+  $yamlName,
   COALESCE(JSON_LENGTH(@payload, '\$.waypoints'), 0),
   COALESCE(JSON_LENGTH(@payload, '\$.laneDirections'), 0),
   NOW(6), NOW(6)
 )
 ON DUPLICATE KEY UPDATE
-  format_version = VALUES(format_version),
-  payload        = VALUES(payload),
-  drawing_name   = VALUES(drawing_name),
-  waypoint_count = VALUES(waypoint_count),
-  lane_count     = VALUES(lane_count),
-  updated_at     = NOW(6);
+  format_version     = VALUES(format_version),
+  payload            = VALUES(payload),
+  drawing_name       = VALUES(drawing_name),
+  drawing_extension  = VALUES(drawing_extension),
+  drawing_bytes      = VALUES(drawing_bytes),
+  drawing_width      = VALUES(drawing_width),
+  drawing_height     = VALUES(drawing_height),
+  building_yaml      = VALUES(building_yaml),
+  building_yaml_name = VALUES(building_yaml_name),
+  waypoint_count     = VALUES(waypoint_count),
+  lane_count         = VALUES(lane_count),
+  updated_at         = NOW(6);
 
 SET @project_id = (
   SELECT id FROM map_projects WHERE map_name = $_nameParam
@@ -217,6 +253,19 @@ Future<String?> loadMapProject(String mapName) async {
   final output = await _query('''
 SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
 SELECT ${_toBase64('CAST(payload AS CHAR)')}
+FROM map_projects WHERE map_name = $_nameParam;
+''');
+  final decoded = _decodeResult(output);
+  return decoded.isEmpty ? null : decoded;
+}
+
+/// 저장해 둔 building.yaml. 없으면 null.
+///
+/// 배포 도구가 Flutter 앱을 열지 않고도 맵을 집어갈 수 있게 하는 통로다.
+Future<String?> loadMapProjectYaml(String mapName) async {
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SELECT ${_toBase64('building_yaml')}
 FROM map_projects WHERE map_name = $_nameParam;
 ''');
   final decoded = _decodeResult(output);

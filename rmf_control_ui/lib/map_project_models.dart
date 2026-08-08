@@ -8,6 +8,7 @@ class MapProjectSummary {
     required this.drawingName,
     required this.waypointCount,
     required this.laneCount,
+    required this.hasBuildingYaml,
     required this.updatedAt,
   });
 
@@ -15,6 +16,10 @@ class MapProjectSummary {
   final String? drawingName;
   final int waypointCount;
   final int laneCount;
+
+  /// 배포에 쓸 building.yaml 이 함께 저장돼 있는지. 맵이 아직 YAML 로 만들 수
+  /// 있는 상태가 아니면 false 다.
+  final bool hasBuildingYaml;
   final DateTime updatedAt;
 }
 

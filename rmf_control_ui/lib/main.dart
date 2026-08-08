@@ -2226,16 +2226,55 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   bool _crossesWall(Offset start, Offset end) => _touchesWall(start, end);
 
+  /// 벽 여유가 모자랄 때 실제 수치를 담은 문장을 만든다.
+  ///
+  /// 어느 값이 잘못됐는지는 단정하지 않는다. 2m대 실험 공간에서 작은 로봇을
+  /// 쓰는 것도 정상이라, 도면이 작다는 이유로 축척을 의심하면 헛경고가 된다.
+  /// 판정에 쓰인 값을 그대로 보여 주고 판단은 사용자에게 맡긴다.
+  String _wallClearanceIssue(double nearestPixels, double clearancePixels) {
+    final metersPerPixel = _metersPerPixel;
+    if (metersPerPixel == null || metersPerPixel <= 0) {
+      return '벽에 너무 가까워 Lane을 만들 수 없습니다. '
+          '필요 여유 ${clearancePixels.toStringAsFixed(0)}px, '
+          '실제 ${nearestPixels.toStringAsFixed(0)}px입니다. '
+          'Measurement를 지정하면 실제 치수로 확인할 수 있습니다.';
+    }
+    return '벽에 너무 가까워 Lane을 만들 수 없습니다. '
+        '필요 여유 ${clearancePixels.toStringAsFixed(0)}px'
+        '(${(clearancePixels * metersPerPixel).toStringAsFixed(2)}m), '
+        '실제 ${nearestPixels.toStringAsFixed(0)}px'
+        '(${(nearestPixels * metersPerPixel).toStringAsFixed(2)}m). '
+        '로봇 폭 ${_robotWidthMeters.toStringAsFixed(2)}m · '
+        '위치 오차 여유 ${_localizationMarginMeters.toStringAsFixed(2)}m · '
+        '축척 ${(1 / metersPerPixel).toStringAsFixed(0)}px/m 기준입니다. '
+        '값이 실제와 다르면 로봇 안전 기준이나 Measurement를 확인하세요.';
+  }
+
+  /// Lane을 만들 수 없는 이유. 만들 수 있으면 null.
   String? _laneCreationIssue(Offset start, Offset end) {
     if ((start - end).distance <= .01) return '시작점과 끝점이 같은 Lane은 만들 수 없습니다.';
     if (_hasLane(start, end)) return '두 Waypoint 사이에 Lane이 이미 있습니다.';
-    if (_crossesWall(start, end)) return '벽을 통과하는 Lane은 만들 수 없습니다.';
+    final clearance = _laneWallClearancePixels;
+    var nearest = double.infinity;
+    for (final wall in _visibleWallSegments()) {
+      final distance = _segmentDistance(start, end, wall.$1, wall.$2);
+      if (distance < nearest) nearest = distance;
+    }
+    if (nearest.isFinite && nearest < clearance - .01) {
+      return _wallClearanceIssue(nearest, clearance);
+    }
     return null;
   }
 
   void _showLaneCreationIssue(String issue) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(issue), backgroundColor: const Color(0xFFDC2626)),
+      SnackBar(
+        content: Text(issue),
+        backgroundColor: const Color(0xFFDC2626),
+        // 수치가 들어가 문장이 길어졌다. 기본 4초로는 읽기 전에 사라진다.
+        duration: const Duration(seconds: 8),
+        showCloseIcon: true,
+      ),
     );
   }
 
@@ -3329,16 +3368,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ? null
           : _firstCrossedWaypoint(start, snapped, snapTolerance);
       final laneStart = crossed ?? start;
-      if (laneStart != null) {
-        final issue = _laneCreationIssue(laneStart, snapped);
-        if (issue != null) {
-          _showLaneCreationIssue(issue);
-          return;
-        }
-      }
+      // Lane을 잇지 못해도 사용자가 고른 지점은 새 시작점으로 삼는다. 예전에는
+      // 여기서 그냥 되돌아가 클릭이 통째로 무시된 것처럼 보였다.
+      final laneIssue = laneStart == null
+          ? null
+          : _laneCreationIssue(laneStart, snapped);
       _recordUndo();
       setState(() {
-        if (laneStart != null) {
+        if (laneStart != null && laneIssue == null) {
           final lane = (laneStart, snapped);
           _recommendedLanes.add(lane);
           _laneDirections[lane] = '양방향';
@@ -3347,6 +3384,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _stage = MapStage.lanes;
         _isDeployed = false;
       });
+      if (laneIssue != null) {
+        _showLaneCreationIssue('$laneIssue 이 지점을 새 레인 시작점으로 잡았습니다.');
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -3468,16 +3509,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final laneStart = selectedType == '설비'
         ? null
         : crossedWaypoint ?? _activeLaneEndpoint;
-    if (laneStart != null) {
-      final issue = _laneCreationIssue(laneStart, point);
-      if (issue != null) {
-        _showLaneCreationIssue(issue);
-        return;
-      }
-    }
+    // Lane을 잇지 못하는 것과 Waypoint를 못 놓는 것은 다른 일이다. 예전에는
+    // 여기서 되돌아가 Waypoint까지 버렸고, 그래서 스낵바를 놓치면 클릭이 그냥
+    // 먹히지 않는 것처럼 보였다.
+    final laneIssue = laneStart == null
+        ? null
+        : _laneCreationIssue(laneStart, point);
     _recordUndo();
     setState(() {
-      if (laneStart != null) {
+      if (laneStart != null && laneIssue == null) {
         final lane = (laneStart, point);
         _recommendedLanes.add(lane);
         _laneDirections[lane] = '양방향';
@@ -3490,6 +3530,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _isDeployed = false;
       _vertexLabelRevision++;
     });
+    if (laneIssue != null) {
+      _showLaneCreationIssue('Waypoint는 추가했지만 Lane은 잇지 못했습니다. $laneIssue');
+      return;
+    }
     if (crossedWaypoint != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('통과한 Waypoint부터 새 레인을 시작했습니다.')),
@@ -5182,8 +5226,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return name.isEmpty ? 'warehouse' : name;
   }
 
-  String get _yamlFileName {
-    final safeName = _mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
+  String get _yamlFileName => _yamlFileNameFor(_mapName);
+
+  String _yamlFileNameFor(String mapName) {
+    final safeName = mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_');
     return '$safeName.building.yaml';
   }
 
@@ -5572,9 +5618,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (renamed == null || !mounted) return;
         mapName = renamed;
       }
+      // 배포 쪽이 앱을 거치지 않고 바로 집어갈 수 있도록 YAML도 같이 넣는다.
+      // 아직 YAML로 만들 수 없는 단계(벽·Floor 미완성 등)여도 저장 자체는
+      // 막지 않는다 — 작업 중인 맵을 못 저장하게 하는 게 더 나쁘다.
+      String? buildingYaml;
+      try {
+        buildingYaml = _buildBuildingYaml(mapName: mapName);
+      } catch (_) {
+        buildingYaml = null;
+      }
       await saveMapProject(
         mapName: mapName,
         payloadJson: jsonEncode(_buildProjectData(mapName: mapName)),
+        buildingYaml: buildingYaml,
+        buildingYamlName: buildingYaml == null
+            ? null
+            : _yamlFileNameFor(mapName),
       );
       if (!mounted) return;
       setState(() {
@@ -5628,7 +5687,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   title: Text(project.mapName),
                   subtitle: Text(
                     'Waypoint ${project.waypointCount}개 · '
-                    'Lane ${project.laneCount}개\n'
+                    'Lane ${project.laneCount}개 · '
+                    '${project.hasBuildingYaml ? 'YAML 보관됨' : 'YAML 없음'}\n'
                     '${_projectTimestamp(project.updatedAt)}'
                     '${project.drawingName == null ? '' : ' · ${project.drawingName}'}',
                   ),
@@ -6155,7 +6215,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return walls;
   }
 
-  String _buildBuildingYaml() {
+  /// [mapName] 을 주면 그 이름으로 YAML을 만든다. 다른 이름으로 프로젝트를
+  /// 저장할 때, 아직 화면에 반영되지 않은 새 이름을 쓰기 위한 통로다.
+  String _buildBuildingYaml({String? mapName}) {
+    final yamlMapName = mapName ?? _mapName;
     final drawing = _drawing;
     final measurement = _measurement;
     final vertices = _visibleMapVertices();
@@ -6307,7 +6370,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     buffer
       ..writeln('lifts: {}')
-      ..writeln('name: "${_yamlEscape(_mapName)}"');
+      ..writeln('name: "${_yamlEscape(yamlMapName)}"');
     return buffer.toString();
   }
 

@@ -245,7 +245,22 @@ CREATE TABLE IF NOT EXISTS `map_projects` (
   -- 프로젝트 JSON 의 스키마 번호(.rmfproject 의 `version` 과 같은 값).
   `format_version` INT          NOT NULL,
   `payload`        JSON         NOT NULL,
-  `drawing_name`   VARCHAR(255) NULL,
+
+  -- 도면 원본. payload 안에도 base64로 들어 있지만, 관제나 배포 도구가 수백 KB
+  -- 짜리 JSON을 파싱하지 않고 이미지만 바로 꺼내 쓸 수 있게 따로 둔다.
+  `drawing_name`      VARCHAR(255) NULL,
+  `drawing_extension` VARCHAR(16)  NULL,
+  `drawing_bytes`     LONGBLOB     NULL,
+  `drawing_width`     INT          NULL,
+  `drawing_height`    INT          NULL,
+
+  -- 저장 시점에 만들어 둔 Open-RMF building.yaml. payload 에서 다시 뽑아낼 수
+  -- 있는 값이지만, 배포 쪽이 Flutter 앱을 거치지 않고 바로 집어갈 수 있어야
+  -- 한다. 저장할 때마다 다시 만들어 넣으므로 payload 와 어긋나지 않는다.
+  -- 맵이 아직 YAML 로 만들 수 있는 상태가 아니면 NULL 이다.
+  `building_yaml`      LONGTEXT     NULL,
+  `building_yaml_name` VARCHAR(255) NULL,
+
   `waypoint_count` INT          NOT NULL DEFAULT 0,
   `lane_count`     INT          NOT NULL DEFAULT 0,
   `created_at`     DATETIME(6)  NOT NULL,
@@ -387,6 +402,8 @@ CREATE TABLE IF NOT EXISTS `counters` (
 --     map_project_lanes) 추가. 여러 창고 맵을 지도 이름으로 구분해 담는다.
 -- v4: rmf_ui_tasks / rmf_ui_task_history 를 맵 프로젝트에 귀속.
 --     이미 v3 로 쓰던 데이터베이스는 db/migrate_v3_to_v4.sql 을 적용한다.
+-- v5: map_projects 에 도면 원본(drawing_bytes)과 building.yaml 을 함께 보관.
+--     v4 데이터베이스는 db/migrate_v4_to_v5.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 4, NOW(6))
+VALUES (1, 5, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

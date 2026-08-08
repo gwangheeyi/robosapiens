@@ -14,11 +14,24 @@ import 'package:rmf_control_ui/map_project_store.dart';
 void main() {
   final enabled = Platform.environment['RUN_MYSQL_MAP_PROJECT_TEST'] == '1';
 
+  // 도면 원본이 전용 열까지 흘러가는지 보려면 실제 바이트가 있어야 한다.
+  const drawingBytes = 512;
+  final fakeImage = base64Encode(
+    List<int>.generate(drawingBytes, (i) => (i * 7 + 3) % 256),
+  );
+
   String payload(String mapName, int waypointCount) => jsonEncode({
     'format': 'robosapiens-map-project',
     'version': 2,
     'mapName': mapName,
-    'drawing': {'name': '$mapName.png', 'extension': 'png', 'size': 12},
+    'drawing': {
+      'name': '$mapName.png',
+      'extension': 'png',
+      'size': drawingBytes,
+      'bytes': fakeImage,
+      'pixelWidth': 2000,
+      'pixelHeight': 1200,
+    },
     'waypoints': [
       for (var i = 0; i < waypointCount; i++)
         {
@@ -59,8 +72,8 @@ void main() {
       expect(await mapProjectExists(second), isTrue);
       expect(await mapProjectExists('있을 리 없는 맵'), isFalse);
 
-      final loaded = jsonDecode((await loadMapProject(first))!)
-          as Map<String, dynamic>;
+      final loaded =
+          jsonDecode((await loadMapProject(first))!) as Map<String, dynamic>;
       expect(loaded['mapName'], first);
       expect((loaded['waypoints'] as List).length, 6);
 
@@ -86,6 +99,58 @@ void main() {
       // 그대로 반영돼야 예전 지점이 남아 도는 일이 없다.
       expect(updated.waypointCount, 2);
       expect(updated.laneCount, 1);
+    });
+
+    test('도면 원본과 building.yaml 을 함께 보관한다', () async {
+      const yaml = 'name: "테스트 창고 A"\nlevels:\n  L1:\n    elevation: 0\n';
+      await saveMapProject(
+        mapName: first,
+        payloadJson: payload(first, 4),
+        buildingYaml: yaml,
+        buildingYamlName: '테스트_창고_A.building.yaml',
+      );
+
+      expect(await loadMapProjectYaml(first), yaml);
+      final summary = (await listMapProjects()).firstWhere(
+        (project) => project.mapName == first,
+      );
+      expect(summary.hasBuildingYaml, isTrue);
+
+      // 도면은 payload 안 base64 를 SQL 이 풀어 전용 열에 담는다. 관제가 JSON을
+      // 파싱하지 않고 이미지만 꺼낼 수 있어야 한다.
+      final result = await Process.run(
+        'mysql',
+        [
+          '--batch',
+          '--skip-column-names',
+          '--host=${Platform.environment['ROBOSAPIENS_DB_HOST']}',
+          '--port=${Platform.environment['ROBOSAPIENS_DB_PORT']}',
+          '--user=${Platform.environment['ROBOSAPIENS_DB_USER']}',
+          Platform.environment['ROBOSAPIENS_DB_NAME']!,
+          '--execute='
+              'SELECT COALESCE(LENGTH(drawing_bytes), -1), '
+              'COALESCE(drawing_extension, \'\'), COALESCE(drawing_width, -1) '
+              "FROM map_projects WHERE map_name = '$first'",
+        ],
+        environment: {
+          ...Platform.environment,
+          'MYSQL_PWD': Platform.environment['ROBOSAPIENS_DB_PASSWORD']!,
+        },
+      );
+      expect(result.exitCode, 0, reason: result.stderr as String?);
+      final columns = (result.stdout as String).trim().split(RegExp(r'\s+'));
+      expect(int.parse(columns[0]), drawingBytes, reason: '도면 바이트 수 일치');
+      expect(columns[1], 'png');
+      expect(int.parse(columns[2]), 2000);
+    });
+
+    test('YAML 없이 저장하면 없음으로 남는다', () async {
+      await saveMapProject(mapName: second, payloadJson: payload(second, 2));
+      expect(await loadMapProjectYaml(second), isNull);
+      final summary = (await listMapProjects()).firstWhere(
+        (project) => project.mapName == second,
+      );
+      expect(summary.hasBuildingYaml, isFalse);
     });
 
     test('삭제한 프로젝트는 목록과 조회에서 사라진다', () async {

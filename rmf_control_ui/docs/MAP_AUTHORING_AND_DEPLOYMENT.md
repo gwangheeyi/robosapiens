@@ -321,10 +321,20 @@ Wall과 교차하는 후보는 추천에서 제외됩니다. 팝업에서 적용
 - `취소`: 저장하지 않습니다.
 
 저장 구조는 `db/schema.sql`에 있습니다. `map_projects.payload`가 복원의 원본이며
-도면 이미지와 벽·바닥 마스크까지 통째로 들고 있습니다. `map_project_waypoints`와
-`map_project_lanes`는 그 payload에서 뽑아낸 조회용 사본으로, 저장할 때마다 지우고
-다시 채웁니다. 관제나 다른 도구가 도면 수백 KB를 읽지 않고도 "이 맵의 주차 자리가
-어디인가"를 물어볼 수 있게 하려는 것입니다.
+도면 이미지와 벽·바닥 마스크까지 통째로 들고 있습니다.
+
+그 옆에 **바로 꺼내 쓸 수 있는 형태로도** 함께 보관합니다. 전부 payload에서 다시
+뽑아낸 사본이고 저장할 때마다 새로 채우므로 원본과 어긋나지 않습니다.
+
+| 열 · 표 | 무엇 | 왜 |
+|---|---|---|
+| `drawing_bytes` `drawing_extension` `drawing_width` `drawing_height` | 도면 원본 이미지 | 수백 KB짜리 JSON을 파싱하지 않고 이미지만 바로 꺼내기 위해 |
+| `building_yaml` `building_yaml_name` | Open-RMF `building.yaml` | 배포 도구가 Flutter 앱을 열지 않고 바로 집어가기 위해 |
+| `map_project_waypoints` `map_project_lanes` | Waypoint·Lane 목록 | "이 맵의 주차 자리가 어디인가"를 SQL로 묻기 위해 |
+
+`building_yaml`은 맵이 아직 YAML로 만들 수 있는 상태가 아니면 `NULL`입니다.
+그래도 프로젝트 저장 자체는 막지 않습니다 — 작업 중인 맵을 저장하지 못하게 하는
+것이 더 나쁩니다. `프로젝트 열기` 목록에 `YAML 보관됨`/`YAML 없음`으로 표시됩니다.
 
 ```sql
 -- 특정 맵의 주차(복귀) 지점만 조회

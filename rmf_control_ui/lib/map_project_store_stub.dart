@@ -15,9 +15,14 @@ Future<bool> mapProjectExists(String mapName) async => false;
 Future<void> saveMapProject({
   required String mapName,
   required String payloadJson,
+  String? buildingYaml,
+  String? buildingYamlName,
 }) async => throw UnsupportedError(_unsupported);
 
 Future<String?> loadMapProject(String mapName) async =>
+    throw UnsupportedError(_unsupported);
+
+Future<String?> loadMapProjectYaml(String mapName) async =>
     throw UnsupportedError(_unsupported);
 
 Future<void> deleteMapProject(String mapName) async =>
