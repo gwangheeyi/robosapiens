@@ -515,8 +515,15 @@ source "\$ROS_SETUP"
 [[ -f "\$PINKY_WS/install/setup.bash" ]] && source "\$PINKY_WS/install/setup.bash"
 set -u
 
+# 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
+# 앱이 detached 로 띄우면 이 셸의 PID 는 그룹 리더가 아니므로, PID 가 아니라
+# 실제 PGID 를 적어야 한다.
+PGID_FILE="\$MAP_DIR/.$mapName.pgid"
+ps -o pgid= -p \$\$ | tr -d ' ' > "\$PGID_FILE"
+
 cleanup() {
   echo "정리 중..."
+  rm -f "\$PGID_FILE"
   kill \$(jobs -p) 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -561,6 +568,20 @@ stop_matching "Open-RMF ($mapName)" "ros2 launch \$MAP_DIR/$mapName.launch.xml"
 stop_matching "Gazebo bringup ($mapName)" \\
   "ros2 launch \$MAP_DIR/${mapName}_bringup.launch.xml"
 stop_matching "Gazebo 서버 ($mapName)" "gz sim.*\$MAP_DIR/$mapName.world"
+
+# 실행 스크립트가 남긴 프로세스 그룹을 통째로 끊는다. 이름으로 못 찾은 자식이
+# 있어도 여기서 정리된다.
+PGID_FILE="\$MAP_DIR/.$mapName.pgid"
+if [[ -f "\$PGID_FILE" ]]; then
+  PGID="\$(cat "\$PGID_FILE")"
+  if [[ "\$PGID" =~ ^[0-9]+\$ ]] && kill -0 -- "-\$PGID" 2>/dev/null; then
+    echo "프로세스 그룹 \$PGID 중지"
+    kill -INT -- "-\$PGID" 2>/dev/null || true
+    sleep 3
+    kill -TERM -- "-\$PGID" 2>/dev/null || true
+  fi
+  rm -f "\$PGID_FILE"
+fi
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';

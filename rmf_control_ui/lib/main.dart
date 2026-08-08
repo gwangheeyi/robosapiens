@@ -17,6 +17,7 @@ import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
+import 'rmf_project_runner.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
@@ -458,6 +459,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
   String? _processingWarning;
   int _selectedMenu = 0;
 
+  AppLifecycleListener? _exitListener;
+
   /// 열린 프로젝트의 RMF 플릿 설정. 맵이 다르면 충전소 위치도 다르므로
   /// 프로젝트를 따라간다.
   RmfFleetSettings _fleetSettings = const RmfFleetSettings();
@@ -492,6 +495,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
       const Duration(seconds: 5),
       (_) => unawaited(_pollPendingOrders()),
     );
+    // 창을 닫을 때 앱이 띄운 프로젝트를 정리한다. 강제 종료(kill·전원)까지는
+    // 막을 수 없다 — 그때는 남은 프로세스를 다음 실행에서 알아채고 정리한다.
+    _exitListener = AppLifecycleListener(onExitRequested: _handleExitRequest);
+  }
+
+  /// 창을 닫을 때 앱이 띄운 프로젝트를 내린다.
+  ///
+  /// 사용자가 터미널에서 직접 띄운 것은 건드리지 않는다 — 앱이 띄운 것만
+  /// runningProjectName 에 남아 있다.
+  Future<ui.AppExitResponse> _handleExitRequest() async {
+    final running = runningProjectName;
+    if (running == null) return ui.AppExitResponse.exit;
+    await stopProject(running);
+    return ui.AppExitResponse.exit;
   }
 
   /// 열린 프로젝트가 바뀌었을 때 대시보드를 그 프로젝트 상태로 갈아 끼운다.
@@ -5224,6 +5241,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   @override
   void dispose() {
+    _exitListener?.dispose();
     _mockRobotTimer?.cancel();
     _orderDispatchTimer?.cancel();
     for (final robot in _mockRobots) {
@@ -6678,6 +6696,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         Expanded(child: _fleetFileList(files)),
       ],
+    );
+  }
+
+  /// 앱에서 프로젝트를 띄운다.
+  ///
+  /// 앱이 띄운 것만 앱이 내린다. 창을 닫을 때 자동으로 정리되지만, 강제 종료
+  /// (kill·전원)는 막을 수 없다 — 그때는 남은 것을 다음 실행에서 알아채고
+  /// `로봇 운영` 화면에서 정리한다.
+  Future<void> _runProjectScript(String mapName) async {
+    final result = await startProject(mapName);
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: result.success ? '프로젝트 실행' : '실행하지 못했습니다',
+      message: result.success
+          ? '${result.message}\n\n'
+                'Gazebo 를 먼저 띄우고 12초 뒤 Open-RMF 를 올립니다.\n'
+                '창을 닫으면 자동으로 정리됩니다. 강제 종료하면 남을 수 있으니 '
+                '그때는 로봇 운영 화면에서 확인하세요.'
+          : result.message,
+    );
+  }
+
+  Future<void> _stopProjectScript() async {
+    final result = await stopProject();
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: result.success ? '프로젝트 중지 결과' : '중지 실패',
+      message: result.message.isEmpty ? '출력이 없습니다.' : result.message,
     );
   }
 
@@ -8448,6 +8496,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onOpenMap: () =>
                                   setState(() => _selectedMenu = 1),
                               onExport: _exportRmfConfig,
+                              onRun: _runProjectScript,
+                              onStop: _stopProjectScript,
                             )
                           : _ComingSoonPage(
                               title: const [
@@ -15237,6 +15287,8 @@ class _ProjectFilesPage extends StatefulWidget {
     required this.mapDirectory,
     required this.onOpenMap,
     required this.onExport,
+    required this.onRun,
+    required this.onStop,
   });
 
   /// 열려 있는 맵 프로젝트. null 이면 아직 저장 전이다.
@@ -15248,6 +15300,10 @@ class _ProjectFilesPage extends StatefulWidget {
   final VoidCallback onOpenMap;
   final Future<void> Function(String mapName, List<MapProjectFile> files)
   onExport;
+
+  /// 앱에서 프로젝트를 띄우고 내린다.
+  final Future<void> Function(String mapName) onRun;
+  final Future<void> Function() onStop;
 
   @override
   State<_ProjectFilesPage> createState() => _ProjectFilesPageState();
@@ -15350,6 +15406,33 @@ class _ProjectFilesPageState extends State<_ProjectFilesPage> {
                 icon: const Icon(Icons.drive_file_move_outline, size: 18),
                 label: const Text('디스크로 내보내기'),
               ),
+              const SizedBox(width: 10),
+              if (runningProjectName == null)
+                FilledButton.icon(
+                  onPressed: project == null
+                      ? null
+                      : () async {
+                          await widget.onRun(project);
+                          if (mounted) setState(() {});
+                        },
+                  icon: const Icon(Icons.play_arrow, size: 18),
+                  label: const Text('프로젝트 실행'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF15803D),
+                  ),
+                )
+              else
+                FilledButton.icon(
+                  onPressed: () async {
+                    await widget.onStop();
+                    if (mounted) setState(() {});
+                  },
+                  icon: const Icon(Icons.stop, size: 18),
+                  label: Text('$runningProjectName 중지'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFDC2626),
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: 16),
