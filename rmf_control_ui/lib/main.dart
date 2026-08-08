@@ -11341,7 +11341,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   }
 
   Future<void> _refreshRmfStatus() async {
-    setState(() => _rmfBusy = true);
+    setState(() {
+      _rmfBusy = true;
+      _ghostNodes = false;
+    });
     final status = await probeRmfRuntime();
     if (!mounted) return;
     setState(() {
@@ -11360,11 +11363,53 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     setState(() => _rmfBusy = true);
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
-    await _refreshRmfStatus();
+    await _refreshUntilClear();
   }
 
   /// 지금 내릴 대상 프로젝트. 확인 창에 그대로 보여 준다.
   List<String> _stopTargets = const [];
+
+  /// 프로세스는 없는데 노드 목록에만 남아 있는 상태.
+  ///
+  /// 강제 종료된 노드는 DDS 에 떠난다고 알리지 못해 `ros2 node list` 에 십수 초
+  /// 남는다(실측 약 16초). 그것을 "떠 있습니다"로 보여 주면 정리가 안 된 줄 안다.
+  bool _ghostNodes = false;
+
+  /// 중지한 뒤 실제로 내려갔는지 확인한다.
+  ///
+  /// **프로세스 목록이 진실이다.** `ros2 node list` 는 강제 종료된 노드를 십수 초
+  /// 더 들고 있다(실측 약 16초). DDS 에 떠난다고 알리지 못했기 때문이다. 그것을
+  /// 그대로 "떠 있습니다"로 보여 주면 정리가 안 된 줄 안다.
+  ///
+  /// 그래서 판정은 프로세스로 하고, 노드 목록은 뒤에서 조용히 다시 읽어 화면이
+  /// 스스로 맞춰지게 둔다.
+  Future<void> _refreshUntilClear() async {
+    setState(() {
+      _rmfBusy = true;
+      _ghostNodes = false;
+    });
+    final running = await runningBackendProjects();
+    if (!mounted) return;
+    final processesGone = running.isEmpty;
+    var status = await probeRmfRuntime();
+    if (!mounted) return;
+    setState(() {
+      _rmfStatus = status;
+      _ghostNodes = processesGone && status.isRunning;
+      _rmfBusy = false;
+    });
+    // 유령이 사라질 때까지 뒤에서 다시 읽는다. 버튼을 막지 않는다.
+    for (var attempt = 0; attempt < 12 && status.isRunning; attempt++) {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (!mounted) return;
+      status = await probeRmfRuntime();
+      if (!mounted) return;
+      setState(() {
+        _rmfStatus = status;
+        _ghostNodes = processesGone && status.isRunning;
+      });
+    }
+  }
 
   Future<void> _stopRmfBackend() async {
     final running = await runningBackendProjects();
@@ -11447,12 +11492,12 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(
-            running
+            running && !_ghostNodes
                 ? Icons.warning_amber_rounded
                 : _rmfStatus.available
                 ? Icons.check_circle
                 : Icons.help_outline,
-            color: running
+            color: running && !_ghostNodes
                 ? const Color(0xFFD97706)
                 : _rmfStatus.available
                 ? const Color(0xFF15803D)
@@ -11464,7 +11509,9 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Open-RMF 백엔드 · ${_rmfStatus.message}',
+                  _ghostNodes
+                      ? 'Open-RMF 백엔드 · 정리했습니다.'
+                      : 'Open-RMF 백엔드 · ${_rmfStatus.message}',
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
                 if (!running && _rmfStatus.available) ...[
@@ -11483,6 +11530,14 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                     ),
                   ),
                 ],
+                if (running && _ghostNodes) ...[
+                  const SizedBox(height: 4),
+                  const Text(
+                    '프로세스는 모두 내려갔습니다. 목록에 남은 것은 DDS 가 아직 '
+                    '떠난 것을 알아채지 못한 흔적이며 곧 사라집니다.',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF15803D)),
+                  ),
+                ],
                 if (running) ...[
                   const SizedBox(height: 4),
                   SelectableText(
@@ -11493,10 +11548,11 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    '실제 로봇·Gazebo 모드로 새로 띄우기 전에 정리하세요.',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
-                  ),
+                  if (!_ghostNodes)
+                    const Text(
+                      '실제 로봇·Gazebo 모드로 새로 띄우기 전에 정리하세요.',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                    ),
                 ],
               ],
             ),
@@ -11520,7 +11576,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
             const SizedBox(width: 8),
             // 내리는 버튼만 있고 띄우는 버튼이 없으면, 없다는 것만 알려주고
             // 어떻게 하라는 말은 없는 셈이 된다.
-            if (running)
+            if (running && !_ghostNodes)
               FilledButton.icon(
                 onPressed: _stopRmfBackend,
                 icon: const Icon(Icons.stop_circle_outlined, size: 18),
