@@ -14,6 +14,7 @@ import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
+import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
 import 'task_store.dart';
@@ -9598,6 +9599,165 @@ class _RobotManagementPage extends StatefulWidget {
 
 class _RobotManagementPageState extends State<_RobotManagementPage> {
   String _runtimeMode = '앱 Mock';
+  RmfRuntimeStatus _rmfStatus = RmfRuntimeStatus.unknown;
+  bool _rmfBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 이미 떠 있는 백엔드를 모르고 새로 띄우면 schedule node 와 fleet adapter 가
+    // 부딪혀 엉뚱한 오류로 나타난다. 화면에 들어올 때 먼저 확인한다.
+    unawaited(_refreshRmfStatus());
+  }
+
+  Future<void> _refreshRmfStatus() async {
+    setState(() => _rmfBusy = true);
+    final status = await probeRmfRuntime();
+    if (!mounted) return;
+    setState(() {
+      _rmfStatus = status;
+      _rmfBusy = false;
+    });
+  }
+
+  Future<void> _stopRmfBackend() async {
+    final confirmed = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.stop_circle_outlined, size: 34),
+        title: const Text('Open-RMF 백엔드 중지'),
+        content: SizedBox(
+          width: 430,
+          child: Text(
+            'openrmf/scripts/stop_office.sh 를 실행해 떠 있는 백엔드를 내립니다.\n\n'
+            '대상: ${_rmfStatus.nodes.join(', ')}\n\n'
+            '진행 중인 작업이 있으면 함께 끊깁니다.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.stop_circle_outlined, size: 18),
+            label: const Text('중지'),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _rmfBusy = true);
+    final result = await stopRmfBackend();
+    if (!mounted) return;
+    setState(() => _rmfBusy = false);
+    // 스크립트가 무엇을 내렸는지 그대로 보여 준다. '중지했습니다'만으로는 실제로
+    // 정리됐는지 알 수 없다.
+    await showWaypointErrorDialog(
+      context,
+      title: result.success ? 'Open-RMF 백엔드 중지 결과' : '중지 실패',
+      message: result.output.isEmpty ? '출력이 없습니다.' : result.output,
+    );
+    if (!mounted) return;
+    await _refreshRmfStatus();
+  }
+
+  Widget _rmfStatusCard() {
+    final running = _rmfStatus.isRunning;
+    final color = running
+        ? const Color(0xFFFFFBEB)
+        : _rmfStatus.available
+        ? const Color(0xFFF0FDF4)
+        : const Color(0xFFF1F5F9);
+    final border = running
+        ? const Color(0xFFFCD34D)
+        : _rmfStatus.available
+        ? const Color(0xFF86EFAC)
+        : const Color(0xFFCBD5E1);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            running
+                ? Icons.warning_amber_rounded
+                : _rmfStatus.available
+                ? Icons.check_circle
+                : Icons.help_outline,
+            color: running
+                ? const Color(0xFFD97706)
+                : _rmfStatus.available
+                ? const Color(0xFF15803D)
+                : const Color(0xFF64748B),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Open-RMF 백엔드 · ${_rmfStatus.message}',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                if (running) ...[
+                  const SizedBox(height: 4),
+                  SelectableText(
+                    _rmfStatus.nodes.join('\n'),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF7C2D12),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '실제 로봇·Gazebo 모드로 새로 띄우기 전에 정리하세요.',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          if (_rmfBusy)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else ...[
+            OutlinedButton.icon(
+              onPressed: _refreshRmfStatus,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('다시 확인'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: running ? _stopRmfBackend : null,
+              icon: const Icon(Icons.stop_circle_outlined, size: 18),
+              label: const Text('백엔드 중지'),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFDC2626),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -9668,6 +9828,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
             ),
           ],
         ),
+        const SizedBox(height: 12),
+        _rmfStatusCard(),
         const SizedBox(height: 12),
         _MapFileStatus(
           sourceLabel: '불러온 맵',
