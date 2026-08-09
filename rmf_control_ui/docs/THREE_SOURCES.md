@@ -251,25 +251,46 @@ SLAM 지도의 원점은 로봇이 SLAM을 시작한 자리이고, RMF의 원점
 
 정직하게 적습니다.
 
-| | 스폰 | 센서 | 자리 잡기 | RMF 배차 → 수행 |
-|---|:---:|:---:|:---:|:---:|
-| **앱 Mock** | ✅ | — | — | ✅ 앱이 굴림 |
-| **Gazebo** | ✅ | ✅ | ✅ | ⛔ 막힘 |
-| **실제 로봇** | — | — | — | — |
+| | 스폰 | 센서 | 자리 잡기 | 플릿 등록 | RMF 배차 → 수행 |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **앱 Mock** | ✅ | — | — | — | ✅ 앱이 굴림 |
+| **Gazebo** | ✅ | ✅ | ✅ | ✅ | ⛔ 막힘 |
+| **실제 로봇** | — | — | — | — | — |
 
-### Gazebo에서 막힌 곳
+### 충전 Waypoint — 풀렸습니다
 
-RMF 어댑터가 로봇을 플릿에 넣다가 죽습니다.
+전에는 여기서 죽었습니다.
 
 ```
 [FleetUpdateHandle::add_robot] Unable to find nearest charging waypoint.
 ```
 
-`building.yaml`에는 **충전1**이 있는데 **Lane이 하나도 안 붙어 있어** nav graph로
-넘어가지 못했습니다. nav graph의 waypoint 8개 중 충전 waypoint가 **0개**입니다.
+`building.yaml`에 **충전1**은 있었지만 **Lane이 하나도 안 붙어 있어** nav graph로
+넘어가지 못했습니다. 맵에서 홈1↔충전1 Lane을 이으니 nav graph에 waypoint가
+8개에서 9개로 늘고, 그 하나가 `is_charger: true`입니다.
 
-> **할 일** — 맵 관리에서 **충전1에 Lane을 연결**하고 배포하면 됩니다. RMF는
-> 로봇을 플릿에 넣을 때 충전 Waypoint를 최소 하나 요구합니다.
+```
+8  1.761 -1.025  {'is_charger': True, 'name': '충전1'}
+홈1 -> 충전1 / 충전1 -> 홈1
+```
+
+어댑터가 통과합니다 — `gwanghee_pinky 를 Nav2 에 이었습니다. 로봇 1대`.
+
+> **함께 나온 것** — `nav_graphs/0.yaml`은 `building.yaml`에서 파생되는데,
+> 맵을 고쳐도 이 파일은 그대로 남아 있었습니다. 파일이 **없는** 것이 아니라
+> **낡은** 것이라 아무 오류도 나지 않고, RMF만 옛날 지도를 봅니다. Lane을
+> 이어 놓고도 같은 오류가 계속 나오던 이유입니다. 이제 실행 스크립트가
+> `building.yaml`이 더 새로우면 nav graph를 다시 만듭니다.
+
+### 그다음 벽 — 어댑터가 둘
+
+`gwanghee.launch.xml`이 띄우는 것은 `rmf_demos_fleet_adapter`입니다. 그것은
+slotcar 전용이고, REST 플릿 매니저를 기다리다 설정에 `user`/`password`가 없어
+죽습니다. 우리 핑키를 실제로 모는 것은 `<맵>_nav2_adapter.py`인데, 이것은
+`<맵>_nav2.launch.xml`에 있고 실행 스크립트가 띄우지 않습니다.
+
+> **할 일** — 이동 로봇이 Nav2로 도는 프로젝트에서는 실행 스크립트가
+> `rmf_demos_fleet_adapter` 대신 `<맵>_nav2.launch.xml`을 띄워야 합니다.
 
 그 앞 단계는 전부 확인했습니다 — 두 대를 함께 올려 서로 간섭하지 않는 것,
 AMCL이 각자의 자리에서 잡는 것, 라이다·카메라가 실제로 들어오는 것.

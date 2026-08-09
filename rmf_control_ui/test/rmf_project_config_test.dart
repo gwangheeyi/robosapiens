@@ -715,7 +715,8 @@ void main() {
       expect(
         mixed,
         contains(
-          'REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter ros_gz_sim '
+          'REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter '
+          'rmf_building_map_tools ros_gz_sim '
           'pinky_description robot_state_publisher joint_state_publisher '
           'open_manipulator_description"',
         ),
@@ -728,6 +729,27 @@ void main() {
         robots: const [pinky],
       );
       expect(onlyPinky, isNot(contains('open_manipulator_description')));
+    });
+
+    test('building.yaml 이 더 새로우면 nav graph 를 다시 만든다', () {
+      // 맵에서 충전 Waypoint 에 Lane 을 이어도 nav_graphs/0.yaml 이 그대로면
+      // RMF 는 옛날 지도를 본다. 파일이 있으니 오류도 나지 않고, 대신 로봇을
+      // 플릿에 넣을 때 "충전 지점을 못 찾겠다"고 한다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      expect(script, contains(r'"$BUILDING_YAML" -nt "$NAV_GRAPH"'));
+      expect(
+        script,
+        contains('ros2 run rmf_building_map_tools building_map_generator nav'),
+      );
+      // 다시 만드는 일은 ROS 를 읽은 뒤라야 한다.
+      expect(
+        script.indexOf(r'source "$ROS_SETUP"'),
+        lessThan(script.indexOf('building_map_generator nav')),
+      );
     });
 
     test('PGID 파일을 실행 스크립트가 지우지 않는다', () {

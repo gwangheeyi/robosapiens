@@ -443,6 +443,28 @@ gz sim   stat=Sl   wchan=anon_pipe_write
 
 이 로그가 결국 5절의 원인을 찾아 줬습니다.
 
+### 낡은 nav graph
+
+`nav_graphs/0.yaml` 은 `building.yaml` 에서 파생되는데, 배포는 `building.yaml`
+까지만 다시 씁니다. 맵에서 Waypoint 나 Lane 을 고쳐도 nav graph 는 어제 것이
+그대로 남습니다.
+
+**파일이 없는 것이 아니라 낡은 것이라 아무 오류도 나지 않습니다.** 충전
+Waypoint 에 Lane 을 방금 이었는데도 RMF 는 계속 이렇게 말했습니다.
+
+```
+[FleetUpdateHandle::add_robot] Unable to find nearest charging waypoint.
+```
+
+실행 스크립트가 `building.yaml` 이 더 새로우면 nav graph 를 다시 만들도록
+고쳤습니다.
+
+```bash
+if [[ ! -f "$NAV_GRAPH" || "$BUILDING_YAML" -nt "$NAV_GRAPH" ]]; then
+  ros2 run rmf_building_map_tools building_map_generator nav ...
+fi
+```
+
 ### 유령 노드
 
 강제 종료된 노드는 DDS 에 떠난다고 알리지 못해 `ros2 node list` 에 남습니다.

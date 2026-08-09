@@ -845,6 +845,8 @@ String buildProjectBringupXml({
 List<String> _requiredPackages(List<RmfProjectRobot> robots) => [
   'rmf_demos',
   'rmf_demos_fleet_adapter',
+  // building.yaml 에서 nav_graphs/0.yaml 을 다시 만드는 데 쓴다.
+  'rmf_building_map_tools',
   'ros_gz_sim',
   if (robots.any((robot) => robot.runsInGazebo && robot.isMobile)) ...[
     'pinky_description',
@@ -889,13 +891,14 @@ OMX_WS="\${OMX_WS:-$manipulatorWorkspace}"
 REQUIRED_PACKAGES="${_requiredPackages(robots).join(' ')}"
 HEADLESS="\${HEADLESS:-true}"
 
-for required in "\$MAP_DIR/$mapName.building.yaml" "\$MAP_DIR/nav_graphs/0.yaml"; do
-  if [[ ! -f "\$required" ]]; then
-    echo "없는 파일: \$required" >&2
-    echo "앱의 맵 관리에서 배포하기와 RMF 설정 내보내기를 먼저 하세요." >&2
-    exit 1
-  fi
-done
+BUILDING_YAML="\$MAP_DIR/$mapName.building.yaml"
+NAV_GRAPH="\$MAP_DIR/nav_graphs/0.yaml"
+
+if [[ ! -f "\$BUILDING_YAML" ]]; then
+  echo "없는 파일: \$BUILDING_YAML" >&2
+  echo "앱의 맵 관리에서 배포하기와 RMF 설정 내보내기를 먼저 하세요." >&2
+  exit 1
+fi
 
 set +u
 # shellcheck disable=SC1090
@@ -904,6 +907,25 @@ source "\$ROS_SETUP"
 [[ -f "\$PINKY_WS/install/setup.bash" ]] && source "\$PINKY_WS/install/setup.bash"
 [[ -f "\$OMX_WS/install/setup.bash" ]] && source "\$OMX_WS/install/setup.bash"
 set -u
+
+# nav_graphs/0.yaml 은 building.yaml 에서 파생된다. 맵에서 Waypoint 나 Lane 을
+# 고쳐도 이 파일이 그대로면 RMF 는 옛날 지도를 본다. 없는 것이 아니라 낡은
+# 것이라 오류가 나지 않는다 — 충전 Waypoint 를 방금 이었는데도 RMF 가 "충전
+# 지점을 못 찾겠다"고 하는 것이 이 경우다. 그래서 매번 다시 만든다.
+if [[ ! -f "\$NAV_GRAPH" || "\$BUILDING_YAML" -nt "\$NAV_GRAPH" ]]; then
+  echo "nav_graphs/0.yaml 을 building.yaml 에서 다시 만든다."
+  mkdir -p "\$MAP_DIR/nav_graphs"
+  if ! ros2 run rmf_building_map_tools building_map_generator nav \\
+      "\$BUILDING_YAML" "\$MAP_DIR/nav_graphs"; then
+    echo "nav graph 생성 실패. rmf_building_map_tools 가 있는지 보세요." >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -f "\$NAV_GRAPH" ]]; then
+  echo "없는 파일: \$NAV_GRAPH" >&2
+  exit 1
+fi
 
 # 모든 출력을 로그 파일로 보낸다.
 #
@@ -1430,7 +1452,10 @@ def main(argv=sys.argv):
     except KeyboardInterrupt:
         pass
     node.destroy_node()
-    rclpy.shutdown()
+    # rclpy 의 신호 처리기가 먼저 context 를 닫아 놓는 일이 있다. 그때 또
+    # 부르면 예외가 올라와, 멀쩡히 끝난 것이 죽은 것처럼 보인다.
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
@@ -1715,10 +1740,16 @@ def main(argv=sys.argv):
         f'{fleet_config.fleet_name} 를 Nav2 에 이었습니다. '
         f'로봇 {len(robots)}대, {period:.2f}초마다 알립니다.')
 
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     node.destroy_node()
     adapter.stop()
-    rclpy.shutdown()
+    # 신호로 끊길 때 rclpy 가 먼저 context 를 닫아 놓는다. 그때 또 부르면
+    # 예외가 올라와, 멀쩡히 끝난 것이 죽은 것처럼 보인다.
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
