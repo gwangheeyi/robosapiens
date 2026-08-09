@@ -289,4 +289,26 @@ void main() {
       expect(source.substring(files, files + 80), contains('_ProjectFilesPage'));
     });
   });
+
+  group('로그 분석 메뉴', () {
+    test('작업 바로 뒤에 온다', () {
+      final source = File('lib/main.dart').readAsStringSync();
+      final menu = source.substring(
+        source.indexOf("(Icons.grid_view_rounded, '대시보드')"),
+        source.indexOf("(Icons.analytics_outlined, '운영 분석')"),
+      );
+      expect(menu.indexOf('작업'), lessThan(menu.indexOf('로그 분석')));
+    });
+
+    test('화면 번호가 제목과 맞는다', () {
+      final source = File('lib/main.dart').readAsStringSync();
+      final logs = source.indexOf('_selectedMenu == 5');
+      final analytics = source.indexOf('_selectedMenu == 6');
+      expect(source.substring(logs, logs + 70), contains('_ProjectLogPage'));
+      expect(
+        source.substring(analytics, analytics + 80),
+        contains('_OperationsAnalyticsPage'),
+      );
+    });
+  });
 }

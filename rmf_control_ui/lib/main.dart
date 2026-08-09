@@ -18,6 +18,7 @@ import 'movable_dialog.dart';
 import 'nav2_params.dart';
 import 'nav2_vendor_params.dart';
 import 'occupancy_grid.dart';
+import 'project_log.dart';
 import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
@@ -9716,6 +9717,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '로봇',
                         '설정 파일',
                         '작업',
+                        '로그 분석',
                         '운영 분석',
                       ][_selectedMenu],
                     ),
@@ -10258,6 +10260,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onStop: _stopProjectScript,
                             )
                           : _selectedMenu == 5
+                          ? _ProjectLogPage(
+                              mapDirectory: _deployedMapDirectory,
+                              mapName:
+                                  _robotDeployedMap?.summary.name ?? _mapName,
+                            )
+                          : _selectedMenu == 6
                           ? const _OperationsAnalyticsPage()
                           : _ComingSoonPage(
                               title: const [
@@ -13330,6 +13338,7 @@ class _NavigationRail extends StatelessWidget {
       (Icons.smart_toy_outlined, '로봇'),
       (Icons.description_outlined, '설정 파일'),
       (Icons.assignment_outlined, '작업'),
+      (Icons.receipt_long_outlined, '로그 분석'),
       (Icons.analytics_outlined, '운영 분석'),
     ];
     return Container(
@@ -19980,4 +19989,192 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       ],
     );
   }
+}
+
+/// 프로젝트 로그의 마지막 50줄.
+///
+/// 지금까지 무엇이 잘못됐는지 알려면 터미널에서 로그를 뒤져야 했다. 오류만
+/// 모은 파일을 함께 보여 준다 — 원인을 알려 준 것은 대부분 ERROR 가 아니라
+/// 뜨는 순서였지만, 한눈에 볼 때는 오류 쪽이 빠르다.
+class _ProjectLogPage extends StatefulWidget {
+  const _ProjectLogPage({required this.mapDirectory, required this.mapName});
+
+  final String? mapDirectory;
+  final String mapName;
+
+  @override
+  State<_ProjectLogPage> createState() => _ProjectLogPageState();
+}
+
+class _ProjectLogPageState extends State<_ProjectLogPage> {
+  static const int _count = 50;
+  bool _errorsOnly = false;
+  ({ProjectLogTail run, ProjectLogTail errors})? _logs;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+    // 백엔드가 도는 동안 계속 쌓인다. 화면을 열어 둔 채로 따라가게 한다.
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _reload());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _reload() {
+    final directory = widget.mapDirectory;
+    if (directory == null || widget.mapName.trim().isEmpty) return;
+    final logs = readProjectLogs(
+      mapDirectory: directory,
+      mapName: widget.mapName,
+      count: _count,
+    );
+    if (mounted) setState(() => _logs = logs);
+  }
+
+  String _size(int bytes) => bytes >= 1 << 30
+      ? '${(bytes / (1 << 30)).toStringAsFixed(1)}GB'
+      : bytes >= 1 << 20
+      ? '${(bytes / (1 << 20)).toStringAsFixed(1)}MB'
+      : '${(bytes / 1024).toStringAsFixed(0)}KB';
+
+  @override
+  Widget build(BuildContext context) {
+    final logs = _logs;
+    final tail = _errorsOnly ? logs?.errors : logs?.run;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 22, 28, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                '마지막 50줄',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 14),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('전체')),
+                  ButtonSegment(value: true, label: Text('오류·경고만')),
+                ],
+                selected: {_errorsOnly},
+                onSelectionChanged: (value) =>
+                    setState(() => _errorsOnly = value.first),
+              ),
+              const Spacer(),
+              if (tail != null && tail.sizeBytes > 0)
+                Text(
+                  '${_size(tail.sizeBytes)}'
+                  '${tail.modifiedAt == null ? '' : ' · ${_clock(tail.modifiedAt!)}'}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: _reload,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('다시 읽기'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: tail == null || tail.isEmpty
+                    ? null
+                    : () {
+                        Clipboard.setData(
+                          ClipboardData(
+                            text: tail.lines.map((l) => l.text).join('\n'),
+                          ),
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('로그를 복사했습니다.')),
+                        );
+                      },
+                icon: const Icon(Icons.copy_all_outlined, size: 18),
+                label: const Text('복사'),
+              ),
+            ],
+          ),
+          if (tail != null) ...[
+            const SizedBox(height: 6),
+            SelectableText(
+              tail.path,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F172A),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: tail == null
+                  ? const Center(
+                      child: Text(
+                        '프로젝트를 열거나 배포 맵을 불러오면 로그를 읽습니다.',
+                        style: TextStyle(color: Color(0xFF94A3B8)),
+                      ),
+                    )
+                  : tail.isEmpty
+                  ? Center(
+                      child: Text(
+                        tail.message ??
+                            (_errorsOnly
+                                ? '오류나 경고가 없습니다.'
+                                : '아직 아무것도 없습니다.'),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xFF94A3B8),
+                          height: 1.6,
+                        ),
+                      ),
+                    )
+                  : Scrollbar(
+                      thumbVisibility: true,
+                      child: ListView.builder(
+                        // 마지막 줄이 아래에 오게 둔다. 로그는 끝이 중요하다.
+                        itemCount: tail.lines.length,
+                        itemBuilder: (context, index) {
+                          final line = tail.lines[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: SelectableText(
+                              line.text,
+                              style: TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 12,
+                                height: 1.5,
+                                color: line.isError
+                                    ? const Color(0xFFFCA5A5)
+                                    : line.isWarning
+                                    ? const Color(0xFFFCD34D)
+                                    : const Color(0xFFCBD5E1),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _clock(DateTime at) =>
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}:'
+      '${at.second.toString().padLeft(2, '0')}';
 }
