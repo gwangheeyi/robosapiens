@@ -30,6 +30,8 @@ import 'robot_spawn_check.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
 import 'rmf_project_runner.dart';
+import 'rmf_task_bridge.dart';
+import 'rmf_task_request.dart';
 import 'rmf_runtime_service.dart';
 import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
@@ -290,6 +292,22 @@ class _MockRobot {
   double battery = 100;
   final List<Offset> assignedRoute = [];
   String? activeTaskId;
+
+  /// 지금 작업을 RMF 가 몰고 있다.
+  ///
+  /// 이때 앱은 좌표를 밀지도 않고 단계를 세지도 않는다. 둘 다 하면 화면의
+  /// 진행률이 실제 로봇과 어긋난다 — 로봇이 안 움직여도 3초마다 다음 단계로
+  /// 넘어가던 것이 그것이었다.
+  bool rmfDriven = false;
+
+  /// RMF 가 이 작업에 붙인 번호. 앱의 작업 번호와 다르다.
+  String? rmfTaskId;
+
+  /// RMF 가 마지막으로 지시한 목적지(월드 좌표). 도착 소식이 왔을 때 그것이
+  /// 우리 단계의 목적지인지 가리는 데 쓴다. RMF 는 Lane 을 따라 중간
+  /// Waypoint 를 스스로 끼워 넣으므로, 도착 횟수와 단계 수가 다르다.
+  double? rmfGoalX;
+  double? rmfGoalY;
 }
 
 class _RobotSpawnSelection {
@@ -608,6 +626,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<ui.AppExitResponse> _handleExitRequest() async {
     await RobotTelemetryBridge.instance.stop();
     RobotSensorFeed.instance.stop();
+    await RmfTaskBridge.instance.stop();
     final running = runningProjectName;
     if (running == null) return ui.AppExitResponse.exit;
     await stopProject(running);
@@ -4266,6 +4285,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 값이 끊기지 않는다.
   StreamSubscription<Map<String, RobotSensors>>? _sensorSubscription;
 
+  /// 어댑터가 내는 작업 진행 소식. RMF 가 모는 작업의 단계를 이것이 넘긴다.
+  StreamSubscription<RmfTaskProgress>? _rmfProgressSubscription;
+
   Future<void> _syncTelemetry() async {
     _telemetrySubscription ??= RobotTelemetryBridge.instance.updates.listen((
       status,
@@ -4281,6 +4303,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _sensorSubscription ??= RobotSensorFeed.instance.updates.listen((_) {
       if (mounted) setState(() {});
     });
+    // RMF 가 모는 작업의 단계는 어댑터가 알린다. 이것을 안 들으면 로봇은
+    // 움직이는데 화면의 진행률이 첫 단계에 멈춰 있는다.
+    _rmfProgressSubscription ??= RmfTaskBridge.instance.progress.listen(
+      _handleRmfProgress,
+    );
+    if (_fleetRobots.any(
+      (robot) => robot.isMobile && robot.dataSource.usesTopics,
+    )) {
+      final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+      if (mapName.trim().isNotEmpty) {
+        await RmfTaskBridge.instance.watch(
+          _fleetSettingsFor(mapName).fleetName,
+        );
+      }
+    }
     try {
       await RobotTelemetryBridge.instance.sync(_fleetRobots);
     } catch (_) {
@@ -4395,8 +4432,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
       task.completedAt = DateTime.now();
       unawaited(_saveMockTasks());
     }
-    robot.activeTaskId = null;
-    robot.moving = false;
+    robot
+      ..activeTaskId = null
+      ..moving = false
+      ..rmfDriven = false
+      ..rmfTaskId = null
+      ..rmfGoalX = null
+      ..rmfGoalY = null;
     _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
   }
 
@@ -4412,6 +4454,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ..activeTaskId = null
       ..moving = false
       ..targetWaypoint = null
+      ..rmfDriven = false
+      ..rmfTaskId = null
+      ..rmfGoalX = null
+      ..rmfGoalY = null
       ..assignedRoute.clear();
     _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
     unawaited(_saveMockTasks());
@@ -4669,7 +4715,136 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return true;
   }
 
+  /// 이 로봇의 작업을 RMF 가 몰아야 하는가.
+  ///
+  /// 등록에서 값의 출처를 Gazebo 나 실물로 고른 로봇이다. Mock 로봇은 ROS 를
+  /// 아예 안 쓰므로 예전처럼 앱이 굴린다.
+  bool _isRmfDriven(String robotId) {
+    final registered = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    return registered != null &&
+        registered.isMobile &&
+        registered.dataSource.usesTopics;
+  }
+
+  /// 앱 작업 하나를 RMF 에 넘긴다.
+  ///
+  /// 넘기고 나면 경로도 단계 진행도 RMF 가 정한다. 앱은 무엇을 할지만 정하고
+  /// 언제 끝났는지는 어댑터가 내는 진행 토픽으로 듣는다.
+  Future<RmfTaskSubmission> _submitTaskToRmf(
+    _MockRobot robot,
+    _MockTask task,
+  ) async {
+    // 배포 산출물이 있는 맵이라야 한다. 로봇 화면에서 불러온 것이 그것이다.
+    final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+    if (mapName.trim().isEmpty) {
+      return const RmfTaskSubmission(
+        accepted: false,
+        message: '어느 맵인지 모릅니다. 로봇 화면에서 배포 맵 불러오기를 먼저 하세요.',
+      );
+    }
+    final registered = _fleetRobots
+        .where((item) => item.robotId == robot.id)
+        .firstOrNull;
+    final converted = convertTaskSteps([
+      for (final step in task.steps)
+        RmfTaskStepInput(
+          kind: step.type.name,
+          placeName: step.destinationName,
+          durationSeconds: step.durationSeconds,
+        ),
+    ], homePlaceName: registered?.chargerWaypoint);
+    if (converted.isEmpty) {
+      return RmfTaskSubmission(
+        accepted: false,
+        message: [
+          'RMF 에 넘길 단계가 하나도 없습니다.',
+          ...converted.skipped,
+        ].join('\n'),
+      );
+    }
+    final request = buildRmfTaskRequest(
+      fleetName: _fleetSettingsFor(mapName).fleetName,
+      robotId: robot.id,
+      activities: converted.activities,
+      category: task.name,
+    );
+    final result = await RmfTaskBridge.instance.submit(
+      mapDirectory: _mapDirectoryFor(mapName),
+      mapName: mapName,
+      requestJson: request.json,
+    );
+    if (result.accepted && converted.skipped.isNotEmpty) {
+      // 넘긴 것과 화면에 보이는 것이 다르면 밝혀야 한다.
+      _processingWarning =
+          '[RMF] ${task.name}: 넘기지 못한 단계가 있습니다 — '
+          '${converted.skipped.join(' · ')}';
+    }
+    return result;
+  }
+
+  /// 어댑터가 낸 진행 소식 하나를 화면에 반영한다.
+  ///
+  /// RMF 는 Lane 을 따라 중간 Waypoint 를 스스로 끼워 넣는다. 도착 소식이
+  /// 올 때마다 단계를 넘기면 화면이 실제보다 앞서간다. 그래서 마지막 목적지가
+  /// **우리 단계의 목적지와 같을 때만** 넘긴다.
+  void _handleRmfProgress(RmfTaskProgress event) {
+    if (!mounted) return;
+    final robot = _mockRobots
+        .where((item) => item.id == event.robotId)
+        .firstOrNull;
+    if (robot == null || !robot.rmfDriven) return;
+    final task = robot.activeTaskId == null
+        ? null
+        : _mockTasks.where((item) => item.id == robot.activeTaskId).firstOrNull;
+    if (task == null) return;
+    final step = task.currentStep;
+    if (step == null) return;
+
+    if (event.event == 'navigate_start') {
+      setState(() {
+        robot
+          ..rmfGoalX = event.x
+          ..rmfGoalY = event.y
+          ..moving = true;
+      });
+      return;
+    }
+    if (event.event == 'action_start') {
+      setState(() => robot.moving = true);
+      return;
+    }
+    if (event.event == 'action_done') {
+      if (step.type != _TaskStepType.armLoad) return;
+      setState(() => _completeCurrentTaskStep(robot, task));
+      return;
+    }
+    if (event.event != 'navigate_done') return;
+    if (!step.type.isMovement) return;
+    final goalX = robot.rmfGoalX;
+    final goalY = robot.rmfGoalY;
+    final destination = step.destination;
+    if (goalX == null || goalY == null || destination == null) return;
+    final expected = _rmfMetersFromPixel(destination);
+    if (expected == null) return;
+    // RMF 가 준 좌표는 nav graph 의 Waypoint 값 그대로다. 우리가 도면에서
+    // 계산한 값과 소수점 아래까지 같아야 정상이다.
+    final gap = math.sqrt(
+      math.pow(goalX - expected.dx, 2) + math.pow(goalY - expected.dy, 2),
+    );
+    if (gap > 0.02) return;
+    setState(() => _completeCurrentTaskStep(robot, task));
+  }
+
   void _startTaskStep(_MockRobot robot, _MockTask task) {
+    // RMF 가 모는 작업은 통째로 한 번 넘긴다. 단계마다 앱이 경로를 만들면
+    // RMF 가 고른 경로와 둘이 된다.
+    if (robot.rmfDriven) {
+      task.currentStep?.status = _TaskStepStatus.active;
+      robot.moving = true;
+      return;
+    }
     final step = task.currentStep;
     if (step == null) {
       _finishRobotTask(robot);
@@ -4751,6 +4926,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
             robot.position = pixel;
             changed = true;
           }
+        }
+        // RMF 가 모는 로봇은 여기서 아무것도 하지 않는다. 위치는 위에서 토픽
+        // 으로 받았고, 단계는 어댑터의 진행 소식이 넘긴다. 여기서 또 세면
+        // 로봇이 아직 가는 중인데 화면만 다음 단계로 넘어간다.
+        if (robot.rmfDriven) {
+          robot.battery = math.max(0, robot.battery - .003);
+          continue;
         }
         final task = robot.activeTaskId == null
             ? null
@@ -5566,6 +5748,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 값의 출처가 Gazebo·실물인 로봇은 RMF 가 몬다. 앱이 단계를 세는 것과
+    // 로봇이 실제로 가는 것이 따로 놀면 화면이 거짓말을 한다.
+    final rmfDriven = _isRmfDriven(robot.id);
     setState(() {
       task
         ..robotId = robot.id
@@ -5578,13 +5763,47 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ..remainingSeconds = 0
           ..failureReason = null;
       }
-      robot.activeTaskId = task.id;
+      robot
+        ..activeTaskId = task.id
+        ..rmfDriven = rmfDriven
+        ..rmfTaskId = null
+        ..rmfGoalX = null
+        ..rmfGoalY = null;
       _startTaskStep(robot, task);
     });
+    if (rmfDriven) {
+      final result = await _submitTaskToRmf(robot, task);
+      if (!mounted) return;
+      if (!result.accepted) {
+        setState(() => _failRobotTask(robot, task, 'RMF: ${result.message}'));
+        await _saveMockTasks();
+        if (!mounted) return;
+        await showWaypointErrorDialog(
+          context,
+          title: '작업 실행',
+          message:
+              '${task.name} 을 RMF 가 받지 않았습니다.\n\n'
+              '${result.message}',
+        );
+        return;
+      }
+      setState(() => robot.rmfTaskId = result.taskId);
+      await RmfTaskBridge.instance.watch(
+        _fleetSettingsFor(
+          _robotDeployedMap?.summary.name ?? _mapName,
+        ).fleetName,
+      );
+    }
     await _saveMockTasks();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${task.name} 작업을 ${robot.id}에 배정해 실행했습니다.')),
+      SnackBar(
+        content: Text(
+          rmfDriven
+              ? '${task.name} 을 RMF 에 넘겼습니다. ${robot.id} 가 수행합니다.'
+              : '${task.name} 작업을 ${robot.id}에 배정해 실행했습니다.',
+        ),
+      ),
     );
     _startMockRobotTimer();
   }
@@ -5833,6 +6052,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 0.2초마다 디스크를 읽는다.
     unawaited(_sensorSubscription?.cancel());
     RobotSensorFeed.instance.stop();
+    // RMF 진행 소식을 읽는 `ros2 topic echo` 도 함께 끊는다.
+    unawaited(_rmfProgressSubscription?.cancel());
+    unawaited(RmfTaskBridge.instance.stop());
     for (final robot in _mockRobots) {
       robot.image?.dispose();
     }
