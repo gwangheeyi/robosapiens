@@ -1245,10 +1245,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final marginController = TextEditingController(
       text: _localizationMarginMeters.toStringAsFixed(2),
     );
+    // 비워 두면 맵에서 계산한 값을 쓴다. 지금 쓰는 값을 미리 채워 둔다.
+    final toleranceController = TextEditingController(
+      text: _goalTolerance.toStringAsFixed(3),
+    );
+    final floor = minimumGoalTolerance();
+    final recommended = _recommendedGoalTolerance;
+    final spacing = _minLaneSpacing;
     String? widthError;
     String? radiusError;
     String? marginError;
-    final values = await showMovableDialog<(double, double, double)>(
+    String? toleranceError;
+    String? toleranceWarning;
+    final values = await showMovableDialog<(double, double, double, double?)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1304,6 +1313,57 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       border: const OutlineInputBorder(),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: toleranceController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: '도착 인정 반경 (m)',
+                      helperText:
+                          '최소 ${floor.toStringAsFixed(3)} · '
+                          '이 맵 권장 ${recommended.toStringAsFixed(3)}'
+                          '${spacing == null ? '' : ' (레인 최소 간격 ${spacing.toStringAsFixed(3)}m ÷ 4)'}'
+                          '\n비우면 권장값을 씁니다. 벤더 기본값은 '
+                          '${vendorGoalTolerance.toStringAsFixed(2)}m 입니다.',
+                      helperMaxLines: 3,
+                      errorText: toleranceError,
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setDialogState(() {
+                      toleranceError = null;
+                      final value = _parseMeters(toleranceController.text);
+                      toleranceWarning =
+                          value != null && value > 0 && value < floor
+                          ? '코스트맵 한 칸이 ${nav2CostmapResolution.toStringAsFixed(2)}m 입니다. '
+                                '이보다 촘촘히 요구하면 도착을 못 하고 목표 주변을 맴돌 수 있습니다.'
+                          : null;
+                    }),
+                  ),
+                  if (toleranceWarning != null) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          size: 16,
+                          color: Color(0xFFD97706),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            toleranceWarning!,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF92400E),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 10),
                   const Text(
                     '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
@@ -1340,17 +1400,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     : null;
                 // 예전에는 여기서 그냥 return 했다. 버튼을 눌러도 아무 일이
                 // 일어나지 않아 값이 저장되지 않는 것처럼 보였다.
+                // 비우면 맵에서 계산한 값을 쓴다는 뜻이다.
+                final rawTolerance = toleranceController.text.trim();
+                final tolerance = rawTolerance.isEmpty
+                    ? null
+                    : _parseMeters(rawTolerance);
+                final nextToleranceError =
+                    rawTolerance.isNotEmpty && tolerance == null
+                    ? '숫자로 입력하세요. 예: ${recommended.toStringAsFixed(3)}'
+                    : tolerance != null && tolerance <= 0
+                    ? '0보다 커야 합니다.'
+                    : null;
                 if (nextWidthError != null ||
                     nextRadiusError != null ||
-                    nextMarginError != null) {
+                    nextMarginError != null ||
+                    nextToleranceError != null) {
                   setDialogState(() {
                     widthError = nextWidthError;
                     radiusError = nextRadiusError;
                     marginError = nextMarginError;
+                    toleranceError = nextToleranceError;
                   });
                   return;
                 }
-                Navigator.pop(dialogContext, (width!, radius!, margin!));
+                Navigator.pop(
+                  dialogContext,
+                  (width!, radius!, margin!, tolerance),
+                );
               },
               child: const Text('기준 저장'),
             ),
@@ -1366,6 +1442,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         widthController.dispose();
         radiusController.dispose();
         marginController.dispose();
+        toleranceController.dispose();
       }),
     );
     if (values == null || !mounted) return;
@@ -1374,6 +1451,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _robotWidthMeters = values.$1;
       _turningRadiusMeters = values.$2;
       _localizationMarginMeters = values.$3;
+      _fleetSettings = _fleetSettings.copyWith(
+        goalToleranceMeters: values.$4,
+        clearGoalTolerance: values.$4 == null,
+      );
       _isDeployed = false;
     });
     await _saveSettingToOpenProject(
@@ -1381,7 +1462,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       detail:
           '폭 ${values.$1.toStringAsFixed(2)}m · '
           '회전 반경 ${values.$2.toStringAsFixed(2)}m · '
-          '여유 ${values.$3.toStringAsFixed(2)}m',
+          '여유 ${values.$3.toStringAsFixed(2)}m · '
+          '도착 반경 '
+          '${values.$4 == null ? '자동 ${_recommendedGoalTolerance.toStringAsFixed(3)}' : values.$4!.toStringAsFixed(3)}m',
     );
     if (!mounted) return;
     await _showValidationDialog();
@@ -4159,6 +4242,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     for (final robot in navigating) {
       final rewritten = rewriteNav2Params(
         source: source,
+        goalTolerance: _goalTolerance,
         namespace: robot.gzName,
         // AMCL 이 처음 찍는 자리. 로봇을 올린 자리를 그대로 쓴다.
         initialX: robot.spawnX,
@@ -4481,6 +4565,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
   /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
   /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
+  /// 레인으로 이어진 Waypoint 사이의 최소 거리 [m].
+  ///
+  /// 도착 반경을 여기서 뽑는다. 이 맵은 0.33m 인데 벤더 도착 반경은 0.25m 라,
+  /// 이웃 Waypoint 의 도착 원과 겹쳐 어느 지점에 섰는지 구별이 안 됐다.
+  double? get _minLaneSpacing {
+    final scale = _metersPerPixel;
+    if (scale == null) return null;
+    final lanes = _robotDeployedMap?.lanes ?? _recommendedLanes;
+    double? shortest;
+    for (final lane in lanes) {
+      final meters = (lane.$1 - lane.$2).distance * scale;
+      if (meters <= 0) continue;
+      if (shortest == null || meters < shortest) shortest = meters;
+    }
+    return shortest;
+  }
+
+  /// 이 맵에서 권하는 도착 반경 [m].
+  double get _recommendedGoalTolerance =>
+      recommendedGoalTolerance(minLaneSpacing: _minLaneSpacing);
+
+  /// 실제로 쓸 도착 반경 [m]. 사람이 넣은 값이 있으면 그것을 쓴다.
+  double get _goalTolerance =>
+      _fleetSettings.goalToleranceMeters ?? _recommendedGoalTolerance;
+
   /// 배포 산출물을 만들 때 쓸 로봇 목록.
   ///
   /// 화면이 들고 있는 `_fleetRobots` 는 지금 열린 프로젝트의 것이다. 다른

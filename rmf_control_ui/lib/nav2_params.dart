@@ -109,12 +109,46 @@ String _requote(String original, String replacement) =>
 /// [initialX]·[initialY]·[initialYaw] 는 AMCL 이 처음 찍는 자리다. 로봇을 올린
 /// 자리(RMF 월드 좌표)를 그대로 넣는다. 이것이 틀리면 AMCL 이 엉뚱한 데서
 /// 시작해 라이다를 못 맞춘다.
+/// 코스트맵 한 칸의 크기 [m]. 도착 반경의 바닥값을 여기서 잡는다.
+const double nav2CostmapResolution = 0.05;
+
+/// 벤더가 준 도착 반경 [m]. 사람 다니는 복도를 전제한 값이다.
+const double vendorGoalTolerance = 0.25;
+
+/// 이 맵에서 더 조일 수 없는 도착 반경 [m].
+///
+/// 코스트맵 한 칸이 0.05m 다. 그보다 촘촘히 요구하면 로봇이 영영 도착하지
+/// 못하고 목표 주변을 맴돈다. 두 칸을 바닥으로 잡는다.
+double minimumGoalTolerance({
+  double costmapResolution = nav2CostmapResolution,
+}) => costmapResolution * 2;
+
+/// 맵 축척에서 뽑은 도착 반경 [m].
+///
+/// 이웃 Waypoint 까지 거리의 4분의 1이면 옆 Waypoint 의 도착 원과 겹치지
+/// 않는다. 어느 지점에 섰는지가 분명해진다.
+///
+/// [minLaneSpacing] 은 레인으로 이어진 Waypoint 사이의 최소 거리다. 모르면
+/// 벤더 기본값을 그대로 쓴다 — 함부로 조이면 도착을 못 한다.
+double recommendedGoalTolerance({
+  double? minLaneSpacing,
+  double costmapResolution = nav2CostmapResolution,
+}) {
+  final floor = minimumGoalTolerance(costmapResolution: costmapResolution);
+  if (minLaneSpacing == null || minLaneSpacing <= 0) return vendorGoalTolerance;
+  final quarter = minLaneSpacing / 4;
+  if (quarter < floor) return floor;
+  if (quarter > vendorGoalTolerance) return vendorGoalTolerance;
+  return quarter;
+}
+
 Nav2ParamsRewrite rewriteNav2Params({
   required String source,
   required String namespace,
   double? initialX,
   double? initialY,
   double? initialYaw,
+  double? goalTolerance,
 }) {
   final ns = namespace.startsWith('/') ? namespace.substring(1) : namespace;
   final changes = <String>[];
@@ -193,7 +227,26 @@ Nav2ParamsRewrite rewriteNav2Params({
       continue;
     }
 
-    // ③ TF 프레임. 로봇마다 갈라야 한다.
+    // ③ 도착 반경. 벤더 값은 사람 다니는 복도를 전제한 0.25m 라, Waypoint 가
+    //    0.33m 간격인 맵에서는 이웃 Waypoint 의 도착 원과 겹친다. 어느 지점에
+    //    섰는지 구별이 안 된다.
+    if (key == 'xy_goal_tolerance' && goalTolerance != null) {
+      final before = double.tryParse(parts.value.trim());
+      final after = goalTolerance.toStringAsFixed(3);
+      out.add(
+        '$indent$key: $after'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before == null || (before - goalTolerance).abs() > 1e-9) {
+        changes.add(
+          'xy_goal_tolerance: ${parts.value.trim()} → $after '
+          '(맵 축척에 맞춤)',
+        );
+      }
+      continue;
+    }
+
+    // ④ TF 프레임. 로봇마다 갈라야 한다.
     if (_frameKeys.contains(key) ||
         (_conditionalFrameKeys.contains(key) && bare == 'odom')) {
       if (bare == 'map') {

@@ -237,7 +237,16 @@ class RmfFleetSettings {
     this.rechargeSoc = 1,
     this.fleetManagerIp = '127.0.0.1',
     this.fleetManagerPort = 22011,
+    this.goalToleranceMeters,
   });
+
+  /// Nav2 가 "도착했다" 고 인정하는 반경 [m].
+  ///
+  /// 비워 두면 맵에서 계산한 값을 쓴다 — [recommendedGoalTolerance].
+  /// 벤더 기본값 0.25m 는 사람 다니는 복도를 전제한 것이라, Waypoint 가
+  /// 0.33m 간격인 맵에서는 이웃 Waypoint 의 도착 원과 겹친다. 실제로 충전1 로
+  /// 돌아오라 했는데 0.246m 어긋난 자리에서 멈추고 도착으로 쳤다.
+  final double? goalToleranceMeters;
 
   final String fleetName;
   final double linearVelocity;
@@ -279,7 +288,12 @@ class RmfFleetSettings {
     String? fleetName,
     double? footprintRadius,
     double? vicinityRadius,
+    double? goalToleranceMeters,
+    bool clearGoalTolerance = false,
   }) => RmfFleetSettings(
+    goalToleranceMeters: clearGoalTolerance
+        ? null
+        : goalToleranceMeters ?? this.goalToleranceMeters,
     fleetName: fleetName ?? this.fleetName,
     linearVelocity: linearVelocity,
     linearAcceleration: linearAcceleration,
@@ -323,6 +337,7 @@ class RmfFleetSettings {
     'rechargeSoc': rechargeSoc,
     'fleetManagerIp': fleetManagerIp,
     'fleetManagerPort': fleetManagerPort,
+    'goalToleranceMeters': goalToleranceMeters,
   };
 
   static RmfFleetSettings fromJson(Map<String, dynamic> d) {
@@ -357,6 +372,7 @@ class RmfFleetSettings {
       fleetManagerIp: d['fleetManagerIp'] as String? ?? base.fleetManagerIp,
       fleetManagerPort:
           (d['fleetManagerPort'] as num?)?.toInt() ?? base.fleetManagerPort,
+      goalToleranceMeters: (d['goalToleranceMeters'] as num?)?.toDouble(),
     );
   }
 }

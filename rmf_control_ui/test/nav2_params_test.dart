@@ -221,4 +221,66 @@ some_server:
       expect(two, contains('global_frame_id: "map"'));
     });
   });
+
+  group('도착 인정 반경', () {
+    test('벤더 값은 이 맵에 안 맞는다', () {
+      // 벤더 0.25m 는 사람 다니는 복도를 전제한 값이다. 이 맵은 레인 최소
+      // 간격이 0.331m 라, 도착 원이 이웃 Waypoint 까지 거리의 76% 다.
+      expect(vendorGoalTolerance, 0.25);
+    });
+
+    test('레인 간격의 4분의 1로 잡는다', () {
+      // 4분의 1이면 옆 Waypoint 의 도착 원과 겹치지 않는다.
+      expect(recommendedGoalTolerance(minLaneSpacing: 2.0), 0.25);
+      expect(recommendedGoalTolerance(minLaneSpacing: 0.8), closeTo(0.2, 1e-9));
+    });
+
+    test('코스트맵 두 칸보다 작게는 안 잡는다', () {
+      // 한 칸이 0.05m 다. 그보다 촘촘히 요구하면 도착을 못 하고 맴돈다.
+      expect(minimumGoalTolerance(), closeTo(0.1, 1e-9));
+      expect(
+        recommendedGoalTolerance(minLaneSpacing: 0.331),
+        closeTo(0.1, 1e-9),
+      );
+    });
+
+    test('간격을 모르면 벤더 값을 그대로 둔다', () {
+      // 함부로 조이면 도착을 못 한다. 모르면 손대지 않는다.
+      expect(recommendedGoalTolerance(minLaneSpacing: null), 0.25);
+      expect(recommendedGoalTolerance(minLaneSpacing: 0), 0.25);
+    });
+
+    test('넘겨준 값으로 파일을 다시 쓴다', () {
+      const source = '''
+/controller_server:
+  ros__parameters:
+    general_goal_checker:
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+''';
+      final result = rewriteNav2Params(
+        source: source,
+        namespace: 'pinky_01',
+        goalTolerance: 0.1,
+      );
+      expect(result.yaml, contains('xy_goal_tolerance: 0.100'));
+      // 각도는 건드리지 않는다. 물어본 것만 고친다.
+      expect(result.yaml, contains('yaw_goal_tolerance: 0.25'));
+      expect(
+        result.changes.any((c) => c.contains('xy_goal_tolerance: 0.25 → 0.100')),
+        isTrue,
+      );
+    });
+
+    test('안 넘기면 그대로 둔다', () {
+      const source = '''
+/controller_server:
+  ros__parameters:
+    general_goal_checker:
+      xy_goal_tolerance: 0.25
+''';
+      final result = rewriteNav2Params(source: source, namespace: 'pinky_01');
+      expect(result.yaml, contains('xy_goal_tolerance: 0.25'));
+    });
+  });
 }
