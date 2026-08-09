@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/main.dart';
@@ -252,5 +254,39 @@ void main() {
           .onPressed,
       isNull,
     );
+  });
+
+  group('메뉴 차례', () {
+    // 일하는 차례대로 둔다 — 맵을 만들고 → 로봇을 등록하고 → 설정을 내보내고
+    // → 백엔드를 띄우고 → 로봇을 올리고 → 작업을 시킨다.
+    test('사이드바가 설정 파일을 작업보다 앞에 둔다', () {
+      final source = File('lib/main.dart').readAsStringSync();
+      final menu = source.substring(
+        source.indexOf("(Icons.grid_view_rounded, '대시보드')"),
+        source.indexOf("(Icons.analytics_outlined, '운영 분석')"),
+      );
+      expect(menu.indexOf('맵 관리'), lessThan(menu.indexOf('로봇')));
+      expect(menu.indexOf('로봇'), lessThan(menu.indexOf('설정 파일')));
+      expect(menu.indexOf('설정 파일'), lessThan(menu.indexOf('작업')));
+    });
+
+    test('제목 차례가 사이드바와 같다', () {
+      // 어긋나면 설정 파일을 눌렀는데 제목만 작업이라고 나온다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final titles = source.substring(
+        source.indexOf("title: const ["),
+        source.indexOf("][_selectedMenu]"),
+      );
+      expect(titles.indexOf('설정 파일'), lessThan(titles.indexOf('작업')));
+    });
+
+    test('작업 화면 번호가 제목 차례와 맞는다', () {
+      // 번호와 제목이 어긋나 설정 파일을 눌렀는데 작업이 열린 적이 있다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final tasks = source.indexOf('_selectedMenu == 4');
+      final files = source.indexOf('_selectedMenu == 3');
+      expect(source.substring(tasks, tasks + 80), contains('_TaskManagementPage'));
+      expect(source.substring(files, files + 80), contains('_ProjectFilesPage'));
+    });
   });
 }

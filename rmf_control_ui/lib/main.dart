@@ -9714,8 +9714,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '대시보드',
                         '맵 관리',
                         '로봇',
-                        '작업',
                         '설정 파일',
+                        '작업',
                         '운영 분석',
                       ][_selectedMenu],
                     ),
@@ -9748,7 +9748,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onOpenRobots: () =>
                                   setState(() => _selectedMenu = 2),
                               onOpenTasks: () =>
-                                  setState(() => _selectedMenu = 3),
+                                  setState(() => _selectedMenu = 4),
                               onLoadMap: _loadMapForRobots,
                               onSpawn: _spawnMockRobot,
                               onCreateTask: _createMockTask,
@@ -10205,7 +10205,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
                             )
-                          : _selectedMenu == 3
+                          : _selectedMenu == 4
                           ? _TaskManagementPage(
                               tasks: _mockTasks,
                               robots: _mockRobots,
@@ -10242,7 +10242,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onDelete: _deleteMockTask,
                               onCancel: _cancelMockTask,
                             )
-                          : _selectedMenu == 4
+                          : _selectedMenu == 3
                           ? _ProjectFilesPage(
                               projectName: _openProjectName,
                               mapName: _mapName,
@@ -11549,6 +11549,9 @@ class _MainDashboard extends StatelessWidget {
                   ],
                 ),
               ),
+              // 일하는 차례대로 둔다 — 맵을 불러오고 → 로봇을 올리고 →
+              // 작업을 시킨다. 차례가 뒤집혀 있으면 처음 쓰는 사람이 스폰부터
+              // 눌러 보고 아무 일도 안 일어나는 것을 겪는다.
               OutlinedButton.icon(
                 onPressed: onLoadMap,
                 icon: const Icon(Icons.folder_open_outlined),
@@ -11865,14 +11868,14 @@ class _MainDashboard extends StatelessWidget {
                   label: const Text('로봇 관리'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: onOpenTasks,
-                  icon: const Icon(Icons.assignment_outlined),
-                  label: const Text('작업 관리'),
-                ),
-                OutlinedButton.icon(
                   onPressed: onLoadMap,
                   icon: const Icon(Icons.folder_open_outlined),
                   label: const Text('배포 맵 불러오기'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onOpenTasks,
+                  icon: const Icon(Icons.assignment_outlined),
+                  label: const Text('작업 관리'),
                 ),
               ],
             ),
@@ -13318,12 +13321,15 @@ class _NavigationRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 일하는 차례대로 둔다. 맵을 만들고 → 로봇을 등록하고 → 설정을 내보내고
+    // → 백엔드를 띄우고 → 로봇을 올리고 → 작업을 시킨다. 가운데 셋은 로봇
+    // 화면 안에 있으므로, 큰 차례는 맵 → 로봇 → 설정 → 작업이 된다.
     const items = [
       (Icons.grid_view_rounded, '대시보드'),
       (Icons.map_outlined, '맵 관리'),
       (Icons.smart_toy_outlined, '로봇'),
-      (Icons.assignment_outlined, '작업'),
       (Icons.description_outlined, '설정 파일'),
+      (Icons.assignment_outlined, '작업'),
       (Icons.analytics_outlined, '운영 분석'),
     ];
     return Container(
