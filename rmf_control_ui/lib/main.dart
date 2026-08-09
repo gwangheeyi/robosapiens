@@ -4169,6 +4169,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
   /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
   /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
+  /// 로봇 하나의 상세를 연다.
+  ///
+  /// 등록된 로봇이든 지도에만 올라온 것이든 같은 창으로 본다. 둘 중 하나만
+  /// 있어도 열린다 — 등록만 하고 아직 안 올렸거나, 등록 없이 올린 사람·
+  /// 휴머노이드일 수 있다.
+  Future<void> _showRobotDetail(String robotId) => showMovableDialog<void>(
+    context: context,
+    builder: (_) => _RobotDetailDialog(
+      robotId: robotId,
+      registered: _fleetRobots
+          .where((robot) => robot.robotId == robotId)
+          .firstOrNull,
+      robotOf: () =>
+          _mockRobots.where((robot) => robot.id == robotId).firstOrNull,
+      tasksOf: () => [
+        for (final task in _mockTasks)
+          if (task.robotId == robotId) task,
+      ],
+      telemetry: () => _telemetry,
+      toFloor: _floorCoordinate,
+      metersPerPixel: _metersPerPixel,
+      waypointLabel: _waypointLabel,
+    ),
+  );
+
   Future<void> _showTaskDetail(_MockTask task) {
     final registered = _fleetRobots
         .where((robot) => robot.robotId == task.robotId)
@@ -9355,6 +9380,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRemove: _removeMockRobot,
                               onRegisterRobot: () =>
                                   unawaited(_registerFleetRobot()),
+                              onOpenRobot: (id) =>
+                                  unawaited(_showRobotDetail(id)),
                               onEditRegisteredRobot: (robot) =>
                                   unawaited(_updateFleetRobot(robot)),
                               onUnregisterRobot: (robot) =>
@@ -11323,6 +11350,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onToggle,
     required this.onRemove,
     required this.onRegisterRobot,
+    required this.onOpenRobot,
     required this.onEditRegisteredRobot,
     required this.onUnregisterRobot,
     required this.onRegisterFromChargers,
@@ -11352,6 +11380,9 @@ class _RobotManagementPage extends StatefulWidget {
   final ValueChanged<_MockRobot> onToggle;
   final ValueChanged<_MockRobot> onRemove;
   final VoidCallback onRegisterRobot;
+
+  /// 로봇 하나의 상세를 연다.
+  final ValueChanged<String> onOpenRobot;
   final ValueChanged<RmfProjectRobot> onEditRegisteredRobot;
   final ValueChanged<RmfProjectRobot> onUnregisterRobot;
   final VoidCallback onRegisterFromChargers;
@@ -11731,7 +11762,12 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
               runSpacing: 8,
               children: [
                 for (final robot in robots)
-                  Container(
+                  // 카드를 누르면 그 로봇의 상세가 열린다. 로봇을 눌렀는데
+                  // 작업 이야기가 나오면 찾던 것이 아니다.
+                  InkWell(
+                    onTap: () => widget.onOpenRobot(robot.robotId),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
                     width: 320,
                     padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
                     decoration: BoxDecoration(
@@ -11820,6 +11856,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                           ),
                         ),
                       ],
+                    ),
                     ),
                   ),
               ],
@@ -11919,6 +11956,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                 robots: widget.robots,
                 onToggle: widget.onToggle,
                 onRemove: widget.onRemove,
+                onOpenRobot: widget.onOpenRobot,
               );
               if (constraints.maxWidth < 960) {
                 return Column(
@@ -12004,10 +12042,14 @@ class _RobotListCard extends StatelessWidget {
     required this.robots,
     required this.onToggle,
     required this.onRemove,
+    required this.onOpenRobot,
   });
   final List<_MockRobot> robots;
   final ValueChanged<_MockRobot> onToggle;
   final ValueChanged<_MockRobot> onRemove;
+
+  /// 로봇 하나의 상세를 연다.
+  final ValueChanged<String> onOpenRobot;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -12041,6 +12083,8 @@ class _RobotListCard extends StatelessWidget {
                   itemBuilder: (context, index) {
                     final robot = robots[index];
                     return ListTile(
+                      // 목록에서 눌러도 그 로봇의 상세가 열린다.
+                      onTap: () => onOpenRobot(robot.id),
                       leading: CircleAvatar(
                         backgroundColor: robot.color,
                         foregroundImage: robot.imageBytes == null
@@ -17626,6 +17670,442 @@ class _OperationsAnalyticsPageState extends State<_OperationsAnalyticsPage> {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// 로봇 한 대의 상세. 등록 정보와 지금 상태를 한자리에서 본다.
+///
+/// 작업 상세는 "이 작업이 어떻게 되고 있나"를 본다. 이것은 "이 로봇이 어떤
+/// 로봇이고 지금 어떤가"를 본다. 로봇을 눌렀을 때 작업 이야기가 나오면 찾던
+/// 것이 아니다.
+class _RobotDetailDialog extends StatefulWidget {
+  const _RobotDetailDialog({
+    required this.robotId,
+    required this.registered,
+    required this.robotOf,
+    required this.tasksOf,
+    required this.telemetry,
+    required this.toFloor,
+    required this.metersPerPixel,
+    required this.waypointLabel,
+  });
+
+  final String robotId;
+
+  /// 프로젝트 등록 정보. 등록되지 않은 것(사람·휴머노이드)이면 null.
+  final RmfProjectRobot? registered;
+
+  /// 지도에 올라와 있는 로봇. 아직 배치하지 않았으면 null.
+  final _MockRobot? Function() robotOf;
+
+  /// 이 로봇이 맡은 작업.
+  final List<_MockTask> Function() tasksOf;
+  final RobotTelemetryStatus Function() telemetry;
+  final Offset Function(Offset point) toFloor;
+  final double? metersPerPixel;
+  final String Function(Offset point) waypointLabel;
+
+  @override
+  State<_RobotDetailDialog> createState() => _RobotDetailDialogState();
+}
+
+class _RobotDetailDialogState extends State<_RobotDetailDialog> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 위치와 배터리가 계속 바뀐다. 작업 상세와 같은 주기로 읽는다.
+    _timer = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => setState(() {}),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  RmfProjectRobot? get _registered => widget.registered;
+
+  bool get _live => widget.telemetry().isLive(widget.robotId);
+
+  /// 이 로봇의 값이 실제로 어디서 오는가.
+  ///
+  /// 등록에서 Gazebo 를 골랐어도 토픽이 안 오면 화면 숫자는 앱이 계산한 것이다.
+  RobotDataSource get _source => effectiveDataSource(
+    selected: _registered?.dataSource ?? RobotDataSource.mock,
+    topicsConnected: _live,
+  );
+
+  bool get _mismatch => dataSourceMismatch(
+    selected: _registered?.dataSource ?? RobotDataSource.mock,
+    topicsConnected: _live,
+  );
+
+  static const Map<RobotDataSource, Color> _sourceColors = {
+    RobotDataSource.mock: Color(0xFFDC2626),
+    RobotDataSource.gazebo: Color(0xFFEA580C),
+    RobotDataSource.real: Color(0xFF15803D),
+  };
+
+  String _point(Offset point) {
+    final floor = widget.toFloor(point);
+    final pixels =
+        'X ${floor.dx.toStringAsFixed(1)} · Y ${floor.dy.toStringAsFixed(1)} px';
+    final scale = widget.metersPerPixel;
+    if (scale == null || scale <= 0) return pixels;
+    return '$pixels  ('
+        '${(floor.dx * scale).toStringAsFixed(2)} · '
+        '${(floor.dy * scale).toStringAsFixed(2)} m)';
+  }
+
+  Widget _row(String label, String value, {Color? color}) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 96,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            value,
+            style: color == null
+                ? null
+                : TextStyle(color: color, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _heading(String text) => Padding(
+    padding: const EdgeInsets.only(top: 18, bottom: 6),
+    child: Text(text, style: const TextStyle(fontWeight: FontWeight.w800)),
+  );
+
+  /// 값의 출처를 크게 세운 띠. 작업 상세와 같은 규칙을 쓴다.
+  Widget _sourceBanner() {
+    final source = _source;
+    final color = _sourceColors[source]!;
+    final topics = robotTopics(_registered);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color, width: 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                switch (source) {
+                  RobotDataSource.mock => Icons.science_outlined,
+                  RobotDataSource.gazebo => Icons.view_in_ar_outlined,
+                  RobotDataSource.real => Icons.smart_toy,
+                },
+                color: color,
+                size: 28,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  source.label,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            source.summary,
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+            ),
+          ),
+          if (source.usesTopics && _registered != null) ...[
+            const SizedBox(height: 8),
+            _topicLine('받기', topics.incoming, color),
+            if (topics.outgoing.isNotEmpty)
+              _topicLine('보내기', topics.outgoing, color),
+          ],
+          if (_mismatch) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .14),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '등록은 `${_registered!.dataSource.label}` 인데 앱이 아직 그 '
+                '토픽을 받지 못하고 있습니다.\n'
+                '아래 위치는 앱이 계산한 것입니다.',
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _topicLine(String label, List<String> topics, Color color) => Padding(
+    padding: const EdgeInsets.only(top: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 46,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            topics.join('  ·  '),
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  /// 화면에 뿌리는 것과 같은 내용을 글로 만든다.
+  String _asText() {
+    final robot = widget.robotOf();
+    final registered = _registered;
+    final pose = widget.telemetry().poses[widget.robotId];
+    final tasks = widget.tasksOf();
+    return [
+      '[로봇] ${widget.robotId}'
+          '${registered == null ? '' : ' · ${registered.displayName}'}',
+      '[출처] ${_source.label} — ${_source.summary}',
+      if (_mismatch)
+        '  주의 등록은 ${registered!.dataSource.label} 인데 토픽이 오지 않습니다.',
+      '',
+      if (registered != null) ...[
+        '종류 ${registered.kind.label}',
+        '모델 ${registered.model}',
+        'Gazebo 이름 ${registered.gzName}',
+        '${registered.isMobile ? '충전' : '설비'} 자리 '
+            '${registered.chargerWaypoint ?? '미지정'}',
+        if (registered.isMobile) '구획 ${registered.zones.join(', ')}',
+      ] else
+        '등록되지 않은 로봇입니다 (사람·휴머노이드).',
+      '',
+      if (robot == null)
+        '지도에 배치되지 않았습니다.'
+      else ...[
+        '위치 ${_point(robot.position)}',
+        '주행 ${robot.moving ? '주행 중' : '정지'} · 배터리 '
+            '${robot.battery.toStringAsFixed(1)}%',
+        '목표 ${robot.targetWaypoint == null ? '없음' : widget.waypointLabel(robot.targetWaypoint!)}',
+        '남은 경로 ${robot.assignedRoute.length}개 지점',
+      ],
+      if (pose != null)
+        '토픽 위치 ${pose.x.toStringAsFixed(3)}, ${pose.y.toStringAsFixed(3)} m · '
+            '방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
+      '',
+      if (tasks.isEmpty)
+        '맡은 작업이 없습니다.'
+      else
+        for (final task in tasks)
+          '작업 ${task.id} ${task.name} · ${task.status.name} · '
+              '${task.currentStepIndex}/${task.steps.length} 단계',
+    ].join('\n');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final robot = widget.robotOf();
+    final registered = _registered;
+    final pose = widget.telemetry().poses[widget.robotId];
+    final tasks = widget.tasksOf();
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(
+            registered == null
+                ? Icons.person
+                : registered.isMobile
+                ? Icons.smart_toy_outlined
+                : Icons.precision_manufacturing,
+            color: const Color(0xFF2563EB),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              registered == null
+                  ? widget.robotId
+                  : '${widget.robotId} · ${registered.displayName}',
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 560,
+        height: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _sourceBanner(),
+              _heading('등록 정보'),
+              if (registered == null)
+                _row('등록', '등록되지 않은 로봇입니다 (사람·휴머노이드).')
+              else ...[
+                _row('종류', registered.kind.label),
+                _row('모델', registered.model),
+                _row('Gazebo 이름', registered.gzName),
+                _row(
+                  '${registered.isMobile ? '충전' : '설비'} 자리',
+                  registered.chargerWaypoint ?? '미지정',
+                ),
+                if (registered.isMobile)
+                  _row(
+                    '구획 자격',
+                    registered.zones.isEmpty
+                        ? '없음'
+                        : registered.zones.join(', '),
+                  ),
+                _row(
+                  'RMF 관제',
+                  registered.isManagedByRmf
+                      ? 'fleet adapter 에 들어감'
+                      : '들어가지 않음 (앱이 직접 굴림)',
+                ),
+                _row(
+                  'Gazebo',
+                  registered.runsInGazebo ? '올라감' : '올리지 않음',
+                ),
+              ],
+              _heading('지금 상태'),
+              if (robot == null)
+                _row('배치', '지도에 배치되지 않았습니다.')
+              else ...[
+                _row('위치', _point(robot.position)),
+                if (registered?.isMobile ?? true) ...[
+                  _row('주행', robot.moving ? '주행 중' : '정지'),
+                  _row('배터리', '${robot.battery.toStringAsFixed(1)}%'),
+                  _row(
+                    '목표 지점',
+                    robot.targetWaypoint == null
+                        ? '없음'
+                        : widget.waypointLabel(robot.targetWaypoint!),
+                  ),
+                  _row('남은 경로', '${robot.assignedRoute.length}개 지점'),
+                ],
+              ],
+              if (pose != null)
+                _row(
+                  '토픽 위치',
+                  '${pose.x.toStringAsFixed(3)}, ${pose.y.toStringAsFixed(3)} m'
+                  ' · 방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
+                  color: _sourceColors[_source],
+                ),
+              _heading('맡은 작업'),
+              if (tasks.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 4),
+                  child: Text(
+                    '맡은 작업이 없습니다.',
+                    style: TextStyle(color: Color(0xFF64748B)),
+                  ),
+                )
+              else
+                for (final task in tasks)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Row(
+                      children: [
+                        Icon(
+                          switch (task.status) {
+                            _MockTaskStatus.completed => Icons.check_circle,
+                            _MockTaskStatus.active => Icons.play_circle_fill,
+                            _MockTaskStatus.failed => Icons.error,
+                            _ => Icons.radio_button_unchecked,
+                          },
+                          size: 16,
+                          color: switch (task.status) {
+                            _MockTaskStatus.completed => const Color(0xFF15803D),
+                            _MockTaskStatus.active => const Color(0xFF2563EB),
+                            _MockTaskStatus.failed => const Color(0xFFDC2626),
+                            _ => const Color(0xFF94A3B8),
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${task.name} · ${task.currentStepIndex}/'
+                            '${task.steps.length} 단계'
+                            '${task.currentStep == null ? '' : ' · ${task.currentStep!.destinationName ?? ''}'}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: _asText()));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('로봇 상세를 복사했습니다.')),
+            );
+          },
+          icon: const Icon(Icons.copy_outlined, size: 18),
+          label: const Text('복사'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('닫기'),
+        ),
+      ],
     );
   }
 }
