@@ -7,8 +7,8 @@ rmf_fleet:
     linear: [0.500, 0.750] # velocity, acceleration
     angular: [0.600, 2.000]
   profile: # 로봇을 원으로 본 반경. 맵의 로봇 안전 기준에서 가져왔다.
-    footprint: 0.075
-    vicinity: 0.175
+    footprint: 0.050
+    vicinity: 0.150
   reversible: True
   battery_system:
     voltage: 12.000
