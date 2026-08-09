@@ -16,16 +16,25 @@ void main() {
   setUp(() => dir = Directory.systemTemp.createTempSync('logtail'));
   tearDown(() => dir.deleteSync(recursive: true));
 
-  test('마지막 50줄만 준다', () {
+  test('달라는 만큼만 준다', () {
     final file = File('${dir.path}/m.log')
       ..writeAsStringSync([for (var i = 1; i <= 200; i++) '줄 $i'].join('\n'));
-    final tail = readLogTail(file.path);
-    expect(tail.lines, hasLength(50));
-    expect(tail.lines.first.text, '줄 151');
+    final tail = readLogTail(file.path, count: 30);
+    expect(tail.lines, hasLength(30));
+    expect(tail.lines.first.text, '줄 171');
     expect(tail.lines.last.text, '줄 200');
   });
 
-  test('50줄이 안 되면 있는 만큼만', () {
+  test('화면이 쓰는 값은 30줄이다', () {
+    final source = File('lib/main.dart').readAsStringSync();
+    expect(source, contains('static const int _count = 30;'));
+    expect(source, contains("'마지막 30줄'"));
+    // 화면을 다 먹지 않게 높이를 묶어 둔다.
+    final page = source.substring(source.indexOf('class _ProjectLogPageState'));
+    expect(page, contains('maxHeight: 360'));
+  });
+
+  test('모자라면 있는 만큼만', () {
     File('${dir.path}/m.log').writeAsStringSync('한 줄\n두 줄\n');
     expect(readLogTail('${dir.path}/m.log').lines, hasLength(2));
   });
@@ -39,8 +48,8 @@ void main() {
     }
     await sink.close();
     expect(file.lengthSync(), greaterThan(512 * 1024));
-    final tail = readLogTail(file.path);
-    expect(tail.lines, hasLength(50));
+    final tail = readLogTail(file.path, count: 30);
+    expect(tail.lines, hasLength(30));
     expect(tail.lines.last.text, endsWith('줄 39999'));
     // 잘린 첫 줄은 버린다. 가운데부터 시작한 글자는 뜻이 없다.
     expect(tail.lines.first.text, startsWith('x'));

@@ -20007,7 +20007,7 @@ class _ProjectLogPage extends StatefulWidget {
 }
 
 class _ProjectLogPageState extends State<_ProjectLogPage> {
-  static const int _count = 50;
+  static const int _count = 30;
   bool _errorsOnly = false;
   ({ProjectLogTail run, ProjectLogTail errors})? _logs;
   Timer? _timer;
@@ -20051,11 +20051,12 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
       padding: const EdgeInsets.fromLTRB(28, 22, 28, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             children: [
               const Text(
-                '마지막 50줄',
+                '마지막 30줄',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
               ),
               const SizedBox(width: 14),
@@ -20124,7 +20125,10 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
             ),
           ],
           const SizedBox(height: 12),
-          Expanded(
+          // 화면을 다 먹지 않게 높이를 묶어 둔다. 30줄이면 이만큼이면 되고,
+          // 아래에 다른 것을 놓을 자리도 남는다.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 360),
             child: Container(
               width: double.infinity,
               padding: const EdgeInsets.all(14),
