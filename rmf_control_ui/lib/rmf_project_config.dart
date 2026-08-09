@@ -846,6 +846,16 @@ source "\$ROS_SETUP"
 [[ -f "\$OMX_WS/install/setup.bash" ]] && source "\$OMX_WS/install/setup.bash"
 set -u
 
+# 모든 출력을 로그 파일로 보낸다.
+#
+# 앱이 이 스크립트를 파이프에 물려 띄우면, 그 파이프를 읽는 쪽이 없을 때
+# 64KB 가 차는 순간 Gazebo 가 write 에서 영원히 멈춘다. 물리가 돌지 않아
+# 모델도 안 올라오고 토픽에 값도 오지 않는다. 파일로 보내면 막힐 일이 없고,
+# 무슨 일이 있었는지 나중에 볼 수도 있다.
+LOG_FILE="\$MAP_DIR/$mapName.log"
+exec > "\$LOG_FILE" 2>&1
+echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
+
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
 # 앱이 detached 로 띄우면 이 셸의 PID 는 그룹 리더가 아니므로, PID 가 아니라
 # 실제 PGID 를 적어야 한다.
@@ -891,6 +901,7 @@ ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS"
 String buildProjectStopScript({
   required String mapName,
   required String mapDirectory,
+  List<RmfProjectRobot> robots = const [],
 }) =>
     '''#!/usr/bin/env bash
 # $mapName 프로젝트로 띄운 프로세스를 내린다.
@@ -901,6 +912,10 @@ String buildProjectStopScript({
 set -euo pipefail
 
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
+
+# 이 프로젝트가 쓰는 로봇 네임스페이스. 인자에 맵 경로가 없는 노드는 이 이름으로
+# 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
+ROBOT_NAMESPACES="${robots.where((robot) => robot.runsInGazebo).map((robot) => robot.gzName).join(' ')}"
 
 # INT → TERM → KILL 로 올려 가며 내린다.
 #
@@ -985,6 +1000,28 @@ fi
 # 마지막으로 재부모화되어 살아남은 것을 쓸어낸다. fleet_manager 처럼 launch 가
 # 죽어도 혼자 도는 것들이 여기서 잡힌다.
 sweep_map_dir "이 맵을 물고 남은 노드 ($mapName)"
+
+# 네임스페이스로 한 번 더 쓸어낸다.
+#
+# robot_state_publisher 같은 노드는 인자에 맵 경로가 없다. 대신 ROS 가 넣어 준
+# `__ns:=/<gz 이름>` 을 들고 있다. 이 프로젝트가 쓰는 이름은 우리가 정한
+# 것이므로 다른 것과 겹치지 않는다.
+sweep_namespaces() {
+  local pids=() pid ns
+  for ns in \$ROBOT_NAMESPACES; do
+    while read -r pid; do
+      [[ -z "\$pid" || "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && continue
+      pids+=("\$pid")
+    done < <(pgrep -u "\$(id -u)" -f -- "__ns:=/\$ns\\b" 2>/dev/null || true)
+  done
+  if ((\${#pids[@]} == 0)); then
+    echo "로봇 네임스페이스 ($mapName): 남은 것 없음"
+    return
+  fi
+  stop_pids "로봇 네임스페이스 ($mapName)" "\${pids[@]}"
+}
+
+sweep_namespaces
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';

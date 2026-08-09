@@ -75,11 +75,16 @@ Future<RmfRunResult> startProject(String mapName) async {
     // detached 로 띄우면 Dart 가 새 세션을 만들어 주므로 앱이 죽어도 함께
     // 끌려가지 않는다. 다만 여기서 받는 pid 는 그룹 리더가 아니다 — 그룹 정리는
     // 실행 스크립트가 남긴 PGID 파일을 보고 중지 스크립트가 한다.
+    //
+    // stdio 를 물리지 않는다. detachedWithStdio 로 띄우면 파이프가 생기는데
+    // 앱이 그것을 읽지 않아, 64KB 가 차는 순간 Gazebo 가 write 에서 영원히
+    // 멈춘다. 물리가 돌지 않아 모델도 안 올라오고 토픽에 값도 오지 않았다.
+    // 출력은 실행 스크립트가 제 로그 파일로 보낸다.
     final process = await Process.start(
       'bash',
       [script.path],
       workingDirectory: directory,
-      mode: ProcessStartMode.detachedWithStdio,
+      mode: ProcessStartMode.detached,
     );
     _startedProject = mapName;
     _startedPid = process.pid;

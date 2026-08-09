@@ -673,6 +673,24 @@ void main() {
       expect(onlyPinky, isNot(contains('open_manipulator_description')));
     });
 
+    test('출력을 파이프가 아니라 파일로 보낸다', () {
+      // 앱이 파이프에 물려 띄우면, 읽는 쪽이 없을 때 64KB 가 차는 순간 Gazebo 가
+      // write 에서 영원히 멈춘다. 물리가 돌지 않아 모델도 안 올라오고 토픽에
+      // 값도 오지 않았다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      expect(script, contains(r'LOG_FILE="$MAP_DIR/mixed.log"'));
+      expect(script, contains(r'exec > "$LOG_FILE" 2>&1'));
+      // 리다이렉트는 로봇을 띄우기 전에 걸려야 한다.
+      expect(
+        script.indexOf(r'exec > "$LOG_FILE"'),
+        lessThan(script.indexOf('Gazebo bringup')),
+      );
+    });
+
     test('없으면 무엇을 빌드해야 하는지 알려 준다', () {
       // 예전에는 찾아본 경로 수십 개가 한 줄로 쏟아져 원인을 알기 어려웠다.
       final script = buildProjectRunScript(
@@ -753,6 +771,41 @@ void main() {
     test('좀비는 기다리지 않는다', () {
       // 이미 끝난 것을 두고 매 단계 3초씩 기다리면 중지가 괜히 느려진다.
       expect(script, contains(r'*Z*'));
+    });
+
+    test('네임스페이스로도 쓸어낸다', () {
+      // robot_state_publisher 는 인자에 맵 경로가 없다. URDF 만 들고 있어서
+      // 경로로는 못 찾는다. 대신 ROS 가 넣어 준 __ns:=/<gz 이름> 을 들고 있다.
+      final withRobots = buildProjectStopScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/maps/gwanghee',
+        robots: const [
+          RmfProjectRobot(
+            robotId: 'PK-01',
+            displayName: 'p',
+            model: 'PINKY-GZ',
+            dataSource: RobotDataSource.gazebo,
+            gzName: 'pinky_01',
+            zones: [],
+          ),
+          RmfProjectRobot(
+            robotId: 'MK-01',
+            displayName: 'm',
+            model: 'PINKY-GZ',
+            gzName: 'mock_01',
+            zones: [],
+          ),
+        ],
+      );
+      expect(withRobots, contains('ROBOT_NAMESPACES="pinky_01"'));
+      expect(withRobots, contains(r'__ns:=/$ns'));
+      // Gazebo 로 돌리지 않는 로봇은 띄운 적이 없으니 내릴 것도 없다.
+      expect(withRobots, isNot(contains('mock_01')));
+    });
+
+    test('로봇이 없어도 스크립트가 돈다', () {
+      expect(script, contains('ROBOT_NAMESPACES=""'));
+      expect(script, contains('sweep_namespaces'));
     });
 
     test('다른 맵은 건드리지 않는다', () {
