@@ -521,14 +521,24 @@ String buildFleetSimYaml({
 ///
 /// [mapDirectory] 는 배포 산출물이 있는 곳(`rmf_maps/<맵이름>`)이다. 설정
 /// 파일도 같은 곳에 내보내므로 한 디렉터리만 가리키면 된다.
+/// 이 프로젝트를 Nav2 가 모는가.
+///
+/// `rmf_demos_fleet_adapter` 는 slotcar 전용이다. 그것은 Gazebo 안의 slotcar
+/// 플러그인에게 직접 명령하고, 우리 핑키에게는 상대가 없다. 토픽을 쓰는 이동
+/// 로봇이 하나라도 있으면 그것 대신 이 프로젝트의 nav2 어댑터를 띄워야 한다.
+bool projectUsesNav2(List<RmfProjectRobot> robots) =>
+    robots.any((robot) => robot.isMobile && robot.dataSource.usesTopics);
+
 String buildProjectLaunchXml({
   required String mapName,
   required String fleetName,
   required String mapDirectory,
   required String buildingYamlName,
+  List<RmfProjectRobot> robots = const [],
   bool useSimTime = true,
   String serverUri = 'ws://127.0.0.1:8000/_internal',
 }) {
+  final usesNav2 = projectUsesNav2(robots);
   final buffer = StringBuffer()
     ..writeln("<?xml version='1.0' ?>")
     ..writeln('<!--')
@@ -558,7 +568,27 @@ String buildProjectLaunchXml({
     )
     ..writeln('    <arg name="server_uri" value="\$(var server_uri)"/>')
     ..writeln('  </include>')
-    ..writeln('')
+    ..writeln('');
+  if (usesNav2) {
+    buffer
+      ..writeln('  <!--')
+      ..writeln('    이 프로젝트의 플릿은 여기 없다.')
+      ..writeln('')
+      ..writeln('    rmf_demos_fleet_adapter 는 slotcar 전용이다. Gazebo 안의')
+      ..writeln('    slotcar 플러그인에게 직접 명령하는 것이라, 토픽으로 도는')
+      ..writeln('    우리 핑키에게는 상대가 없다. 붙여 놓으면 설정에')
+      ..writeln('    user·password 가 없다며 죽고, 죽은 줄 모르면 배차만')
+      ..writeln('    하고 로봇은 가만히 있는다.')
+      ..writeln('')
+      ..writeln('    플릿은 ${mapName}_nav2.launch.xml 이 띄운다. 거기에')
+      ..writeln('    Nav2 와 ${mapName}_nav2_adapter.py 가 함께 있다.')
+      ..writeln('    실행 스크립트가 이 launch 다음에 그것을 띄운다 —')
+      ..writeln('    RMF core 가 먼저 떠야 어댑터가 schedule node 를 찾는다.')
+      ..writeln('  -->')
+      ..writeln('</launch>');
+    return buffer.toString();
+  }
+  buffer
     ..writeln('  <!-- 이 프로젝트의 플릿. 설정과 nav graph 모두 이 맵의 것이다. -->')
     ..writeln(
       '  <include file="\$(find-pkg-share rmf_demos_fleet_adapter)'
@@ -1071,12 +1101,27 @@ PYTHON
 }
 ensure_world_sensors "\$MAP_DIR/$mapName.world"
 
+${projectUsesNav2(robots) ? '''
+echo "[1/3] Gazebo bringup"
+ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
+sleep 12
+
+echo "[2/3] Open-RMF"
+ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS" &
+sleep 12
+
+# Nav2 와 RMF↔Nav2 어댑터. 이것이 없으면 RMF 가 배차해도 로봇이 안 움직인다 —
+# /<로봇>/cmd_vel 에 발행하는 것이 아무것도 없기 때문이다.
+#
+# RMF core 다음이라야 한다. 어댑터는 뜨자마자 schedule node 를 찾는다.
+echo "[3/3] Nav2 와 RMF 어댑터"
+ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml"''' : '''
 echo "[1/2] Gazebo bringup"
 ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
 sleep 12
 
 echo "[2/2] Open-RMF"
-ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS"
+ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS"'''}
 ''';
 
 /// 이 프로젝트로 띄운 것을 내리는 셸 스크립트.

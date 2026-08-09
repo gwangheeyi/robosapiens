@@ -1013,6 +1013,77 @@ void main() {
       );
     });
 
+    test('Nav2 로 도는 로봇이 있으면 slotcar 어댑터를 안 붙인다', () {
+      // rmf_demos_fleet_adapter 는 Gazebo 안의 slotcar 플러그인에게 직접
+      // 명령한다. 토픽으로 도는 핑키에게는 상대가 없다. 그런데도 붙여 놓아
+      // 설정에 user 가 없다며 죽었고, 죽은 줄 모른 채 "배차는 됐는데 로봇이
+      // 안 움직인다" 로 보였다.
+      const pinky = RmfProjectRobot(
+        robotId: 'PK-01',
+        displayName: '핑키 1호',
+        model: 'PINKY-GZ',
+        gzName: 'pinky_01',
+        zones: ['ambient'],
+        chargerWaypoint: '충전1',
+        dataSource: RobotDataSource.gazebo,
+      );
+      final xml = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+        robots: const [pinky],
+      );
+      expect(xml, contains('rmf_demos)/common.launch.xml'));
+      expect(xml, isNot(contains('rmf_demos_fleet_adapter)')));
+      // 어디로 갔는지는 파일 안에 적혀 있어야 한다.
+      expect(xml, contains('gwanghee_nav2.launch.xml'));
+
+      // Mock 만 있는 프로젝트는 예전 그대로다.
+      final mock = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+        robots: const [
+          RmfProjectRobot(
+            robotId: 'PK-01',
+            displayName: '핑키 1호',
+            model: 'PINKY-GZ',
+            gzName: 'pinky_01',
+            zones: ['ambient'],
+          ),
+        ],
+      );
+      expect(mock, contains('rmf_demos_fleet_adapter'));
+    });
+
+    test('실행 스크립트가 Nav2 와 어댑터를 RMF 다음에 띄운다', () {
+      // 이것이 빠져 있어 /pinky_01/cmd_vel 에 발행하는 것이 하나도 없었다.
+      // 실측: Publisher count 0.
+      const pinky = RmfProjectRobot(
+        robotId: 'PK-01',
+        displayName: '핑키 1호',
+        model: 'PINKY-GZ',
+        gzName: 'pinky_01',
+        zones: ['ambient'],
+        chargerWaypoint: '충전1',
+        dataSource: RobotDataSource.gazebo,
+      );
+      final script = buildProjectRunScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/maps/gwanghee',
+        robots: const [pinky],
+      );
+      expect(script, contains('[3/3] Nav2 와 RMF 어댑터'));
+      expect(script, contains('gwanghee_nav2.launch.xml'));
+      // RMF core 가 먼저라야 어댑터가 schedule node 를 찾는다.
+      expect(
+        script.indexOf('gwanghee.launch.xml'),
+        lessThan(script.indexOf('gwanghee_nav2.launch.xml')),
+      );
+    });
+
     test('rmf-web 주소를 넘긴다', () {
       final xml = buildProjectLaunchXml(
         mapName: 'gwanghee',

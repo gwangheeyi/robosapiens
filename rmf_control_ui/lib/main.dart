@@ -6854,13 +6854,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
         kind: 'launch',
         description:
             'Open-RMF 실행. schedule node·building map server·supervisor·'
-            'dispatcher 를 띄운 뒤 이 프로젝트의 fleet adapter 를 붙인다. '
+            'dispatcher 를 띄운다. 플릿은 '
+            '${projectUsesNav2(_fleetRobots) ? '${mapName}_nav2.launch.xml 이 띄운다 — rmf_demos_fleet_adapter 는 slotcar 전용이라 토픽으로 도는 로봇에게는 상대가 없다.' : '이 launch 가 함께 붙인다.'} '
             '순서가 뒤집히면 fleet adapter 가 schedule node 를 못 찾는다.',
         content: buildProjectLaunchXml(
           mapName: mapName,
           fleetName: fleet.fleetName,
           mapDirectory: mapDirectory,
           buildingYamlName: _yamlFileNameFor(mapName),
+          robots: _fleetRobots,
         ),
         generatedAt: now,
       ),
