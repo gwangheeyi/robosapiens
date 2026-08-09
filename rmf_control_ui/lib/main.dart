@@ -15,6 +15,8 @@ import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
+import 'nav2_params.dart';
+import 'nav2_vendor_params.dart';
 import 'occupancy_grid.dart';
 import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
@@ -4097,6 +4099,51 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 벤더 Nav2 파라미터를 이동 로봇마다 다시 쓴다. 로봇 ID → 내용.
+  ///
+  /// 벤더 파일은 로봇 한 대를 전제로 쓰였다. 두 대를 같은 월드에 올리면 서로의
+  /// 라이다를 보고 TF 가 충돌한다. 벤더 파일은 **고치지 않고** 읽어서 로봇마다
+  /// 다시 쓴다.
+  ///
+  /// 바꾼 것과 손대지 못한 것은 [_nav2Warnings] 에 남는다. 벤더 파일이 바뀌면
+  /// 여기 걸리므로 조용히 어긋나지 않는다.
+  ({Map<String, String> params, List<String> warnings})
+  _rewriteNav2ParamsForRobots() {
+    final source = readVendorNav2Params();
+    final navigating = _fleetRobots.where(
+      (robot) => robot.isMobile && robot.runsInGazebo,
+    );
+    if (source == null) {
+      return (
+        params: const {},
+        warnings: navigating.isEmpty
+            ? const []
+            : [
+                '벤더 Nav2 파라미터를 찾지 못해 로봇별 nav2_params.yaml 을 '
+                    '만들지 못했습니다. $nav2ParamsEnvironmentKey 환경 변수로 '
+                    '자리를 알려 주세요.',
+              ],
+      );
+    }
+    final params = <String, String>{};
+    final warnings = <String>[];
+    for (final robot in navigating) {
+      final rewritten = rewriteNav2Params(
+        source: source,
+        namespace: robot.gzName,
+        // AMCL 이 처음 찍는 자리. 로봇을 올린 자리를 그대로 쓴다.
+        initialX: robot.spawnX,
+        initialY: robot.spawnY,
+        initialYaw: robot.spawnHeading,
+      );
+      params[robot.robotId] = rewritten.yaml;
+      for (final warning in rewritten.warnings) {
+        warnings.add('${robot.robotId}: $warning');
+      }
+    }
+    return (params: params, warnings: warnings);
+  }
+
   /// Nav2 가 쓸 점유격자를 지금 도면에서 만든다.
   ///
   /// RMF 는 nav graph 만으로 길을 찾으므로 이 격자가 필요 없다. 필요한 것은
@@ -6747,6 +6794,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     final mapDirectory = _mapDirectoryFor(mapName);
     final now = DateTime.now();
+    // 벤더 파라미터를 로봇마다 다시 쓴다. 벤더 패키지가 없으면 이 파일만
+    // 빠지고 나머지는 그대로 만들어진다.
+    final nav2 = _rewriteNav2ParamsForRobots();
     final files = <MapProjectFile>[
       if (buildingYaml != null)
         MapProjectFile(
@@ -6810,6 +6860,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
         generatedAt: now,
       ),
       MapProjectFile(
+        fileName: '${mapName}_nav2.launch.xml',
+        kind: 'nav2',
+        description:
+            '이 프로젝트의 Nav2. 건물 지도(map_server)는 하나만 띄우고 이동 '
+            '로봇마다 제 Nav2 를 붙인다. 로봇들은 map 프레임을 함께 쓰고 '
+            '<로봇>/odom 만 서로 다르다. 아직 RMF 와 이어지지 않아 따로 돈다.',
+        content: buildProjectNav2LaunchXml(
+          mapName: mapName,
+          robots: _fleetRobots,
+          warnings: nav2.warnings,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
         fileName: '${mapName}_gz_bridge.yaml',
         kind: 'bridge',
         description:
@@ -6869,6 +6933,30 @@ class _ControlDashboardState extends State<ControlDashboard> {
           content: buildRobotBridgeYaml(robot),
           generatedAt: now,
         ),
+        // Nav2 는 이동 로봇만 쓴다. 설치 로봇은 한자리에 붙어 있어 길을 찾을
+        // 일이 없다.
+        if (robot.isMobile && robot.runsInGazebo) ...[
+          MapProjectFile(
+            fileName: '${robotDirectoryName(robot)}/nav2.launch.xml',
+            kind: 'nav2',
+            description:
+                '${robot.robotId} 의 Nav2. 이 로봇의 라이다로 제 위치를 잡고'
+                ' 길을 만들어 간다. map_server 는 월드에 하나뿐이라 여기 없다.',
+            content: buildRobotNav2LaunchXml(robot, mapName),
+            generatedAt: now,
+          ),
+          if (nav2.params[robot.robotId] != null)
+            MapProjectFile(
+              fileName: '${robotDirectoryName(robot)}/nav2_params.yaml',
+              kind: 'nav2',
+              description:
+                  '${robot.robotId} 의 Nav2 파라미터. 벤더의 nav2_params.yaml 을'
+                  ' 이 로봇 이름에 맞춰 다시 쓴 것이다. TF 프레임과 라이다·'
+                  '오도메트리 토픽은 가르고, map 프레임은 함께 쓴다.',
+              content: nav2.params[robot.robotId]!,
+              generatedAt: now,
+            ),
+        ],
         MapProjectFile(
           fileName: '${robotDirectoryName(robot)}/README.md',
           kind: 'robot',

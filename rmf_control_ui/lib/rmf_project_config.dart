@@ -746,12 +746,24 @@ String buildProjectBringupXml({
       '\$(var map_dir)/generated_models:\$(env HOME)/.gazebo/models"/>',
     )
     ..writeln('')
-    ..writeln('  <!-- 화면이 없는 환경에서는 headless 로 서버만 띄운다. -->')
+    // `--headless-rendering` 이 있어야 라이다·카메라가 돈다. gpu_lidar 는 GPU
+    // 렌더링으로 거리를 재므로 그릴 자리가 없으면 **아무것도 발행하지 않는다.**
+    // 토픽 이름은 보이는데 데이터가 영영 안 오고, 오류도 안 난다. 이것이 없으면
+    // AMCL 도 Nav2 도 불가능하다.
+    // XML 주석 안에는 붙임표 두 개를 쓸 수 없다. 옵션 이름을 그대로 적으면
+    // 파일이 깨져서 bringup 이 통째로 안 뜬다.
+    ..writeln('  <!-- 화면이 없는 환경에서는 headless 로 서버만 띄운다.')
+    ..writeln('       헤드리스 렌더링이 있어야 라이다·카메라가 돈다.')
+    ..writeln('       gpu_lidar 는 GPU 로 거리를 재므로 그릴 자리가 없으면')
+    ..writeln('       아무것도 발행하지 않는다. 오류도 나지 않는다. -->')
     ..writeln(
       '  <include file="\$(find-pkg-share ros_gz_sim)'
       '/launch/gz_sim.launch.py">',
     )
-    ..writeln('    <arg name="gz_args" value="-r -s -v2 \$(var world)"/>')
+    ..writeln(
+      '    <arg name="gz_args"'
+      ' value="-r -s -v2 --headless-rendering \$(var world)"/>',
+    )
     ..writeln('    <arg name="on_exit_shutdown" value="true"/>')
     ..writeln('  </include>')
     ..writeln('  <group unless="\$(var headless)">')
@@ -915,6 +927,54 @@ if ((\${#missing[@]} > 0)); then
   exit 1
 fi
 
+# 월드에 센서 시스템을 채운다.
+#
+# 월드는 rmf_building_map_tools 가 제 템플릿(gz_world.sdf)에서 만드는데, 거기에는
+# Physics · UserCommands · SceneBroadcaster 셋뿐이다. RMF 의 시범 로봇(slotcar)은
+# 라이다를 안 쓰므로 필요가 없었다.
+#
+# 우리 핑키는 gpu_lidar · camera · imu 를 단다. 센서 시스템이 없으면 이 센서들이
+# **하나도 발행하지 않는다.** 토픽 이름은 보이는데 데이터가 영영 안 온다. 라이다가
+# 없으면 AMCL 도 Nav2 도 불가능하다.
+#
+# 배포할 때마다 월드가 다시 만들어지므로 여기서 매번 채운다. 이미 있으면 넘어간다.
+ensure_world_sensors() {
+  local world="\$1"
+  [ -f "\$world" ] || return 0
+  python3 - "\$world" <<'PYTHON'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as handle:
+    world = handle.read()
+
+# 이름으로 찾는다. filename 은 앞에 lib 이 붙기도 하고 안 붙기도 한다.
+wanted = [
+    ('gz::sim::systems::Sensors',
+     '    <plugin filename="gz-sim-sensors-system"\\n'
+     '            name="gz::sim::systems::Sensors">\\n'
+     '      <render_engine>ogre2</render_engine>\\n'
+     '    </plugin>\\n'),
+    ('gz::sim::systems::Imu',
+     '    <plugin filename="gz-sim-imu-system"\\n'
+     '            name="gz::sim::systems::Imu">\\n'
+     '    </plugin>\\n'),
+]
+added = [name for name, _ in wanted if name not in world]
+if not added:
+    print('월드에 센서 시스템이 이미 있습니다.')
+    sys.exit(0)
+
+block = ''.join(snippet for name, snippet in wanted if name not in world)
+# <world ...> 바로 다음에 넣는다. 시스템 플러그인은 월드의 자식이어야 한다.
+marker = world.index('>', world.index('<world')) + 1
+with open(path, 'w', encoding='utf-8') as handle:
+    handle.write(world[:marker] + '\\n' + block + world[marker:])
+print('월드에 센서 시스템을 넣었습니다: ' + ', '.join(added))
+PYTHON
+}
+ensure_world_sensors "\$MAP_DIR/$mapName.world"
+
 echo "[1/2] Gazebo bringup"
 ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
 sleep 12
@@ -1072,6 +1132,176 @@ sweep_rmf_core
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';
+
+/// 로봇 한 대의 Nav2 를 띄우는 launch.
+///
+/// **네임스페이스 아래에서만 돈다.** 노드마다 이름을 걸지 않고 그룹에
+/// `push-ros-namespace` 를 한 번 건다 — 두 번 걸면 `/pinky_01/pinky_01/amcl` 이
+/// 되어 파라미터가 하나도 안 붙는다(`docs/MULTI_ROBOT_NAMESPACES.md` 함정 1).
+///
+/// `map_server` 는 여기 없다. 같은 건물이므로 **월드에 하나만** 띄운다.
+String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
+  // lifecycle_manager 가 이 차례로 켠다. costmap 을 쓰는 것보다 그것을 만드는
+  // 쪽이 먼저 서야 한다.
+  const managed = [
+    'controller_server',
+    'smoother_server',
+    'planner_server',
+    'behavior_server',
+    'bt_navigator',
+    'waypoint_follower',
+    'velocity_smoother',
+  ];
+  final buffer = StringBuffer()
+    ..writeln("<?xml version='1.0' ?>")
+    ..writeln('<!--')
+    ..writeln('  ${robot.robotId} · ${robot.displayName} 의 Nav2.')
+    ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('')
+    ..writeln('  이 로봇의 라이다로 제 위치를 잡고(AMCL) 길을 만들어 간다.')
+    ..writeln('  파라미터는 같은 디렉터리의 nav2_params.yaml 이다 — 벤더의')
+    ..writeln('  nav2_params.yaml 을 이 로봇 이름에 맞춰 다시 쓴 것이다.')
+    ..writeln('')
+    ..writeln('  map_server 는 여기 없다. 같은 건물이므로 월드에 하나만 띄운다.')
+    ..writeln('  ${mapName}_nav2.launch.xml 이 그것을 맡는다.')
+    ..writeln('')
+    ..writeln('  혼자 시험하려면 map_server 를 먼저 띄우고 이것을 돌린다.')
+    ..writeln('-->')
+    ..writeln('<launch>')
+    ..writeln('  <arg name="robot_dir" default="\$(dirname)"/>')
+    ..writeln('  <arg name="use_sim_time" default="true"/>')
+    ..writeln('  <group>')
+    // 한 번만 건다. 아래 노드에는 네임스페이스를 따로 걸지 않는다.
+    ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+    ..writeln('')
+    ..writeln('    <!-- 라이다로 제 위치를 잡는다. map → ${robot.gzName}/odom -->')
+    ..writeln('    <node pkg="nav2_amcl" exec="amcl" name="amcl"')
+    ..writeln('          output="screen">')
+    ..writeln(
+      '      <param from="\$(var robot_dir)/nav2_params.yaml"/>',
+    )
+    ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('    </node>');
+  for (final node in managed) {
+    final package = switch (node) {
+      'controller_server' => 'nav2_controller',
+      'smoother_server' => 'nav2_smoother',
+      'planner_server' => 'nav2_planner',
+      'behavior_server' => 'nav2_behaviors',
+      'bt_navigator' => 'nav2_bt_navigator',
+      'waypoint_follower' => 'nav2_waypoint_follower',
+      _ => 'nav2_velocity_smoother',
+    };
+    buffer
+      ..writeln('')
+      ..writeln('    <node pkg="$package" exec="$node" name="$node"')
+      ..writeln('          output="screen">')
+      ..writeln('      <param from="\$(var robot_dir)/nav2_params.yaml"/>')
+      ..writeln(
+        '      <param name="use_sim_time" value="\$(var use_sim_time)"/>',
+      );
+    if (node == 'behavior_server') {
+      // behavior_server 는 제 이름으로 TF 를 본다. 파라미터로만 주면 늦게
+      // 붙는 일이 있어 여기서도 못 박는다.
+      buffer.writeln(
+        '      <param name="robot_base_frame" '
+        'value="${robot.gzName}/base_footprint"/>',
+      );
+    }
+    buffer.writeln('    </node>');
+  }
+  buffer
+    ..writeln('')
+    ..writeln('    <!-- 위 노드들을 차례로 켜고 끈다. -->')
+    ..writeln('    <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"')
+    ..writeln('          name="lifecycle_manager_navigation" output="screen">')
+    ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('      <param name="autostart" value="true"/>')
+    ..writeln('      <param name="node_names"')
+    ..writeln('             value="[amcl, ${managed.join(', ')}]"/>')
+    ..writeln('    </node>')
+    ..writeln('  </group>')
+    ..writeln('</launch>');
+  return buffer.toString();
+}
+
+/// 프로젝트의 Nav2 를 한꺼번에 띄우는 launch.
+///
+/// 건물 지도(`map_server`)는 **하나만** 띄우고, 이동 로봇마다 제 Nav2 를
+/// 붙인다. 로봇들은 `map` 프레임을 함께 쓰고 `<로봇>/odom` 만 서로 다르다.
+/// [warnings] 는 파라미터를 다시 쓰면서 손대지 못한 것이다. 여기 주석으로
+/// 적어 둔다 — 이 launch 가 안 뜰 때 사람이 제일 먼저 여는 파일이다.
+String buildProjectNav2LaunchXml({
+  required String mapName,
+  required List<RmfProjectRobot> robots,
+  List<String> warnings = const [],
+}) {
+  final navigating = robots
+      .where((robot) => robot.isMobile && robot.runsInGazebo)
+      .toList();
+  final buffer = StringBuffer()
+    ..writeln("<?xml version='1.0' ?>")
+    ..writeln('<!--')
+    ..writeln('  $mapName 프로젝트의 Nav2.')
+    ..writeln('  rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('')
+    ..writeln('  건물 지도는 하나만 띄우고 이동 로봇마다 제 Nav2 를 붙인다.')
+    ..writeln('  로봇들은 map 프레임을 함께 쓰고 <로봇>/odom 만 서로 다르다.')
+    ..writeln('  그래서 한 TF 트리에 map → pinky_01/odom, map → pinky_02/odom')
+    ..writeln('  이 나란히 선다.')
+    ..writeln('')
+    ..writeln('  지도는 nav2_map/ 에 있다. 도면에서 만든 것이라 원점이 RMF')
+    ..writeln('  월드에 정확히 맞는다.')
+    ..writeln('')
+    ..writeln('  아직 RMF 와 이어지지 않았다. 지금은 Nav2 만 따로 돈다.');
+  if (warnings.isNotEmpty) {
+    buffer
+      ..writeln('')
+      ..writeln('  ── 확인이 필요한 것 ──────────────────────────────');
+    for (final warning in warnings) {
+      buffer.writeln('  · $warning');
+    }
+  }
+  buffer
+    ..writeln('-->')
+    ..writeln('<launch>')
+    ..writeln('  <arg name="map_dir" default="\$(dirname)"/>')
+    ..writeln('  <arg name="use_sim_time" default="true"/>')
+    ..writeln('')
+    ..writeln('  <!-- 건물 지도. 로봇들이 함께 본다. -->')
+    ..writeln('  <node pkg="nav2_map_server" exec="map_server"')
+    ..writeln('        name="map_server" output="screen">')
+    ..writeln(
+      '    <param name="yaml_filename" '
+      'value="\$(var map_dir)/nav2_map/$mapName.yaml"/>',
+    )
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('  <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"')
+    ..writeln('        name="lifecycle_manager_map" output="screen">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('    <param name="autostart" value="true"/>')
+    ..writeln('    <param name="node_names" value="[map_server]"/>')
+    ..writeln('  </node>');
+  if (navigating.isEmpty) {
+    buffer
+      ..writeln('')
+      ..writeln('  <!-- Gazebo 로 돌리는 이동 로봇이 없다. 지도만 띄운다. -->');
+  }
+  for (final robot in navigating) {
+    buffer
+      ..writeln('')
+      ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')
+      ..writeln(
+        '  <include file="\$(var map_dir)/'
+        '${robotDirectoryName(robot)}/nav2.launch.xml">',
+      )
+      ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+      ..writeln('  </include>');
+  }
+  buffer.writeln('</launch>');
+  return buffer.toString();
+}
 
 /// 지도 그림의 픽셀을 RMF 월드 좌표(m)로 옮긴다.
 ///
