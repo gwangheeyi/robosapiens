@@ -24,6 +24,7 @@ import 'rmf_project_config.dart';
 import 'operations_log.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
+import 'robot_link_probe.dart';
 import 'robot_sensor_feed.dart';
 import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
@@ -4329,6 +4330,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } catch (_) {
       // 토픽을 못 붙어도 앱은 계속 돌아야 한다. 못 받으면 앱 계산으로 돈다.
     }
+    // 로봇 상세의 진단이 이 값을 본다. 창을 열 때마다 프로세스를 뒤지면
+    // 창이 늦게 뜬다.
+    try {
+      final running = await runningBackendProjects();
+      if (mounted) setState(() => _backendRunning = running.isNotEmpty);
+    } catch (_) {}
   }
 
   Offset _floorCoordinate(Offset point) {
@@ -4474,6 +4481,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
   /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
   /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
+  /// 배포 산출물이 있는 곳. 불러온 배포 맵 기준이다.
+  String? get _deployedMapDirectory {
+    final name = _robotDeployedMap?.summary.name ?? _mapName;
+    return name.trim().isEmpty ? null : _mapDirectoryFor(name);
+  }
+
+  /// 이 프로젝트의 백엔드가 떠 있는가.
+  ///
+  /// 로봇 상세를 열 때마다 프로세스를 뒤지면 창이 늦게 뜬다. 화면이 이미
+  /// 주기적으로 읽어 둔 값을 쓴다.
+  bool _backendRunning = false;
+
+  Future<void> _startBackendFromDetail() async {
+    final name = _robotDeployedMap?.summary.name ?? _mapName;
+    if (name.trim().isEmpty) return;
+    await startProject(name);
+    final running = await runningBackendProjects();
+    if (!mounted) return;
+    setState(() => _backendRunning = running.isNotEmpty);
+  }
+
+  /// 앱이 로봇 토픽을 다시 구독하게 한다.
+  Future<void> _resubscribeRobots() async {
+    await RobotTelemetryBridge.instance.stop();
+    await _syncTelemetry();
+  }
+
   /// 로봇 하나의 상세를 연다.
   ///
   /// 등록된 로봇이든 지도에만 올라온 것이든 같은 창으로 본다. 둘 중 하나만
@@ -4497,6 +4531,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       toFloor: _floorCoordinate,
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
+      mapDirectory: _deployedMapDirectory,
+      backendRunning: () => _backendRunning,
+      onStartBackend: _startBackendFromDetail,
+      onResubscribe: _resubscribeRobots,
     ),
   );
 
@@ -12031,6 +12069,16 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   RmfRuntimeStatus _rmfStatus = RmfRuntimeStatus.unknown;
   bool _rmfBusy = false;
 
+  /// 노드 목록 스크롤. Scrollbar 와 스크롤 뷰가 같은 것을 잡아야 손잡이가
+  /// 제자리에 붙는다.
+  final ScrollController _nodeListScroll = ScrollController();
+
+  @override
+  void dispose() {
+    _nodeListScroll.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -12244,12 +12292,37 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                   ),
                 ],
                 if (running) ...[
-                  const SizedBox(height: 4),
-                  SelectableText(
-                    _rmfStatus.nodes.join('\n'),
+                  const SizedBox(height: 6),
+                  Text(
+                    '떠 있는 노드 ${_rmfStatus.nodes.length}개',
                     style: const TextStyle(
                       fontSize: 12,
+                      fontWeight: FontWeight.w700,
                       color: Color(0xFF7C2D12),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  // 노드가 서른 개를 넘는다. 그대로 늘어놓으면 카드가 화면을
+                  // 넘어가 아래 버튼이 안 보인다. 여기서만 굴린다.
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 168),
+                    child: Scrollbar(
+                      controller: _nodeListScroll,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _nodeListScroll,
+                        primary: false,
+                        padding: const EdgeInsets.only(right: 12),
+                        child: SelectableText(
+                          _rmfStatus.nodes.join('\n'),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            height: 1.5,
+                            fontFamily: 'monospace',
+                            color: Color(0xFF7C2D12),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -18871,6 +18944,10 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.toFloor,
     required this.metersPerPixel,
     required this.waypointLabel,
+    required this.mapDirectory,
+    required this.backendRunning,
+    required this.onStartBackend,
+    required this.onResubscribe,
   });
 
   final String robotId;
@@ -18892,12 +18969,30 @@ class _RobotDetailDialog extends StatefulWidget {
   final double? metersPerPixel;
   final String Function(Offset point) waypointLabel;
 
+  /// 배포 산출물이 있는 곳. 이 로봇만 올리는 launch 가 그 안에 있다.
+  final String? mapDirectory;
+
+  /// 이 프로젝트의 백엔드가 떠 있는가.
+  final bool Function() backendRunning;
+
+  /// 백엔드를 띄운다. 로봇 화면의 그 버튼과 같은 것을 부른다.
+  final Future<void> Function() onStartBackend;
+
+  /// 앱이 이 로봇의 토픽을 다시 구독하게 한다.
+  final Future<void> Function() onResubscribe;
+
   @override
   State<_RobotDetailDialog> createState() => _RobotDetailDialogState();
 }
 
 class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   Timer? _timer;
+
+  /// ROS 에 물어본 결과. 아직 안 물어봤으면 모른다.
+  RobotLinkProbe _probe = RobotLinkProbe.unknown;
+  bool _probing = false;
+  String? _fixMessage;
+  bool _fixOk = true;
 
   @override
   void initState() {
@@ -18907,12 +19002,119 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       const Duration(milliseconds: 200),
       (_) => setState(() {}),
     );
+    // 창을 열면 한 번 물어본다. 사람이 버튼을 찾아 누르기 전에 무엇이 끊겼는지
+    // 보여야 한다.
+    if (_registered?.dataSource.usesTopics ?? false) {
+      unawaited(_runProbe());
+    }
   }
 
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
+  }
+
+  /// 이 로봇의 고리를 ROS 에 물어본다.
+  Future<void> _runProbe() async {
+    final namespace = _registered?.gzName;
+    if (namespace == null || namespace.isEmpty) return;
+    setState(() => _probing = true);
+    RobotLinkProbe probe;
+    try {
+      probe = await probeRobotLinks(namespace: namespace);
+    } catch (_) {
+      probe = RobotLinkProbe.unknown;
+    }
+    if (!mounted) return;
+    setState(() {
+      _probe = probe;
+      _probing = false;
+    });
+  }
+
+  /// 지금 아는 것을 모아 고리를 판정한다.
+  List<RobotLink> get _links {
+    final registered = _registered;
+    final telemetry = widget.telemetry();
+    final pose = telemetry.poses[widget.robotId];
+    return checkRobotLinks(
+      RobotLinkFacts(
+        usesTopics: registered?.dataSource.usesTopics ?? false,
+        hasStation: (registered?.chargerWaypoint ?? '').trim().isNotEmpty,
+        stationName: registered?.chargerWaypoint,
+        spawnX: registered?.spawnX,
+        spawnY: registered?.spawnY,
+        backendRunning: widget.backendRunning(),
+        nodesUp: _probe.nodesUp,
+        topicSeen: _probe.topicSeen,
+        topicFlowing: _probe.topicFlowing,
+        receiving: _live,
+        lastPoseAgeSeconds: pose == null
+            ? null
+            : DateTime.now().difference(pose.at).inMilliseconds / 1000,
+      ),
+    );
+  }
+
+  Future<void> _applyFix(RobotLinkAction action) async {
+    final registered = _registered;
+    final directory = widget.mapDirectory;
+    setState(() {
+      _probing = true;
+      _fixMessage = null;
+    });
+    RobotLinkFixResult result;
+    switch (action) {
+      case RobotLinkAction.chooseStation:
+        result = const RobotLinkFixResult(
+          ok: false,
+          message: '로봇 등록에서 자리 Waypoint 를 골라 주세요.',
+        );
+      case RobotLinkAction.startBackend:
+        await widget.onStartBackend();
+        result = const RobotLinkFixResult(
+          ok: true,
+          message: '백엔드를 띄웠습니다. 잠시 뒤 다시 확인해 주세요.',
+        );
+      case RobotLinkAction.spawnRobot:
+        result = registered == null || directory == null
+            ? const RobotLinkFixResult(
+                ok: false,
+                message: '등록 정보나 배포 위치를 찾지 못했습니다.',
+              )
+            : await spawnSingleRobot(
+                mapDirectory: directory,
+                robotDirectory: robotDirectoryName(registered),
+              );
+      case RobotLinkAction.startBridge:
+        result = registered == null || directory == null
+            ? const RobotLinkFixResult(
+                ok: false,
+                message: '등록 정보나 배포 위치를 찾지 못했습니다.',
+              )
+            : await startSingleRobotBridge(
+                mapDirectory: directory,
+                robotDirectory: robotDirectoryName(registered),
+              );
+      case RobotLinkAction.resubscribe:
+        await widget.onResubscribe();
+        result = const RobotLinkFixResult(
+          ok: true,
+          message: '다시 구독했습니다. 잠시 뒤 다시 확인해 주세요.',
+        );
+    }
+    if (!mounted) return;
+    setState(() {
+      _fixMessage = result.message;
+      _fixOk = result.ok;
+      _probing = false;
+    });
+    // 눌렀으면 결과가 바뀌었을 것이다. 사람이 또 누르게 하지 않는다.
+    if (result.ok) {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (mounted) await _runProbe();
+    }
   }
 
   RmfProjectRobot? get _registered => widget.registered;
@@ -18985,6 +19187,134 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   ///
   /// 작업 상세는 `무엇을 하고 있나`를 보여 주고, 여기는 `무엇을 보고 있나`를
   /// 보여 준다. 같은 화면에 둘 다 두면 어느 쪽이 어느 쪽인지 헷갈린다.
+  /// 값이 안 올 때 어디서 끊겼는지, 무엇을 누르면 되는지.
+  ///
+  /// 다 이어져 있으면 접어 둔다. 잘 도는 로봇에까지 진단표를 펼쳐 두면
+  /// 정작 봐야 할 때 눈에 안 들어온다.
+  List<Widget> _diagnosisSection() {
+    final registered = _registered;
+    if (registered == null || !registered.dataSource.usesTopics) return const [];
+    final links = _links;
+    final broken = firstBrokenLink(links);
+    if (broken == null && !_mismatch && _fixMessage == null) {
+      return [
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            const Icon(Icons.link, size: 16, color: Color(0xFF15803D)),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                robotLinkSummary(links),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF15803D)),
+              ),
+            ),
+            TextButton(
+              onPressed: _probing ? null : _runProbe,
+              child: const Text('다시 확인'),
+            ),
+          ],
+        ),
+      ];
+    }
+    return [
+      const SizedBox(height: 16),
+      Row(
+        children: [
+          const Text(
+            '어디서 끊겼나',
+            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+          ),
+          const Spacer(),
+          if (_probing)
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            TextButton(onPressed: _runProbe, child: const Text('다시 확인')),
+        ],
+      ),
+      const SizedBox(height: 4),
+      for (final link in links) _linkRow(link),
+      if (_fixMessage != null) ...[
+        const SizedBox(height: 8),
+        SelectableText(
+          _fixMessage!,
+          style: TextStyle(
+            fontSize: 12,
+            color: _fixOk ? const Color(0xFF15803D) : const Color(0xFFB91C1C),
+          ),
+        ),
+      ],
+    ];
+  }
+
+  Widget _linkRow(RobotLink link) {
+    final (icon, color) = switch (link.state) {
+      RobotLinkState.ok => (Icons.check_circle, const Color(0xFF15803D)),
+      RobotLinkState.broken => (Icons.cancel, const Color(0xFFB91C1C)),
+      RobotLinkState.unknown => (
+        Icons.remove_circle_outline,
+        const Color(0xFF94A3B8),
+      ),
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 15, color: color),
+          const SizedBox(width: 7),
+          SizedBox(
+            width: 74,
+            child: Text(
+              link.title,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              link.detail,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.4,
+                color: link.state == RobotLinkState.unknown
+                    ? const Color(0xFF94A3B8)
+                    : const Color(0xFF475569),
+              ),
+            ),
+          ),
+          // 버튼은 처음 끊긴 고리에만 붙는다. 순서가 있는 일이라 아래를 먼저
+          // 눌러 봐야 소용이 없다 — 월드가 없는데 로봇을 올리면 create 가
+          // 월드 이름을 영영 기다린다.
+          if (link.action case final action?) ...[
+            const SizedBox(width: 8),
+            Tooltip(
+              message: action.detail,
+              child: FilledButton.tonal(
+                onPressed: _probing ? null : () => _applyFix(action),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 4,
+                  ),
+                  minimumSize: const Size(0, 32),
+                  textStyle: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                child: Text(action.label),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   List<Widget> _sensorSections() {
     final robot = _registered;
     final topics = robotTopicDetails(robot);
@@ -19420,6 +19750,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                   ' · 방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
                   color: _sourceColors[_source],
                 ),
+              ..._diagnosisSection(),
               ..._sensorSections(),
               _heading('맡은 작업'),
               if (tasks.isEmpty)

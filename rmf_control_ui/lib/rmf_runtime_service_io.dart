@@ -52,6 +52,9 @@ Directory? _findProjectRoot() {
 ///
 /// 중지 스크립트 자신은 세지 않는다 — 그 경로에도 맵 디렉터리가 들어 있다.
 Future<List<String>> runningBackendProjects() async {
+  // 위젯 테스트에서는 프로세스를 뒤지지 않는다. 진짜 pgrep 을 띄우면 그
+  // 프로세스가 테스트보다 오래 살고, 확인하는 것도 없다.
+  if (Platform.environment.containsKey('FLUTTER_TEST')) return const [];
   final root = _findProjectRoot();
   if (root == null) return const [];
   final maps = Directory('${root.path}/rmf_maps');

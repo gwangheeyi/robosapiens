@@ -1,0 +1,202 @@
+/// 고리가 이어져 있는지 실제로 물어보고, 끊긴 고리를 잇는다.
+///
+/// 앱에 ROS 바인딩이 없으므로 여기서도 `ros2` 를 자식 프로세스로 부른다.
+/// 위치를 읽는 다리, 작업을 넣는 다리와 같은 방식이다.
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+export 'robot_link_check.dart';
+
+String _withRosEnvironment(String command) {
+  final rosSetup =
+      Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
+  final workspace =
+      Platform.environment['RMF_WS'] ??
+      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+  return 'set +u; '
+      '[ -f "$rosSetup" ] && . "$rosSetup"; '
+      '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '
+      '$command';
+}
+
+/// 셸에 넘길 조각 하나. 로봇 ID 도 맵 이름도 사람이 타자로 친다.
+String _quote(String value) => "'${value.replaceAll("'", r"'\''")}'";
+
+/// ROS 그래프에서 읽어 온 것.
+class RobotLinkProbe {
+  const RobotLinkProbe({
+    required this.nodesUp,
+    required this.topicSeen,
+    required this.topicFlowing,
+  });
+
+  /// 아무것도 못 물어봤을 때. 모르는 것은 모른다고 한다.
+  static const RobotLinkProbe unknown = RobotLinkProbe(
+    nodesUp: null,
+    topicSeen: null,
+    topicFlowing: null,
+  );
+
+  final bool? nodesUp;
+  final bool? topicSeen;
+  final bool? topicFlowing;
+}
+
+/// 이 로봇의 고리를 ROS 에 물어본다.
+///
+/// 세 가지를 따로 본다 — 노드가 떴는지, 토픽 **이름**이 있는지, 그 이름에
+/// **값**이 흐르는지. 이름이 있는 것과 값이 오는 것은 다르다. 다리는 월드에
+/// 모델이 없어도 토픽을 만들어 놓으므로, 이름만 보고 판단하면 늘 이어져 있는
+/// 것처럼 보인다.
+Future<RobotLinkProbe> probeRobotLinks({
+  required String namespace,
+  Duration flowTimeout = const Duration(seconds: 4),
+}) async {
+  // 위젯 테스트에서는 ROS 에 묻지 않는다. 판정 규칙은 robot_link_check 에서
+  // 따로 확인한다.
+  if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    return RobotLinkProbe.unknown;
+  }
+  bool? nodesUp;
+  bool? topicSeen;
+  bool? topicFlowing;
+  try {
+    final graph = await Process.run('bash', [
+      '-lc',
+      _withRosEnvironment('ros2 node list; echo "---"; ros2 topic list'),
+    ]).timeout(const Duration(seconds: 12));
+    final text = '${graph.stdout}';
+    if (text.trim().isNotEmpty) {
+      final parts = text.split('---');
+      final nodes = parts.first;
+      final topics = parts.length > 1 ? parts[1] : '';
+      nodesUp = nodes
+          .split('\n')
+          .map((line) => line.trim())
+          .any((line) => line.startsWith('/$namespace/'));
+      topicSeen = topics
+          .split('\n')
+          .map((line) => line.trim())
+          .contains('/$namespace/odom');
+    }
+  } catch (_) {
+    // 못 물어봤으면 null 그대로 둔다.
+  }
+  if (topicSeen != true) {
+    return RobotLinkProbe(
+      nodesUp: nodesUp,
+      topicSeen: topicSeen,
+      topicFlowing: topicSeen == false ? false : null,
+    );
+  }
+  try {
+    // 한 줄만 받으면 된다. 값이 흐르는지만 보는 것이라 오래 붙들 이유가 없다.
+    final seconds = flowTimeout.inMilliseconds / 1000;
+    final echo = await Process.run('bash', [
+      '-lc',
+      _withRosEnvironment(
+        'timeout $seconds ros2 topic echo /$namespace/odom '
+        '--field pose.pose.position.x --once',
+      ),
+    ]).timeout(flowTimeout + const Duration(seconds: 3));
+    topicFlowing = '${echo.stdout}'.trim().isNotEmpty;
+  } catch (_) {
+    topicFlowing = null;
+  }
+  return RobotLinkProbe(
+    nodesUp: nodesUp,
+    topicSeen: topicSeen,
+    topicFlowing: topicFlowing,
+  );
+}
+
+/// 버튼을 눌렀을 때의 결과.
+class RobotLinkFixResult {
+  const RobotLinkFixResult({required this.ok, required this.message});
+
+  final bool ok;
+  final String message;
+}
+
+/// 이 로봇만 월드에 올린다.
+///
+/// **월드가 이미 떠 있어야 한다.** 없으면 `create` 가 월드 이름을 영영
+/// 기다린다 — 오류도 안 내고 그냥 멈춰 있다. 그래서 진단이 Gazebo 고리를
+/// 통과했을 때만 이 버튼이 나온다.
+Future<RobotLinkFixResult> spawnSingleRobot({
+  required String mapDirectory,
+  required String robotDirectory,
+}) => _launch(
+  '$mapDirectory/$robotDirectory/spawn.launch.xml',
+  missing:
+      '이 로봇의 spawn.launch.xml 이 없습니다.\n'
+      '맵 관리에서 RMF 설정 내보내기를 먼저 하세요.',
+  started: '이 로봇만 올렸습니다. 잠시 뒤 다시 확인해 주세요.',
+);
+
+/// 이 로봇 몫 토픽 다리만 띄운다.
+Future<RobotLinkFixResult> startSingleRobotBridge({
+  required String mapDirectory,
+  required String robotDirectory,
+}) async {
+  final config = File('$mapDirectory/$robotDirectory/bridge.yaml');
+  if (!config.existsSync()) {
+    return RobotLinkFixResult(
+      ok: false,
+      message:
+          '${config.path} 가 없습니다.\n'
+          '맵 관리에서 RMF 설정 내보내기를 먼저 하세요.',
+    );
+  }
+  return _run(
+    'ros2 run ros_gz_bridge parameter_bridge '
+    '--ros-args -p config_file:=${_quote(config.path)}',
+    started: '이 로봇의 다리를 띄웠습니다. 잠시 뒤 다시 확인해 주세요.',
+  );
+}
+
+Future<RobotLinkFixResult> _launch(
+  String path, {
+  required String missing,
+  required String started,
+}) async {
+  if (!File(path).existsSync()) {
+    return RobotLinkFixResult(ok: false, message: missing);
+  }
+  return _run('ros2 launch ${_quote(path)}', started: started);
+}
+
+/// 백그라운드로 띄우고 곧바로 돌아온다.
+///
+/// 이 프로세스들은 앱보다 오래 살아야 한다. 앱을 닫아도 로봇은 떠 있어야
+/// 하므로 `setsid` 로 떼어 놓는다. 정리는 프로젝트 중지 스크립트가 한다.
+Future<RobotLinkFixResult> _run(
+  String command, {
+  required String started,
+}) async {
+  try {
+    final process = await Process.start('bash', [
+      '-lc',
+      _withRosEnvironment(
+        'setsid $command > /dev/null 2>&1 < /dev/null & echo \$!',
+      ),
+    ]);
+    final pid = await process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '')
+        .timeout(const Duration(seconds: 8), onTimeout: () => '');
+    if (pid.trim().isEmpty) {
+      return const RobotLinkFixResult(
+        ok: false,
+        message: '띄우지 못했습니다. ROS 환경을 확인하세요.',
+      );
+    }
+    return RobotLinkFixResult(ok: true, message: '$started (pid ${pid.trim()})');
+  } catch (error) {
+    return RobotLinkFixResult(ok: false, message: '$error');
+  }
+}
