@@ -1,6 +1,6 @@
 # Gazebo에서 실물 핑키까지 — Nav2 길
 
-관련 문서: [좌표계](COORDINATE_FRAMES.md) ·
+관련 문서: [값이 오는 곳 셋](THREE_SOURCES.md) · [좌표계](COORDINATE_FRAMES.md) ·
 [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) ·
 [관제 노드별 하는 일](RMF_NODES.md)
 

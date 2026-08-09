@@ -9,7 +9,7 @@
 
 관련 문서: [Pinky 가상 로봇 · Fleet Adapter 연동](PINKY_FLEET_INTEGRATION.md) ·
 [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) ·
-[좌표계](COORDINATE_FRAMES.md) ·
+[값이 오는 곳 셋](THREE_SOURCES.md) · [좌표계](COORDINATE_FRAMES.md) ·
 [Nav2 길](NAV2_PATH.md)
 
 ## 2. 등록은 스폰보다 먼저다
