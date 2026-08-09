@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/rmf_project_config.dart';
 
@@ -1138,6 +1140,26 @@ void main() {
         mapDirectory: '/maps/gwanghee',
       );
       expect(xml, isNot(contains('spawn 좌표가 없다')));
+    });
+  });
+
+  group('빈 목록으로 덮어쓰지 않는다', () {
+    // MySQL 에는 로봇 셋이 있는데 fleet.yaml 은 "등록된 로봇이 없다" 였고,
+    // bringup 에 로봇이 하나도 안 실려 Gazebo 에 아무것도 안 올라갔다.
+    test('로봇 저장은 지우고 다시 넣는다 — 빈 목록이면 다 사라진다', () {
+      final source = File('lib/map_project_store_io.dart').readAsStringSync();
+      expect(source, contains('DELETE FROM map_project_robots'));
+      // 그래서 설정만 저장하는 길이 따로 있어야 한다.
+      expect(source, contains('Future<void> saveMapProjectFleetSettings('));
+    });
+
+    test('배포는 저장된 로봇에서 산출물을 만든다', () {
+      // 화면이 들고 있는 목록은 지금 열린 프로젝트의 것이다. 다른 화면에서
+      // 등록만 해 두고 오면 비어 있다.
+      final source = File('lib/main.dart').readAsStringSync();
+      expect(source, contains('_fleetRobotsForDeploy(mapName)'));
+      expect(source, contains('robots: deployRobots'));
+      expect(source, contains('if (_fleetRobots.isNotEmpty) {'));
     });
   });
 }

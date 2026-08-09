@@ -43,4 +43,9 @@ Future<void> saveMapProjectFleet(
   required List<Map<String, Object?>> robots,
 }) async => throw UnsupportedError(_unsupported);
 
+Future<void> saveMapProjectFleetSettings(
+  String mapName,
+  Map<String, Object?> settings,
+) async => throw UnsupportedError(_unsupported);
+
 Future<Map<String, dynamic>?> loadMapProjectFleet(String mapName) async => null;

@@ -375,6 +375,37 @@ WHERE p.map_name = $_nameParam;
 ///
 /// 로봇의 zones 는 콤마로 이어 붙인 문자열(`zonesText`)로 넘긴다. JSON_TABLE 로
 /// 배열을 한 칸에 담을 수 없기 때문이다.
+/// 플릿 설정만 저장한다. 로봇 목록은 건드리지 않는다.
+///
+/// [saveMapProjectFleet] 은 로봇을 통째로 지우고 다시 넣는다. 화면이 로봇을
+/// 안 들고 있을 때 그것을 부르면 등록해 둔 로봇이 전부 사라진다 — 실제로
+/// 그렇게 셋이 날아갔다.
+Future<void> saveMapProjectFleetSettings(
+  String mapName,
+  Map<String, Object?> settings,
+) async {
+  await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SET @project_id = (
+  SELECT id FROM map_projects WHERE map_name = $_nameParam
+);
+SET @settings = CAST(
+  CONVERT(FROM_BASE64('${_encode(jsonEncode(settings))}') USING utf8mb4) AS JSON
+);
+INSERT INTO map_project_fleets (project_id, fleet_name, settings, updated_at)
+VALUES (
+  @project_id,
+  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(@settings, '\$.fleetName')), 'pinky'),
+  @settings,
+  NOW(6)
+)
+ON DUPLICATE KEY UPDATE
+  fleet_name = VALUES(fleet_name),
+  settings   = VALUES(settings),
+  updated_at = NOW(6);
+''');
+}
+
 Future<void> saveMapProjectFleet(
   String mapName, {
   required Map<String, Object?> settings,

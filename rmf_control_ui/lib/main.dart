@@ -4481,6 +4481,42 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 상태는 앱 안의 Mock 주행에서 나온다. 실제 ROS 토픽 구독은 아직
   /// 없으므로, 여기 보이는 값은 앱이 계산한 위치다. 실제 로봇을 붙이면 같은
   /// 자리에 토픽 값이 들어오도록 필드를 맞춰 두었다.
+  /// 배포 산출물을 만들 때 쓸 로봇 목록.
+  ///
+  /// 화면이 들고 있는 `_fleetRobots` 는 지금 열린 프로젝트의 것이다. 다른
+  /// 화면에서 등록만 해 두고 이 화면으로 오면 비어 있을 수 있고, 그대로
+  /// 배포하면 로봇이 하나도 안 실린 산출물이 나간다. 실제로 MySQL 에는
+  /// 로봇 셋이 있는데 fleet.yaml 은 "등록된 로봇이 없다" 였다.
+  ///
+  /// 그래서 배포는 **저장된 것**을 본다. 저장이 진실이다.
+  Future<List<RmfProjectRobot>> _fleetRobotsForDeploy(String mapName) async {
+    try {
+      final stored = await loadMapProjectFleet(mapName);
+      final rows = (stored?['robots'] as List<dynamic>? ?? const [])
+          .cast<Map<String, dynamic>>()
+          .toList()
+        ..sort(
+          (a, b) =>
+              ((a['seq'] as num?) ?? 0).compareTo((b['seq'] as num?) ?? 0),
+        );
+      if (rows.isEmpty) return _fleetRobots;
+      return _withMapSpawnPoints([
+        for (final row in rows)
+          RmfProjectRobot.fromJson({
+            ...row,
+            'zones': (row['zonesText'] as String? ?? '')
+                .split(',')
+                .map((zone) => zone.trim())
+                .where((zone) => zone.isNotEmpty)
+                .toList(),
+          }),
+      ]);
+    } catch (_) {
+      // 못 읽으면 화면이 들고 있는 것으로라도 만든다.
+      return _fleetRobots;
+    }
+  }
+
   /// 배포 산출물이 있는 곳. 불러온 배포 맵 기준이다.
   String? get _deployedMapDirectory {
     final name = _robotDeployedMap?.summary.name ?? _mapName;
@@ -7068,14 +7104,25 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 플릿 설정과 그로부터 만든 설정 파일을 함께 남긴다. 프로젝트 하나만 열면
     // 배포와 실행에 필요한 것이 다 있어야 한다.
     final fleet = _fleetSettingsFor(mapName);
-    await saveMapProjectFleet(
-      mapName,
-      settings: fleet.toJson(),
-      robots: [
-        for (final robot in _fleetRobots)
-          {...robot.toJson(), 'zonesText': robot.zones.join(',')},
-      ],
-    );
+    // 화면이 로봇을 안 들고 있으면 로봇은 건드리지 않는다. 빈 목록으로
+    // 덮어쓰면 다른 화면에서 등록해 둔 로봇이 통째로 지워진다.
+    if (_fleetRobots.isNotEmpty) {
+      await saveMapProjectFleet(
+        mapName,
+        settings: fleet.toJson(),
+        robots: [
+          for (final robot in _fleetRobots)
+            {...robot.toJson(), 'zonesText': robot.zones.join(',')},
+        ],
+      );
+    } else {
+      await saveMapProjectFleetSettings(mapName, fleet.toJson());
+    }
+    // 산출물은 **이 맵에 저장된 로봇**에서 만든다. 화면이 들고 있는 목록을
+    // 그대로 쓰면, 다른 화면에서 등록해 둔 로봇이 빠진 채로 배포된다. 실제로
+    // MySQL 에는 로봇 셋이 있는데 fleet.yaml 은 "등록된 로봇이 없다" 였고,
+    // bringup 에 로봇이 하나도 안 실려 Gazebo 에 아무것도 안 올라갔다.
+    final deployRobots = await _fleetRobotsForDeploy(mapName);
     final mapDirectory = _mapDirectoryFor(mapName);
     final now = DateTime.now();
     // 벤더 파라미터를 로봇마다 다시 쓴다. 벤더 패키지가 없으면 이 파일만
@@ -7101,7 +7148,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             'ros2 launch 의 config_file 로 들어간다.',
         content: buildFleetAdapterYaml(
           fleet: fleet,
-          robots: _fleetRobots,
+          robots: deployRobots,
           mapName: mapName,
         ),
         generatedAt: now,
@@ -7112,7 +7159,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         description:
             'Gazebo 에 띄울 로봇 목록. spawn 좌표는 이 맵의 충전 Waypoint 에서 '
             '가져왔다. 관제 배차의 입찰 자격이 되는 3온도 구획도 여기 있다.',
-        content: buildFleetSimYaml(robots: _fleetRobots, mapName: mapName),
+        content: buildFleetSimYaml(robots: deployRobots, mapName: mapName),
         generatedAt: now,
       ),
       MapProjectFile(
@@ -7128,7 +7175,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           fleetName: fleet.fleetName,
           mapDirectory: mapDirectory,
           buildingYamlName: _yamlFileNameFor(mapName),
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
@@ -7140,7 +7187,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             '나눠 /<로봇>/odom 처럼 토픽을 구분한다.',
         content: buildProjectBringupXml(
           mapName: mapName,
-          robots: _fleetRobots,
+          robots: deployRobots,
           mapDirectory: mapDirectory,
         ),
         generatedAt: now,
@@ -7154,7 +7201,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             '<로봇>/odom 만 서로 다르다. 아직 RMF 와 이어지지 않아 따로 돈다.',
         content: buildProjectNav2LaunchXml(
           mapName: mapName,
-          robots: _fleetRobots,
+          robots: deployRobots,
           fleetName: fleet.fleetName,
           warnings: nav2.warnings,
         ),
@@ -7170,7 +7217,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         executable: true,
         content: buildSensorRelayScript(
           mapName: mapName,
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
@@ -7186,7 +7233,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildNav2FleetAdapterScript(
           mapName: mapName,
           fleetName: fleet.fleetName,
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
@@ -7214,13 +7261,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
             'clock 과 tf 는 월드에 하나뿐이라 로봇별로 나누지 않는다.',
         content: buildProjectGzBridgeYaml(
           mapName: mapName,
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
       // 로봇 하나가 디렉터리 하나다. 한 대를 빼거나 옮길 때 그 디렉터리만
       // 보면 되고, 파일이 늘어도 어느 것이 누구 것인지 헷갈리지 않는다.
-      for (final robot in _fleetRobots) ...[
+      for (final robot in deployRobots) ...[
         MapProjectFile(
           fileName: '${robotDirectoryName(robot)}/robot.yaml',
           kind: 'robot',
@@ -7312,7 +7359,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildProjectRunScript(
           mapName: mapName,
           mapDirectory: mapDirectory,
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
@@ -7326,7 +7373,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildProjectStopScript(
           mapName: mapName,
           mapDirectory: mapDirectory,
-          robots: _fleetRobots,
+          robots: deployRobots,
         ),
         generatedAt: now,
       ),
