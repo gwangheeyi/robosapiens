@@ -83,11 +83,10 @@ void main() {
       // 모르므로 끝을 알리는 것은 어댑터 몫이다.
       expect(script, contains('def execute_action'));
       expect(script, contains('execution.finished()'));
-      // 예상 시간은 RMF 가 밀리초로 준다.
-      expect(
-        script,
-        contains("description.get(\n                'unix_millis_action_duration_estimate')"),
-      );
+      // RMF 는 안쪽 description 만 넘겨 준다. 바깥의 밀리초 값은 여기까지
+      // 닿지 않아, 5초짜리 동작이 1초 만에 끝났다.
+      expect(script, contains("description.get(key)"));
+      expect(script, contains("('seconds', 1.0)"));
     });
 
     test('진행 상황을 앱이 읽을 수 있게 낸다', () {

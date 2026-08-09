@@ -75,6 +75,8 @@ void main() {
       final description = activity.description! as Map<String, Object?>;
       expect(description['unix_millis_action_duration_estimate'], 9600);
       expect(description['category'], 'armLoad');
+      // 어댑터에게는 안쪽 description 만 간다. 바깥 밀리초 값은 안 닿는다.
+      expect((description['description']! as Map)['seconds'], 9.6);
     });
 
     test('빈 작업은 만들지 않는다', () {

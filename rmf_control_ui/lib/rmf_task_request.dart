@@ -39,6 +39,12 @@ class RmfTaskActivity {
   ///
   /// RMF 는 이 동작이 무엇인지 모른다. 얼마나 걸릴지만 알려 주면 배차 계산에
   /// 쓴다. 끝났다고 알려 주는 것은 어댑터 몫이다.
+  ///
+  /// 걸리는 시간을 **두 군데**에 적는다. 바깥
+  /// `unix_millis_action_duration_estimate` 는 RMF 가 배차를 계산할 때 보고,
+  /// 안쪽 `seconds` 는 어댑터가 본다. RMF 는 `execute_action` 에 안쪽
+  /// `description` 만 넘겨 주므로 바깥 값은 어댑터까지 닿지 않는다 — 실제로
+  /// 5초짜리 동작이 1초 만에 끝난 일이 있었다.
   RmfTaskActivity.performAction(
     String category, {
     Map<String, Object?> description = const {},
@@ -47,7 +53,7 @@ class RmfTaskActivity {
          'unix_millis_action_duration_estimate': (durationSeconds * 1000)
              .round(),
          'category': category,
-         'description': description,
+         'description': {...description, 'seconds': durationSeconds},
        });
 
   /// 그 자리에서 기다린다.

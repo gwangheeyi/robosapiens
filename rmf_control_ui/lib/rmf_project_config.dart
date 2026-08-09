@@ -1869,12 +1869,19 @@ class RobotAdapter:
         받는 노드가 없다. 지금은 예상 시간만큼 기다리고 끝났다고 알린다.
         여기가 그 노드를 부를 자리다.
         """
+        # RMF 는 안쪽 description 만 넘겨 준다. 바깥의
+        # unix_millis_action_duration_estimate 는 여기까지 닿지 않으므로
+        # 앱이 안쪽에도 `seconds` 를 적어 준다. 그래도 없으면 1초로 본다 —
+        # 5초짜리가 1초 만에 끝난 일이 이것 때문이었다.
         seconds = 1.0
         if isinstance(description, dict):
-            estimate = description.get(
-                'unix_millis_action_duration_estimate')
-            if isinstance(estimate, (int, float)) and estimate > 0:
-                seconds = float(estimate) / 1000.0
+            for key, scale in (('seconds', 1.0),
+                               ('unix_millis_action_duration_estimate',
+                                0.001)):
+                value = description.get(key)
+                if isinstance(value, (int, float)) and value > 0:
+                    seconds = float(value) * scale
+                    break
         self.node.get_logger().info(
             f'[{self.name}] 동작 [{category}] · {seconds:.1f}초')
         report(robot=self.name, event='action_start',
