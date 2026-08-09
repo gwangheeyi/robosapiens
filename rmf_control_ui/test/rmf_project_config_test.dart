@@ -134,11 +134,25 @@ void main() {
   group('Gazebo bringup', () {
     test('네임스페이스를 두 번 걸지 않는다', () {
       final xml = buildRobotSpawnLaunchXml(robots.first);
-      // push-ros-namespace 와 launch 인자를 함께 쓰면 노드가
-      // /pinky_01/pinky_01/... 에 뜬다. 그러면 create 가 기다리는
-      // robot_description 이 영영 오지 않아 로봇이 스폰되지 않는다.
-      expect(xml, isNot(contains('push-ros-namespace')));
-      expect(xml, contains('<arg name="namespace" value="pinky_01"/>'));
+      // 두 번 걸면 노드가 /pinky_01/pinky_01/... 에 뜬다. 그러면 create 가
+      // 기다리는 robot_description 이 영영 오지 않아 로봇이 스폰되지 않는다.
+      expect(RegExp('push-ros-namespace').allMatches(xml).length, 1);
+      expect(xml, contains('<push-ros-namespace namespace="pinky_01"/>'));
+      // 그룹에 걸었으니 노드에는 따로 걸지 않는다.
+      expect(xml, isNot(contains('<arg name="namespace"')));
+      expect(xml, isNot(contains('name="pinky_01/')));
+    });
+
+    test('벤더 launch 대신 우리가 손본 URDF 를 쓴다', () {
+      // 벤더 xacro 는 링크 이름에는 네임스페이스를 안 붙이면서
+      // <gazebo reference> 에는 붙인다. 맞는 링크가 없어 라이다·카메라·IMU 가
+      // 통째로 버려진다. 토픽 이름은 보이는데 데이터가 영영 안 온다.
+      final xml = buildRobotSpawnLaunchXml(robots.first);
+      expect(xml, isNot(contains('upload_robot.launch.py')));
+      expect(xml, contains('robot_description.sh'));
+      // 벤더 launch 가 하던 일은 그대로 해야 한다.
+      expect(xml, contains('frame_prefix" value="pinky_01/"'));
+      expect(xml, contains('exec="joint_state_publisher"'));
     });
 
     test('create 가 그 로봇의 robot_description 을 절대 이름으로 가리킨다', () {
@@ -187,11 +201,43 @@ void main() {
 
     test('Gazebo 플러그인이 켜지도록 is_sim 을 넘긴다', () {
       // is_sim 이 빠지면 diff drive 도 LiDAR 도 없는 껍데기가 스폰된다.
-      // 보이기는 하는데 cmd_vel 을 줘도 움직이지 않는다.
+      // 보이기는 하는데 cmd_vel 을 줘도 움직이지 않는다. 이제 xacro 를 우리가
+      // 펼치므로 그 인자는 URDF 스크립트에 있다.
       expect(
-        buildRobotSpawnLaunchXml(robots.first),
-        contains('<arg name="is_sim" value="True"/>'),
+        buildRobotDescriptionScript(robots.first),
+        contains('is_sim:=true'),
       );
+    });
+
+    test('이동 로봇의 URDF 스크립트가 reference 접두사를 뗀다', () {
+      final script = buildRobotDescriptionScript(robots.first);
+      // 네임스페이스 끝의 빗금까지 벤더 launch 와 같아야 한다. 다르면 접두사가
+      // 달라져서 떼기 규칙이 안 맞는다.
+      expect(script, contains(r'namespace:="$NAMESPACE/"'));
+      // 조인트 이름에는 네임스페이스가 붙어 있고 링크에는 안 붙어 있다. 무조건
+      // 떼면 조인트 쪽이 깨진다.
+      expect(script, contains('if name in links or name in joints:'));
+      expect(script, contains("name[len(prefix):] in links"));
+      // 셸이 작은따옴표 안에서 작은따옴표를 못 견디므로 heredoc 으로 넘긴다.
+      expect(script, contains("<<'PYTHON'"));
+      expect(script, isNot(contains("python3 -c '")));
+    });
+
+    test('설치 로봇의 URDF 스크립트는 하던 대로 한다', () {
+      const workcell = RmfProjectRobot(
+        robotId: 'OMX-01',
+        displayName: '매니퓰레이터 1호',
+        model: 'open_manipulator_x',
+        kind: RmfRobotKind.workcell,
+        gzName: 'omx_01',
+        zones: [],
+        dataSource: RobotDataSource.gazebo,
+        chargerWaypoint: 'OMX1',
+      );
+      final script = buildRobotDescriptionScript(workcell);
+      expect(script, contains('gz_ros2_control'));
+      expect(script, contains('robot_param_node'));
+      expect(script, isNot(contains('pinky_description')));
     });
 
     test('다리는 이 프로젝트 설정으로 한 번만 띄운다', () {
@@ -659,7 +705,8 @@ void main() {
         mixed,
         contains(
           'REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter ros_gz_sim '
-          'pinky_description open_manipulator_description"',
+          'pinky_description robot_state_publisher joint_state_publisher '
+          'open_manipulator_description"',
         ),
       );
       // 설치 로봇이 없으면 요구하지 않는다. 요구하면 그것을 안 쓰는 사람도

@@ -32,6 +32,16 @@ class Nav2ParamsRewrite {
   bool get clean => warnings.isEmpty;
 }
 
+/// Nav2 가 쓰는 점유격자가 나가는 토픽.
+///
+/// `/map` 을 쓸 수 없다. RMF 의 `building_map_server` 가 이미 그 이름으로
+/// `rmf_building_map_msgs/BuildingMap` 을 내고 있어서, 같이 쓰면 한 토픽에 형식이
+/// 둘 올라간다. 로봇마다 가르지도 않는다 — 같은 건물이므로 하나면 된다.
+const String nav2MapTopic = '/nav2_map';
+
+/// `map_server` 쪽에 주는 이름. 루트 네임스페이스라 빗금을 뺀 것이 같은 곳이다.
+const String nav2MapTopicName = 'nav2_map';
+
 /// 로봇마다 갈라야 하는 TF 프레임.
 ///
 /// `map` 은 여기 없다 — 같은 건물이므로 **함께 쓴다**. 로봇마다 제 AMCL 이
@@ -139,6 +149,18 @@ Nav2ParamsRewrite rewriteNav2Params({
     final indent = setting.group(1)!;
     final key = setting.group(2)!;
     final rest = setting.group(3)!;
+
+    // ⓪ costmap 의 static_layer 는 지도를 제가 따로 구독한다. 벤더 파일에는 그
+    //    토픽이 안 적혀 있어서 기본값 `map` 을 쓰는데, 네임스페이스 아래에서는
+    //    `/pinky_01/map` 이 되어 아무것도 안 온다. 여기서 넣어 준다.
+    if (key == 'plugin' && _unquote(_split(rest).value).endsWith('StaticLayer')) {
+      // 형제 키와 같은 칸에 둔다. 한 칸이라도 어긋나면 다른 항목이 된다.
+      out
+        ..add(line)
+        ..add('${indent}map_topic: $nav2MapTopic');
+      changes.add('static_layer 에 map_topic: $nav2MapTopic 을 넣었습니다');
+      continue;
+    }
     if (rest.isEmpty) {
       out.add(line);
       continue;
@@ -191,6 +213,16 @@ Nav2ParamsRewrite rewriteNav2Params({
     if (_conditionalFrameKeys.contains(key) && bare == 'map') {
       out.add(line);
       changes.add('$key: map — 함께 씁니다 (같은 건물)');
+      continue;
+    }
+
+    // 지도는 로봇마다 가르지 않는다. 같은 건물이므로 하나를 함께 본다.
+    if (key == 'map_topic') {
+      out.add(
+        '$indent$key: ${_requote(parts.value, nav2MapTopic)}'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      changes.add('map_topic: $bare → $nav2MapTopic (함께 씁니다)');
       continue;
     }
 

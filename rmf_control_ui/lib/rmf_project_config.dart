@@ -6,6 +6,8 @@
 /// 여기서 만든 결과는 `map_project_files` 에 프로젝트별로 보관한다.
 library;
 
+import 'nav2_params.dart' show nav2MapTopic, nav2MapTopicName;
+
 /// 이 로봇의 값이 어디서 오는가.
 ///
 /// 로봇마다 다를 수 있다. 실물 두 대를 돌리면서 한 대만 Gazebo 로 시험하는 일이
@@ -825,8 +827,12 @@ List<String> _requiredPackages(List<RmfProjectRobot> robots) => [
   'rmf_demos',
   'rmf_demos_fleet_adapter',
   'ros_gz_sim',
-  if (robots.any((robot) => robot.runsInGazebo && robot.isMobile))
+  if (robots.any((robot) => robot.runsInGazebo && robot.isMobile)) ...[
     'pinky_description',
+    // 벤더 launch 대신 우리가 직접 띄우므로 이 둘이 있어야 한다.
+    'robot_state_publisher',
+    'joint_state_publisher',
+  ],
   if (robots.any((robot) => robot.runsInGazebo && !robot.isMobile))
     'open_manipulator_description',
 ];
@@ -1181,6 +1187,9 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
       '      <param from="\$(var robot_dir)/nav2_params.yaml"/>',
     )
     ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    // 지도는 로봇마다 가르지 않는다. `/map` 은 RMF 의 building_map_server 가
+    // 이미 쓰고 있어서 한 토픽에 형식이 둘 올라간다.
+    ..writeln('      <param name="map_topic" value="$nav2MapTopic"/>')
     ..writeln('    </node>');
   for (final node in managed) {
     final package = switch (node) {
@@ -1215,7 +1224,10 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('    <!-- 위 노드들을 차례로 켜고 끈다. -->')
     ..writeln('    <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"')
     ..writeln('          name="lifecycle_manager_navigation" output="screen">')
-    ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    // 관리자는 sim 시간을 쓰지 않는다. 전이 응답을 기다리는 시간 제한이 sim
+    // 시계에 걸리면 `Configuring` 에서 영영 멈춘다. 관리자가 하는 일은 순서대로
+    // 켜고 끄는 것뿐이라 벽시계로 재는 것이 맞다.
+    ..writeln('      <param name="use_sim_time" value="false"/>')
     ..writeln('      <param name="autostart" value="true"/>')
     ..writeln('      <param name="node_names"')
     ..writeln('             value="[amcl, ${managed.join(', ')}]"/>')
@@ -1276,10 +1288,14 @@ String buildProjectNav2LaunchXml({
       'value="\$(var map_dir)/nav2_map/$mapName.yaml"/>',
     )
     ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    // `/map` 은 RMF 의 building_map_server 가 이미 쓴다. 같이 쓰면 한 토픽에
+    // OccupancyGrid 와 BuildingMap 이 함께 올라가 아무도 제대로 못 읽는다.
+    ..writeln('    <param name="topic_name" value="$nav2MapTopicName"/>')
     ..writeln('  </node>')
     ..writeln('  <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"')
     ..writeln('        name="lifecycle_manager_map" output="screen">')
-    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    // 관리자는 sim 시간을 쓰지 않는다. 위와 같은 이유다.
+    ..writeln('    <param name="use_sim_time" value="false"/>')
     ..writeln('    <param name="autostart" value="true"/>')
     ..writeln('    <param name="node_names" value="[map_server]"/>')
     ..writeln('  </node>');
@@ -1490,18 +1506,32 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     return buffer.toString();
   }
   buffer
+    ..writeln('  <arg name="robot_dir" default="\$(dirname)"/>')
     ..writeln('  <group>')
+    // 벤더의 upload_robot.launch.py 를 그대로 쓰지 않는다. 그 launch 가 펼치는
+    // xacro 는 링크 이름에는 네임스페이스를 안 붙이면서 <gazebo reference> 에는
+    // 붙여서, 라이다·카메라·IMU 가 통째로 버려진다. robot_description.sh 가
+    // 펼친 뒤 그 접두사를 뗀다. 나머지는 벤더 launch 와 똑같이 맞춘다.
+    ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+    ..writeln('    <node pkg="robot_state_publisher"')
+    ..writeln('          exec="robot_state_publisher"')
+    ..writeln('          name="robot_state_publisher" output="screen">')
+    ..writeln('      <param name="use_sim_time" value="True"/>')
+    ..writeln('      <param name="ignore_timestamp" value="False"/>')
+    // TF 프레임의 접두사는 여기서 붙는다. 링크 이름을 안 건드리는 이유다.
+    ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
     ..writeln(
-      '    <include file="\$(find-pkg-share pinky_description)'
-      '/launch/upload_robot.launch.py">',
+      '      <param name="robot_description"'
+      ' value="\$(command \'\$(var robot_dir)/robot_description.sh\')"/>',
     )
-    // 이 인자 하나가 세 가지를 정한다: 노드 네임스페이스, URDF 링크·프레임
-    // 접두사, 그리고 Gazebo 플러그인이 쓸 토픽 접두사. push-ros-namespace 를
-    // 겹쳐 걸면 첫 번째만 두 배가 되어 셋이 어긋난다.
-    ..writeln('      <arg name="namespace" value="${robot.gzName}"/>')
-    ..writeln('      <arg name="use_sim_time" value="True"/>')
-    ..writeln('      <arg name="is_sim" value="True"/>')
-    ..writeln('    </include>')
+    ..writeln('    </node>')
+    ..writeln('    <node pkg="joint_state_publisher"')
+    ..writeln('          exec="joint_state_publisher"')
+    ..writeln('          name="joint_state_publisher" output="screen">')
+    ..writeln('      <param name="use_sim_time" value="True"/>')
+    ..writeln('      <param name="rate" value="20.0"/>')
+    ..writeln('      <param name="source_list" value="[joint_states]"/>')
+    ..writeln('    </node>')
     ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
     ..writeln(
       '          args="-name ${robot.gzName} '
@@ -1527,7 +1557,92 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
 /// 통째로 굳는다.
 ///
 /// 그래서 펼친 URDF 에 네임스페이스를 끼워 넣는다.
-String buildRobotDescriptionScript(RmfProjectRobot robot) =>
+String buildRobotDescriptionScript(RmfProjectRobot robot) => robot.isMobile
+    ? _buildMobileDescriptionScript(robot)
+    : _buildWorkcellDescriptionScript(robot);
+
+/// 이동 로봇의 URDF 를 만든다.
+///
+/// 벤더 xacro 는 **링크 이름에는 네임스페이스를 안 붙이는데
+/// `<gazebo reference>` 에는 붙인다.**
+///
+/// ```xml
+/// <link name="rplidar_link"/>                  ← 접두사 없음
+/// <gazebo reference="pinky_01/rplidar_link">   ← 접두사 있음
+///   <sensor name="pinky_01/gpu_lidar" type="gpu_lidar">
+/// ```
+///
+/// 맞는 링크가 없으니 그 `<gazebo>` 블록이 통째로 버려진다. **라이다도 카메라도
+/// IMU 도 올라가지 않는다.** 토픽 이름은 다리(bridge)가 만들어서 보이는데 데이터가
+/// 영영 안 온다. 오류도 나지 않는다. 바퀴 마찰(`mu1`·`mu2`·`kp`)도 같이 버려진다.
+///
+/// 링크에 접두사를 붙이지 않는 것은 일부러다 — TF 는 `robot_state_publisher` 의
+/// `frame_prefix` 가 붙인다. 그러니 `reference` 쪽 접두사를 떼는 것이 맞다.
+///
+/// 벤더 파일은 건드리지 않는다. 펼친 뒤에 고친다.
+String _buildMobileDescriptionScript(RmfProjectRobot robot) =>
+    '''#!/usr/bin/env bash
+# ${robot.robotId} 의 URDF 를 만든다.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다.
+#
+# 벤더 xacro 는 링크 이름에는 네임스페이스를 안 붙이면서 <gazebo reference> 에는
+# 붙인다. 맞는 링크가 없어 그 블록이 통째로 버려지고, 라이다·카메라·IMU 가
+# 하나도 안 올라간다. 토픽 이름은 보이는데 데이터가 영영 안 오고 오류도 안 난다.
+#
+# 링크에 접두사를 안 붙이는 것은 일부러다 — TF 는 robot_state_publisher 의
+# frame_prefix 가 붙인다. 그러니 reference 쪽 접두사를 떼는 것이 맞다.
+set -euo pipefail
+
+NAMESPACE="\${NAMESPACE:-${robot.gzName}}"
+CAM_TILT_DEG="\${CAM_TILT_DEG:-0}"
+
+XACRO="\$(ros2 pkg prefix pinky_description)"
+XACRO="\$XACRO/share/pinky_description/urdf/robot.urdf.xacro"
+
+# 펼친 결과를 파일에 받는다. python 을 heredoc 으로 넘기려면 표준 입력이
+# 비어 있어야 한다.
+RAW="\$(mktemp)"
+trap 'rm -f "\$RAW"' EXIT
+
+# 벤더 launch 와 같은 인자로 펼친다. 네임스페이스 끝의 빗금까지 같아야 한다.
+xacro "\$XACRO" \\
+  namespace:="\$NAMESPACE/" \\
+  is_sim:=true \\
+  cam_tilt_deg:="\$CAM_TILT_DEG" > "\$RAW"
+
+python3 - "\$RAW" "\$NAMESPACE" <<'PYTHON'
+import re
+import sys
+
+path, namespace = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    urdf = handle.read()
+
+links = set(re.findall('<link name="([^"]+)"', urdf))
+joints = set(re.findall('<joint name="([^"]+)"', urdf))
+prefix = namespace + '/'
+
+# 조인트 이름에는 네임스페이스가 붙어 있고 링크 이름에는 안 붙어 있다. 그래서
+# 무조건 떼면 조인트 쪽이 깨진다. 가리키는 것이 무엇인지 보고 정한다.
+def fix(match):
+    name = match.group(1)
+    if name in links or name in joints:
+        return match.group(0)
+    if name.startswith(prefix) and name[len(prefix):] in links:
+        return '<gazebo reference="' + name[len(prefix):] + '"'
+    sys.stderr.write(
+        name + ' 이(가) 없어 그 <gazebo> 블록이 버려집니다.\\n')
+    return match.group(0)
+
+urdf, seen = re.subn('<gazebo reference="([^"]+)"', fix, urdf)
+if seen == 0:
+    sys.stderr.write('<gazebo reference> 가 하나도 없습니다.\\n')
+
+sys.stdout.write(urdf)
+PYTHON
+''';
+
+String _buildWorkcellDescriptionScript(RmfProjectRobot robot) =>
     '''#!/usr/bin/env bash
 # ${robot.robotId} 의 URDF 를 만든다.
 # rmf_control_ui 가 맵 프로젝트에서 생성했다.

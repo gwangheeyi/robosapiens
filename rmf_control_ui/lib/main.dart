@@ -6910,15 +6910,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
           content: buildRobotSpawnLaunchXml(robot),
           generatedAt: now,
         ),
-        if (!robot.isMobile && robot.runsInGazebo)
+        if (robot.runsInGazebo)
           MapProjectFile(
             fileName: '${robotDirectoryName(robot)}/robot_description.sh',
             kind: 'robot',
-            description:
-                '${robot.robotId} 의 URDF 를 만든다. 벤더 xacro 의 '
-                'gz_ros2_control 플러그인에 네임스페이스를 끼워 넣는다. '
-                '없으면 플러그인이 루트 /robot_description 을 기다리며 '
-                'Gazebo 갱신 루프 전체를 막는다.',
+            description: robot.isMobile
+                ? '${robot.robotId} 의 URDF 를 만든다. 벤더 xacro 가 '
+                      '<gazebo reference> 에만 네임스페이스를 붙여 라이다·'
+                      '카메라·IMU 가 통째로 버려지는 것을 고친다.'
+                : '${robot.robotId} 의 URDF 를 만든다. 벤더 xacro 의 '
+                      'gz_ros2_control 플러그인에 네임스페이스를 끼워 넣는다. '
+                      '없으면 플러그인이 루트 /robot_description 을 기다리며 '
+                      'Gazebo 갱신 루프 전체를 막는다.',
             executable: true,
             content: buildRobotDescriptionScript(robot),
             generatedAt: now,
