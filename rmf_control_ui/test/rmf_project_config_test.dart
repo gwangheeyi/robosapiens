@@ -1086,12 +1086,28 @@ void main() {
       );
     });
 
-    test('rmf-web 주소를 넘긴다', () {
+    test('기본으로는 rmf-web 주소를 안 넘긴다', () {
+      // 주소를 넘기면 dispatcher 가 1초마다 영원히 다시 붙으려 하고, 그 여덟
+      // 줄이 로그를 채워 정작 볼 [PK-01] 줄을 덮는다.
+      final xml = buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+      );
+      expect(xml, contains('<arg name="server_uri" default=""/>'));
+      expect(xml, isNot(contains('ws://127.0.0.1:8000')));
+      // 왜 비었는지는 파일 안에 적혀 있어야 한다.
+      expect(xml, contains('rmf-web 을 안 씁니다'));
+    });
+
+    test('띄웠으면 rmf-web 주소를 넘긴다', () {
       final xml = buildProjectLaunchXml(
         mapName: 'gwanghee',
         fleetName: 'f',
         mapDirectory: '/maps/gwanghee',
         buildingYamlName: 'b.yaml',
+        serverUri: 'ws://127.0.0.1:8000/_internal',
       );
       expect(xml, contains('ws://127.0.0.1:8000/_internal'));
     });

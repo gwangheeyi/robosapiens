@@ -556,7 +556,9 @@ String buildProjectLaunchXml({
   required String buildingYamlName,
   List<RmfProjectRobot> robots = const [],
   bool useSimTime = true,
-  String serverUri = 'ws://127.0.0.1:8000/_internal',
+  // rmf-web 을 안 띄우면 비운다. 주소를 넘기면 RMF 가 1초마다 영원히 다시
+  // 붙으려 하고, 그 여덟 줄이 로그를 채워 정작 볼 것을 덮는다.
+  String? serverUri,
 }) {
   final usesNav2 = projectUsesNav2(robots);
   final buffer = StringBuffer()
@@ -574,7 +576,14 @@ String buildProjectLaunchXml({
     ..writeln('<launch>')
     ..writeln('  <arg name="use_sim_time" default="$useSimTime"/>')
     ..writeln('  <arg name="headless" default="true"/>')
-    ..writeln('  <arg name="server_uri" default="$serverUri"/>')
+    ..writeln(
+      serverUri == null || serverUri.isEmpty
+          ? '  <!-- rmf-web 을 안 씁니다. 주소를 넘기면 dispatcher 가 1초마다\n'
+                '       영원히 다시 붙으려 하고, 그 여덟 줄이 로그를 채웁니다.\n'
+                '       띄우실 때 server_uri 를 넣으세요. -->\n'
+                '  <arg name="server_uri" default=""/>'
+          : '  <arg name="server_uri" default="$serverUri"/>',
+    )
     ..writeln('  <arg name="map_dir" default="$mapDirectory"/>')
     ..writeln('')
     ..writeln('  <!-- RMF core. 이것이 먼저 떠야 fleet adapter 가 붙는다. -->')
