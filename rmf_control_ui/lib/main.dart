@@ -6628,6 +6628,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
           content: buildRobotSpawnLaunchXml(robot),
           generatedAt: now,
         ),
+        if (!robot.isMobile && robot.runsInGazebo)
+          MapProjectFile(
+            fileName: '${robotDirectoryName(robot)}/robot_description.sh',
+            kind: 'robot',
+            description:
+                '${robot.robotId} 의 URDF 를 만든다. 벤더 xacro 의 '
+                'gz_ros2_control 플러그인에 네임스페이스를 끼워 넣는다. '
+                '없으면 플러그인이 루트 /robot_description 을 기다리며 '
+                'Gazebo 갱신 루프 전체를 막는다.',
+            executable: true,
+            content: buildRobotDescriptionScript(robot),
+            generatedAt: now,
+          ),
         MapProjectFile(
           fileName: '${robotDirectoryName(robot)}/bridge.yaml',
           kind: 'robot',
@@ -7536,7 +7549,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// `ros2 launch` 는 파일만 읽으므로 띄우기 전에 설정을 디스크로 풀어 놓는다.
   /// 내보내기를 깜빡해 `파일이 없습니다` 로 막히는 것이 잦다.
-  /// 디스크의 설정 파일을 MySQL 의 최신 내용으로 맞춘다.
+  /// 설정 파일을 지금 코드로 다시 만들어 디스크까지 맞춘다.
+  ///
+  /// 다시 만드는 것이 핵심이다. `map_project_files` 에 든 내용은 **저장할 당시의
+  /// 코드가 만든 것**이라, 앱을 고쳐도 저장된 글자는 예전 그대로다. 내보내기만
+  /// 하면 예전 스크립트를 디스크에 다시 쓰는 셈이 된다.
   ///
   /// 조용히 한다. 실패해도 하려던 일(띄우기·내리기)은 계속 시도한다 — 예전
   /// 스크립트라도 없는 것보다는 낫다.
@@ -7544,6 +7561,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final project = _openProjectName;
     if (project == null) return;
     try {
+      if (_drawing != null) await _writeMapProject(project);
       final files = await loadMapProjectFiles(project);
       if (files.isEmpty) return;
       await exportProjectConfigFiles(mapName: project, files: files);
@@ -7563,6 +7581,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 지금 코드로 다시 만들어 디스크까지 맞춘 뒤 띄운다.
+    await _refreshProjectScripts();
+    if (!mounted) return;
     List<MapProjectFile> files;
     try {
       files = await loadMapProjectFiles(project);

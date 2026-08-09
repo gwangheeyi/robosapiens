@@ -325,13 +325,12 @@ void main() {
 
     test('bringup 은 open_manipulator 쪽 설명을 쓴다', () {
       final xml = buildRobotSpawnLaunchXml(workcell);
-      // pinky_description 의 xacro 로는 팔이 나오지 않는다.
+      // 벤더 xacro 를 직접 부르지 않고 네임스페이스를 끼워 넣는 스크립트를
+      // 거친다. 그 스크립트가 open_manipulator 쪽 xacro 를 펼친다.
+      expect(xml, contains('robot_description.sh'));
       expect(
-        xml,
-        contains(
-          r'$(find-pkg-share open_manipulator_description)'
-          '/urdf/open_manipulator_x/open_manipulator_x.urdf.xacro',
-        ),
+        buildRobotDescriptionScript(workcell),
+        contains('open_manipulator_description'),
       );
       expect(xml, contains('args="-name omx_01 -topic robot_description'));
       // 팔은 바퀴가 아니라 컨트롤러가 움직인다.

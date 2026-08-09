@@ -1123,6 +1123,7 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('-->')
     ..writeln('<launch>');
   if (!robot.isMobile) {
+    buffer.writeln('  <arg name="robot_dir" default="\$(dirname)"/>');
     // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
     // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신 ros2_control
     // 컨트롤러를 올린다.
@@ -1137,10 +1138,13 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
       ..writeln('      <param name="use_sim_time" value="True"/>')
       ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
       ..writeln('      <param name="robot_description"')
+      // 벤더 xacro 의 gz_ros2_control 플러그인에는 네임스페이스가 없다. 그대로
+      // 두면 플러그인이 루트 `/robot_description` 을 기다리며 **Gazebo 의 갱신
+      // 루프 전체를 막는다.** 시간이 안 흘러 /clock 도 odom 도 나오지 않는다.
+      // 그래서 펼친 URDF 에 네임스페이스를 끼워 넣는 스크립트를 거친다.
       ..writeln(
-        '             value="\$(command \'xacro '
-        '\$(find-pkg-share open_manipulator_description)'
-        '/urdf/${robot.model}/${robot.model}.urdf.xacro use_sim:=true\')"/>',
+        '             value="\$(command \'\$(var robot_dir)'
+        '/robot_description.sh\')"/>',
       )
       ..writeln('    </node>')
       ..writeln('    <node pkg="ros_gz_sim" exec="create" output="screen"')
@@ -1193,6 +1197,51 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('</launch>');
   return buffer.toString();
 }
+
+/// 설치 로봇의 URDF 를 만드는 스크립트.
+///
+/// 벤더 xacro 의 `gz_ros2_control` 플러그인에는 네임스페이스가 없다. 그대로
+/// 두면 플러그인이 루트 `/robot_description` 을 기다리는데, 우리는 로봇마다
+/// 네임스페이스를 나누므로 그 토픽이 영영 오지 않는다.
+///
+/// 그냥 못 뜨고 마는 것이 아니다. **플러그인이 Gazebo 의 갱신 루프 안에서
+/// 기다리기 때문에 시뮬레이션 전체가 멈춘다.** `/clock` 이 안 나오고, 같은
+/// 월드의 Pinky 도 odom 을 못 낸다. 관제 노드 19개가 sim 시간을 기다리며
+/// 통째로 굳는다.
+///
+/// 그래서 펼친 URDF 에 네임스페이스를 끼워 넣는다.
+String buildRobotDescriptionScript(RmfProjectRobot robot) =>
+    '''#!/usr/bin/env bash
+# ${robot.robotId} 의 URDF 를 만든다.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다.
+#
+# 벤더 xacro 의 gz_ros2_control 플러그인에 네임스페이스를 끼워 넣는다. 없으면
+# 플러그인이 루트 /robot_description 을 기다리며 Gazebo 갱신 루프를 막는다.
+set -euo pipefail
+
+MODEL="\${MODEL:-${robot.model}}"
+NAMESPACE="\${NAMESPACE:-${robot.gzName}}"
+
+XACRO="\$(ros2 pkg prefix open_manipulator_description)"
+XACRO="\$XACRO/share/open_manipulator_description/urdf/\$MODEL/\$MODEL.urdf.xacro"
+
+xacro "\$XACRO" use_sim:=true | python3 -c '
+import re
+import sys
+
+namespace = sys.argv[1]
+urdf = sys.stdin.read()
+# 플러그인 여는 태그 바로 뒤에 끼워 넣는다. 벤더 파일을 건드리지 않는다.
+urdf = re.sub(
+    r"(<plugin[^>]*gz_ros2_control[^>]*>)",
+    r"\\1<ros><namespace>/" + namespace + r"</namespace></ros>"
+    r"<robot_param_node>robot_state_publisher</robot_param_node>",
+    urdf,
+    count=1,
+)
+sys.stdout.write(urdf)
+' "\$NAMESPACE"
+''';
 
 /// 로봇 한 대의 토픽 다리 설정.
 ///
