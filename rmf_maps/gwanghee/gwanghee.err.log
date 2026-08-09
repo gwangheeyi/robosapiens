@@ -1,0 +1,456 @@
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/world[@name="sim_world"]/gui/window:/home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee.world:L31]: XML Element[window], child of element[gui], not defined in SDF. Copying[window] as children of [gui].
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/world[@name="sim_world"]/rmf_charger_waypoints[@name="charger_waypoints"]:/home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee.world:L255]: XML Element[rmf_charger_waypoints], child of element[world], not defined in SDF. Copying[rmf_charger_waypoints] as children of [world].
+[gazebo-1] [WARN] [1786312017.627933477] [omx_03.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786312017.642257074] [omx_03.controller_manager.hardware_component.system.OpenManipulatorXSystem]: Executor is not available during hardware component initialization for 'OpenManipulatorXSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786312017.642581559] [omx_03.controller_manager]: Component 'OpenManipulatorXSystem' does not have read or write statistics initialized, skipping registration.
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/model[@name="pinky"]/link[@name="base_footprint"]/sensor[@name="pinky_01/camera"]/gz_frame_id:<urdf-string>:L0]: XML Element[gz_frame_id], child of element[sensor], not defined in SDF. Copying[gz_frame_id] as children of [sensor].
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/model[@name="pinky"]/link[@name="base_footprint"]/sensor[@name="pinky_01/imu"]/gz_frame_id:<urdf-string>:L0]: XML Element[gz_frame_id], child of element[sensor], not defined in SDF. Copying[gz_frame_id] as children of [sensor].
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/model[@name="pinky"]/link[@name="base_footprint"]/sensor[@name="pinky_01/gpu_lidar"]/gz_frame_id:<urdf-string>:L0]: XML Element[gz_frame_id], child of element[sensor], not defined in SDF. Copying[gz_frame_id] as children of [sensor].
+[gazebo-1] [WARN] [1786312019.891073896] [omx_02.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786312019.905306139] [omx_02.gz_ros_control]: IMU sensor 'pinky_01/imu' not found in hardware_info, skipping.
+[gazebo-1] [WARN] [1786312019.905363829] [omx_02.controller_manager.hardware_component.system.OpenManipulatorXSystem]: Executor is not available during hardware component initialization for 'OpenManipulatorXSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786312019.905583831] [omx_02.controller_manager]: Component 'OpenManipulatorXSystem' does not have read or write statistics initialized, skipping registration.
+[gazebo-1] [ERROR] [1786312019.948057905] [omx_02.controller_manager]: Loader for controller 'arm_controller' (type 'joint_trajectory_controller/JointTrajectoryController') not found.
+[ERROR] [spawner-8]: process has died [pid 1896748, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner arm_controller --ros-args -r __ns:=/omx_02'].
+[gazebo-1] [ERROR] [1786312021.560536912] [omx_03.controller_manager]: Loader for controller 'arm_controller' (type 'joint_trajectory_controller/JointTrajectoryController') not found.
+[ERROR] [spawner-13]: process has died [pid 1896753, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner arm_controller --ros-args -r __ns:=/omx_03'].
+[gazebo-1] [ERROR] [1786312022.639891228] [omx_02.controller_manager]: Loader for controller 'gripper_controller' (type 'position_controllers/GripperActionController') not found.
+[ERROR] [spawner-9]: process has died [pid 1896749, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner gripper_controller --ros-args -r __ns:=/omx_02'].
+[gazebo-1] [ERROR] [1786312025.924461641] [omx_03.controller_manager]: Loader for controller 'gripper_controller' (type 'position_controllers/GripperActionController') not found.
+[ERROR] [spawner-14]: process has died [pid 1896754, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner gripper_controller --ros-args -r __ns:=/omx_03'].
+[planner_server-6] [INFO] [1786312041.580393402] [pinky_01.global_costmap.global_costmap]: Timed out waiting for transform from pinky_01/base_footprint to map to become available, tf error: Lookup would require extrapolation into the past.  Requested time 17.310000 but the earliest data is at time 17.400000, when looking up transform from frame [pinky_01/base_footprint] to frame [map]
+[controller_server-4] [WARN] [1786312121.739719036] [pinky_01.controller_server]: No goal checker was specified in parameter 'current_goal_checker'. Server will use only plugin loaded general_goal_checker . This warning will appear once.
+[controller_server-4] [WARN] [1786312121.739740128] [pinky_01.controller_server]: No progress checker was specified in parameter 'current_progress_checker'. Server will use only plugin loaded progress_checker . This warning will appear once.
+[controller_server-4] [ERROR] [1786312141.297725807] [pinky_01.controller_server]: Failed to make progress
+[controller_server-4] [WARN] [1786312141.297877294] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312143.502215725] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is inf Hz.
+[bt_navigator-8] [WARN] [1786312143.517429461] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for follow_path
+[bt_navigator-8] [WARN] [1786312143.517620129] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312143.517794385] [pinky_01.bt_navigator]: Goal failed
+[controller_server-4] [WARN] [1786312151.153887706] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312151.204047827] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312151.253955330] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312151.303879805] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.353846567] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.404465899] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.474938916] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is inf Hz.
+[controller_server-4] [WARN] [1786312152.478538709] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.535529650] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.579535440] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.628884138] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312152.629881411] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312152.630152747] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312152.736561808] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.736736413] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 11.1111 Hz.
+[controller_server-4] [WARN] [1786312152.737151833] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.787242532] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.837374576] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.887169075] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.937172192] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312152.987444899] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312152.987578506] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312152.987786705] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312153.084476215] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 12.5000 Hz
+[controller_server-4] [WARN] [1786312153.137412484] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.158221187] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.207206637] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.257168826] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.307175295] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.357066805] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.407116995] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312153.407163440] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312153.407252558] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312153.534663576] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.534811292] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 8.3333 Hz.
+[controller_server-4] [WARN] [1786312153.535069148] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.585198260] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.635341549] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.685470312] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312153.735123171] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312153.735169337] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312153.735274030] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312154.154180799] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312154.154220888] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312154.154243308] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312159.303797327] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.353727979] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.403972500] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.453703683] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.504039697] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.553819700] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.604036284] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312159.604151384] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312159.604339817] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312159.734109057] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.734299656] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 9.0909 Hz.
+[controller_server-4] [WARN] [1786312159.734817884] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.784660395] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.834662005] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.884675629] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312159.934847655] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312159.934900595] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312159.935113403] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312159.953760650] [pinky_01.behavior_server]: Collision Ahead - Exiting DriveOnHeading
+[behavior_server-7] [WARN] [1786312159.953804301] [pinky_01.behavior_server]: backup failed
+[behavior_server-7] [WARN] [1786312159.953823508] [pinky_01.behavior_server]: [backup] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312160.084145828] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 9.0909 Hz
+[controller_server-4] [WARN] [1786312160.134139209] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.154048407] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.204111003] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.254164030] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.304080305] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.353986035] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.404096612] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.454059821] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312160.454122261] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312160.454260479] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312160.533936939] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.534130892] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz.
+[controller_server-4] [WARN] [1786312160.534613712] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.584541791] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.634619682] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.684517799] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.734543378] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312160.784810541] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312160.784884923] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312160.785050869] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312161.103563039] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312161.103624989] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312161.103646361] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312166.313983628] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.363561585] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.413784396] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.463676573] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.514447786] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.563833676] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.614537282] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312166.614656922] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312166.617060408] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312166.734351591] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.734574946] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 10.0000 Hz.
+[controller_server-4] [WARN] [1786312166.734812969] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.785154093] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.834972307] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.885383134] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.935160840] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312166.985730418] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312166.985839721] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312166.987151920] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312167.003571093] [pinky_01.behavior_server]: Collision Ahead - Exiting DriveOnHeading
+[behavior_server-7] [WARN] [1786312167.003650224] [pinky_01.behavior_server]: backup failed
+[behavior_server-7] [WARN] [1786312167.003667336] [pinky_01.behavior_server]: [backup] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312167.085664025] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz
+[controller_server-4] [WARN] [1786312167.134055568] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.153896599] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.204093288] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.253914156] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.304012298] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.354076985] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.408051239] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.453887879] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312167.453934673] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312167.454046630] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312167.534685444] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.535785252] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz.
+[controller_server-4] [WARN] [1786312167.537326044] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.587338280] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.637560811] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.688255686] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.736570613] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312167.786645777] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312167.786695714] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312167.786805297] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312168.603889508] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312168.603957674] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312168.603992944] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312174.053815205] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.103949522] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.153834222] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.403975075] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.453916907] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.503940104] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312174.767482869] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[bt_navigator-8] [WARN] [1786312174.787780597] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for follow_path
+[controller_server-4] [WARN] [1786312174.810134345] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312174.934386848] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 7.6923 Hz.
+[controller_server-4] [WARN] [1786312175.134760125] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.185342899] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.234791433] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.284809951] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.534887734] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.584816435] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.835382416] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.884790931] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312175.984757147] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.034997204] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.084748714] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.284990196] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.334830406] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.384874276] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.434883435] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.484799703] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.534913625] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.584844980] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312176.584898898] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312176.585009528] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[bt_navigator-8] [WARN] [1786312176.605287770] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312176.605531939] [pinky_01.bt_navigator]: Goal failed
+[controller_server-4] [WARN] [1786312176.631287708] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.681183442] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.731415538] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.786937214] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.832311424] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.881172514] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.932356072] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312176.981955884] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312176.982009593] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312176.982138033] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312177.141653244] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312177.141911451] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 7.1429 Hz.
+[controller_server-4] [WARN] [1786312177.142344963] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312177.195059744] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312177.242554787] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312177.292433759] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312177.342383621] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312177.342433418] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312177.342568493] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312178.092524065] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 1.4085 Hz
+[controller_server-4] [WARN] [1786312178.110079222] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.160353921] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.210907290] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.260322578] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.310423299] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.360401377] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.410351169] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.460246832] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312178.460299773] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312178.460399927] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312178.540768512] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.540953804] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz.
+[controller_server-4] [WARN] [1786312178.541360636] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.591417147] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.641661883] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.691551750] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.741606025] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312178.791736290] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312178.791846152] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312178.792024739] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312179.710115032] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312179.710192906] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312179.710220564] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312185.170954163] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.221025338] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.270958364] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.471498755] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.520960904] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.721079168] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.770830674] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312185.820968548] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.070800393] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.120869123] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.170827711] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.421150476] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.471094048] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.520948641] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.570837108] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.771186338] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.821191023] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.871108753] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312186.921101634] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.270787374] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.320870351] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.371143578] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.570942240] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.620876523] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.670924369] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.721043245] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.770763391] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.820861454] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312187.870810962] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312187.870854683] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312187.870936539] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312187.941564972] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 20.0000 Hz.
+[controller_server-4] [WARN] [1786312188.342041049] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.392221246] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.442050555] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.492330347] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.542102595] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.592130117] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312188.642058742] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312188.642115524] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312188.642259818] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312188.659743665] [pinky_01.behavior_server]: Collision Ahead - Exiting DriveOnHeading
+[behavior_server-7] [WARN] [1786312188.659766992] [pinky_01.behavior_server]: backup failed
+[behavior_server-7] [WARN] [1786312188.659778516] [pinky_01.behavior_server]: [backup] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312189.090951146] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 2.4390 Hz
+[controller_server-4] [WARN] [1786312189.110465659] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.160505682] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.210314876] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.260345959] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.310288902] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.360375370] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.410414764] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312189.410485724] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312189.410594678] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312189.540425822] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.540635349] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 9.0909 Hz.
+[controller_server-4] [WARN] [1786312189.541036035] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.591149183] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.641095617] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.691083398] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312189.741221759] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312189.741305151] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312189.741482551] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312189.960290133] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312189.960335111] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312189.960351245] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312195.111383586] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.161425213] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.211501551] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.261392668] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.311435412] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.361642355] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.411314097] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.461537663] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312195.461595772] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312195.461713107] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312195.541646493] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.541807898] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz.
+[controller_server-4] [WARN] [1786312195.542193428] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.592309996] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.642314467] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.692627291] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.742350227] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312195.792282481] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312195.792325783] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312195.792413505] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312195.811288331] [pinky_01.behavior_server]: Collision Ahead - Exiting DriveOnHeading
+[behavior_server-7] [WARN] [1786312195.811315151] [pinky_01.behavior_server]: backup failed
+[behavior_server-7] [WARN] [1786312195.811330726] [pinky_01.behavior_server]: [backup] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312196.091825855] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 3.8462 Hz
+[controller_server-4] [WARN] [1786312196.111483474] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.161538580] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.211558555] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.261636849] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.311846376] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.361865863] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.412006735] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312196.412129727] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312196.412313273] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312196.541993061] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.542208524] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 9.0909 Hz.
+[controller_server-4] [WARN] [1786312196.542701821] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.593263214] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.642829144] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.692975254] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312196.742946969] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312196.743011154] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312196.743173118] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[behavior_server-7] [WARN] [1786312197.361195588] [pinky_01.behavior_server]: Collision Ahead - Exiting Spin
+[behavior_server-7] [WARN] [1786312197.361237075] [pinky_01.behavior_server]: spin failed
+[behavior_server-7] [WARN] [1786312197.361254815] [pinky_01.behavior_server]: [spin] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312202.721964098] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312202.771841243] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312202.821879514] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.071798974] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.121982796] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.171691760] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.221892066] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.271909873] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.321904422] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[planner_server-6] [WARN] [1786312203.431403116] [pinky_01.planner_server]: GridBased plugin failed to plan from (1.00, -0.32) to (0.32, -0.90): "Failed to create plan with tolerance of: 0.500000"
+[planner_server-6] [WARN] [1786312203.431461853] [pinky_01.planner_server]: [compute_path_to_pose] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312203.671643332] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.721667216] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312203.771678667] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.021823506] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.071863104] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[planner_server-6] [WARN] [1786312204.091754274] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 1.5625 Hz
+[controller_server-4] [WARN] [1786312204.122203652] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.371709222] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.421790794] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.471687425] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.521809087] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.571699501] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.621715562] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.671841624] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312204.671945549] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312204.672145997] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312204.741897340] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.742071387] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 16.6667 Hz.
+[controller_server-4] [WARN] [1786312204.742393919] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.792631589] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.842512574] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.892532546] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.942631579] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312204.992520806] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312205.042521501] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312205.042567248] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312205.042671173] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[bt_navigator-8] [WARN] [1786312205.070301364] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312205.070537711] [pinky_01.bt_navigator]: Goal failed
+[controller_server-4] [WARN] [1786312216.242510352] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312216.292476400] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312220.742419922] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312220.792466218] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.292485112] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.342499001] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.592499158] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.642427769] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.692455276] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.742410916] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.792410207] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.842557006] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.892859762] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312221.892897477] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312221.892990507] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312221.932974057] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312221.973011247] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312222.820183497] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.070561987] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.120180218] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.170539336] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.220202126] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.270324618] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.320215513] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312223.370491170] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [ERROR] [1786312223.370577495] [pinky_01.controller_server]: Controller patience exceeded
+[controller_server-4] [WARN] [1786312223.370711732] [pinky_01.controller_server]: [follow_path] [ActionServer] Aborting handle.
+[controller_server-4] [WARN] [1786312223.539371545] [pinky_01.controller_server]: Control loop missed its desired rate of 20.0000 Hz. Current loop rate is 6.6667 Hz.
+[controller_server-4] [WARN] [1786312224.039942254] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312224.090342159] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312224.689941893] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312224.739925538] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312224.789860224] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[controller_server-4] [WARN] [1786312224.989871003] [pinky_01.controller_server]: RegulatedPurePursuitController detected collision ahead!
+[bt_navigator-8] [WARN] [1786312225.107993458] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [ERROR] [1786312225.129108612] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Failed to get result for follow_path in node halt!
+[bt_navigator-8] [WARN] [1786312225.129311784] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.129514885] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.159069926] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.168087340] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.168233171] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.199062765] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.208430787] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.208634587] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.262528634] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.272369489] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.272533549] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.295955804] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.305802945] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.305992567] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.346760725] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.356350078] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.356590266] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.392559278] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.402460616] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.402728182] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.426691367] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.436547168] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.436764098] [pinky_01.bt_navigator]: Goal failed
+[bt_navigator-8] [WARN] [1786312225.462576917] [pinky_01.bt_navigator_navigate_to_pose_rclcpp_node]: Timed out while waiting for action server to acknowledge goal request for compute_path_to_pose
+[bt_navigator-8] [WARN] [1786312225.472395841] [pinky_01.bt_navigator]: [navigate_to_pose] [ActionServer] Aborting handle.
+[bt_navigator-8] [ERROR] [1786312225.472580016] [pinky_01.bt_navigator]: Goal failed
+[planner_server-6] [WARN] [1786312225.758169863] [pinky_01.planner_server]: [compute_path_to_pose] [ActionServer] Aborting handle.
+[planner_server-6] [WARN] [1786312225.758842515] [pinky_01.planner_server]: Planner loop missed its desired rate of 20.0000 Hz. Current loop rate is 12.5000 Hz
+[python3-12] [WARN] [1786313525.829090529] [gwanghee_pinky_fleet_adapter]: Failed to update using patch for DB version 655 (mirror version: none, patch base: 654); requesting new update
