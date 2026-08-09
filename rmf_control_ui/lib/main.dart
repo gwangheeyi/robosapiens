@@ -6925,6 +6925,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
         generatedAt: now,
       ),
       MapProjectFile(
+        fileName: '${mapName}_task_bridge.py',
+        kind: 'nav2',
+        description:
+            '앱이 만든 연속 작업을 RMF 에 넣어 준다. RMF 는 task_api_requests '
+            '토픽 하나로 작업을 받는데, 요청과 답을 request_id 로 맞춰야 해서 '
+            'ros2 topic pub 으로는 안 된다. 이것이 없으면 작업이 앱 안에서만 '
+            '돌고 로봇은 가만히 있는다.',
+        executable: true,
+        content: buildTaskBridgeScript(
+          mapName: mapName,
+          fleetName: fleet.fleetName,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
         fileName: '${mapName}_gz_bridge.yaml',
         kind: 'bridge',
         description:

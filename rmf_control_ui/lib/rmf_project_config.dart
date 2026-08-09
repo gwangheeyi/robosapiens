@@ -7,6 +7,7 @@
 library;
 
 import 'nav2_params.dart' show nav2MapTopic, nav2MapTopicName;
+import 'rmf_task_request.dart' show rmfArmLoadAction;
 
 /// 이 로봇의 값이 어디서 오는가.
 ///
@@ -409,7 +410,10 @@ String buildFleetAdapterYaml({
     ..writeln('  task_capabilities:')
     ..writeln('    loop: True')
     ..writeln('    delivery: True')
-    ..writeln('  actions: ["teleop"]')
+    // 이 플릿이 맡을 수 있는 별도 동작. 여기 없는 것을 작업에 넣으면 RMF 가
+    // `Fleet not configured to perform this action` 이라며 통째로 거절한다.
+    // `armLoad` 는 앱의 연속 작업에 있는 매니퓰레이터 적재 단계다.
+    ..writeln('  actions: ["teleop", "$rmfArmLoadAction"]')
     ..writeln('  finishing_request: "park"')
     ..writeln('  responsive_wait: True')
     ..writeln('  reassign_task_interval: 120')
@@ -1371,6 +1375,112 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
   return buffer.toString();
 }
 
+/// 앱이 만든 작업을 RMF 에 넣어 주는 작은 다리.
+///
+/// RMF 는 `task_api_requests` 토픽 하나로 작업을 받는다. 그런데 `ros2 topic
+/// pub` 으로는 이 일을 제대로 할 수 없다 — 요청과 응답을 `request_id` 로 맞춰야
+/// 하고, QoS 가 transient_local 이라 한 번 실은 뒤 잠깐 살아 있어야 한다.
+///
+/// 그래서 짧은 스크립트를 하나 둔다. 앱이 JSON 파일 하나를 주면 실어 보내고,
+/// RMF 의 답을 그대로 찍고 끝난다. 앱은 `ros2 topic echo` 를 띄우는 것과 같은
+/// 방식으로 이것을 부른다.
+///
+/// **실물 로봇에서도 그대로 돈다.** 여기는 RMF 와만 이야기한다.
+String buildTaskBridgeScript({
+  required String mapName,
+  required String fleetName,
+}) => '''#!/usr/bin/env python3
+"""$mapName 프로젝트의 작업 다리 — 앱이 만든 작업을 RMF 에 넣는다.
+
+rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다음 저장 때
+덮어써진다.
+
+  ${mapName}_task_bridge.py --submit 작업.json
+
+작업.json 은 `robot_task_request` 나 `dispatch_task_request` 한 덩어리다.
+성공하면 RMF 의 답을 그대로 찍고 0 으로 끝난다.
+"""
+
+import argparse
+import json
+import sys
+import uuid
+
+import rclpy
+import rclpy.node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
+
+from rmf_task_msgs.msg import ApiRequest, ApiResponse
+
+FLEET_NAME = '$fleetName'
+
+# RMF 의 task API 는 transient_local 이다. 늦게 붙는 쪽도 마지막 것을 받는다.
+API_QOS = QoSProfile(
+    history=QoSHistoryPolicy.KEEP_LAST,
+    depth=10,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+
+
+def main(argv=sys.argv):
+    parser = argparse.ArgumentParser(prog='$mapName' + '_task_bridge')
+    parser.add_argument('--submit', required=True,
+                        help='보낼 작업 JSON 파일')
+    parser.add_argument('--timeout', type=float, default=15.0,
+                        help='답을 기다리는 초')
+    args = parser.parse_args(argv[1:])
+
+    with open(args.submit, encoding='utf-8') as handle:
+        payload = json.load(handle)
+
+    rclpy.init(args=None)
+    node = rclpy.node.Node('$fleetName' + '_task_bridge')
+    publisher = node.create_publisher(ApiRequest, 'task_api_requests', API_QOS)
+
+    request = ApiRequest()
+    request.request_id = 'rmf_control_ui-' + str(uuid.uuid4())[:8]
+    request.json_msg = json.dumps(payload, ensure_ascii=False)
+
+    answer = {}
+
+    def on_response(message):
+        # 남의 요청에 대한 답도 같은 토픽으로 온다.
+        if message.request_id != request.request_id:
+            return
+        answer['body'] = json.loads(message.json_msg)
+
+    node.create_subscription(ApiResponse, 'task_api_responses',
+                             on_response, API_QOS)
+
+    # 구독이 붙기 전에 실으면 답을 놓친다. 한 바퀴 돌려 놓고 보낸다.
+    rclpy.spin_once(node, timeout_sec=0.5)
+    publisher.publish(request)
+
+    deadline = node.get_clock().now().nanoseconds + int(args.timeout * 1e9)
+    while 'body' not in answer:
+        if node.get_clock().now().nanoseconds > deadline:
+            print(json.dumps({
+                'success': False,
+                'errors': [{'code': 0, 'category': 'timeout', 'detail':
+                            'RMF 가 답하지 않았습니다. fleet adapter 가 떠 '
+                            '있는지 확인하세요.'}],
+            }, ensure_ascii=False))
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+            return 1
+        rclpy.spin_once(node, timeout_sec=0.2)
+
+    print(json.dumps(answer['body'], ensure_ascii=False))
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+    return 0 if answer['body'].get('success') else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+''';
+
 /// 로봇의 센서를 앱이 볼 수 있게 파일로 내려 준다.
 ///
 /// 앱에는 rclpy 바인딩이 없다. 지금까지는 `ros2 topic echo` 를 자식 프로세스로
@@ -1600,6 +1710,7 @@ RMF 가 주는 목적지를 Nav2 의 NavigateToPose 로 바꾸고, TF 에서 읽
 """
 
 import argparse
+import json
 import math
 import sys
 import threading
@@ -1616,7 +1727,25 @@ import rmf_adapter.easy_full_control as rmf_easy
 
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import String as StringMsg
 import tf2_ros
+
+# 진행 상황을 내보내는 자리. 앱이 이것을 읽어 단계를 넘긴다.
+#
+# RMF 의 작업 상태는 rmf-web 의 웹소켓으로만 나간다. 웹서버를 띄우지 않으면
+# 어디에서도 볼 수 없다. 그런데 목적지를 하나씩 받는 것은 이 어댑터이므로,
+# 여기가 진행을 아는 가장 이른 자리다.
+PROGRESS_TOPIC = '$fleetName/task_progress'
+_progress = None
+
+
+def report(**fields):
+    """앱에게 지금 무엇을 하는지 알린다. 없으면 조용히 넘어간다."""
+    if _progress is None:
+        return
+    message = StringMsg()
+    message.data = json.dumps(fields, ensure_ascii=False)
+    _progress.publish(message)
 
 # RMF 가 아는 이름 -> ROS 네임스페이스.
 ROBOT_NAMESPACES = {
@@ -1668,6 +1797,8 @@ class RobotAdapter:
         self.node.get_logger().info(
             f'[{self.name}] -> ({x:.3f}, {y:.3f}, {math.degrees(yaw):.0f}도)'
             f' 지도 [{destination.map}]')
+        report(robot=self.name, event='navigate_start',
+               x=float(x), y=float(y), yaw=float(yaw))
 
         if not self.nav.wait_for_server(timeout_sec=5.0):
             self.node.get_logger().error(
@@ -1702,6 +1833,7 @@ class RobotAdapter:
         self.node.get_logger().info(f'[{self.name}] 도착했습니다.')
         with self.lock:
             self.goal_handle = None
+        report(robot=self.name, event='navigate_done')
         self.finish()
 
     def finish(self):
@@ -1727,11 +1859,34 @@ class RobotAdapter:
             self.goal_handle = None
 
     def execute_action(self, category, description, execution):
-        # 이 플릿은 아직 별도 동작을 맡지 않는다. 붙잡고 있으면 작업이 영영 안
-        # 끝나므로 곧바로 끝났다고 알린다.
-        self.node.get_logger().warn(
-            f'[{self.name}] 모르는 동작 [{category}] 입니다. 건너뜁니다.')
-        execution.finished()
+        """RMF 가 이동이 아닌 단계를 맡길 때 부른다.
+
+        앱의 연속 작업에서 `armLoad` 가 여기로 온다. RMF 는 이 동작이 무엇인지
+        모르고, 끝났다고 알려 주는 것은 이쪽 몫이다. 붙잡고만 있으면 작업이
+        영영 안 끝난다.
+
+        **아직 매니퓰레이터에게 실제로 시키지는 않는다.** OMX 쪽에 이 요청을
+        받는 노드가 없다. 지금은 예상 시간만큼 기다리고 끝났다고 알린다.
+        여기가 그 노드를 부를 자리다.
+        """
+        seconds = 1.0
+        if isinstance(description, dict):
+            estimate = description.get(
+                'unix_millis_action_duration_estimate')
+            if isinstance(estimate, (int, float)) and estimate > 0:
+                seconds = float(estimate) / 1000.0
+        self.node.get_logger().info(
+            f'[{self.name}] 동작 [{category}] · {seconds:.1f}초')
+        report(robot=self.name, event='action_start',
+               category=category, seconds=seconds)
+
+        def done():
+            timer.cancel()
+            self.node.get_logger().info(f'[{self.name}] 동작 [{category}] 끝.')
+            report(robot=self.name, event='action_done', category=category)
+            execution.finished()
+
+        timer = self.node.create_timer(seconds, done)
 
     # ── RMF 에 알리는 쪽 ────────────────────────────────────────────────
 
@@ -1797,6 +1952,9 @@ def main(argv=sys.argv):
     assert fleet_config, f'설정을 읽지 못했습니다: {args.config_file}'
 
     node = rclpy.node.Node(fleet_config.fleet_name + '_nav2_adapter')
+    global _progress
+    # 앱이 늦게 붙어도 마지막 소식은 받도록 남겨 둔다.
+    _progress = node.create_publisher(StringMsg, PROGRESS_TOPIC, 10)
     adapter = Adapter.make(fleet_config.fleet_name + '_fleet_adapter')
     assert adapter, (
         'fleet adapter 를 만들지 못했습니다. '
