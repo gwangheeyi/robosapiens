@@ -1258,6 +1258,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String? marginError;
     String? toleranceError;
     String? toleranceWarning;
+    // 최소보다 작은 값을 한 번 되물은 뒤, 같은 값으로 다시 누르면 넣는다.
+    double? toleranceForced;
     final values = await showMovableDialog<(double, double, double, double?)>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -1334,11 +1336,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     ),
                     onChanged: (_) => setDialogState(() {
                       toleranceError = null;
+                      // 값을 고치면 되묻기를 처음부터 다시 한다.
+                      toleranceForced = null;
                       final value = _parseMeters(toleranceController.text);
                       toleranceWarning =
                           value != null && value > 0 && value < floor
                           ? '코스트맵 한 칸이 ${nav2CostmapResolution.toStringAsFixed(2)}m 입니다. '
-                                '이보다 촘촘히 요구하면 도착을 못 하고 목표 주변을 맴돌 수 있습니다.'
+                                '이보다 촘촘히 요구하면 Nav2 가 목표를 못 맞추고 '
+                                '주변을 맴돌다 포기합니다. 실제로 0.080 을 넣었다가 '
+                                '픽업 지점에 닿지 못했습니다.'
                           : null;
                     }),
                   ),
@@ -1423,6 +1429,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     toleranceError = nextToleranceError;
                   });
                   return;
+                }
+                // 최소보다 작으면 저장 전에 한 번 더 묻는다. 입력 중에만
+                // 알리면 그냥 지나치기 쉽다 — 실제로 0.080 이 저장돼 나갔고,
+                // Nav2 가 목표를 못 맞추고 맴돌다 포기했다.
+                if (tolerance != null && tolerance < floor) {
+                  setDialogState(() {
+                    widthError = null;
+                    radiusError = null;
+                    marginError = null;
+                    toleranceError =
+                        '최소 ${floor.toStringAsFixed(3)} 보다 작습니다. '
+                        '그래도 쓰시려면 한 번 더 누르세요.';
+                  });
+                  // 같은 값으로 다시 누르면 그때는 넣는다.
+                  if (toleranceForced != tolerance) {
+                    toleranceForced = tolerance;
+                    return;
+                  }
                 }
                 Navigator.pop(
                   dialogContext,
