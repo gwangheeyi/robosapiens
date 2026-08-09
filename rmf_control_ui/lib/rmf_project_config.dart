@@ -1174,7 +1174,6 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('  혼자 시험하려면 map_server 를 먼저 띄우고 이것을 돌린다.')
     ..writeln('-->')
     ..writeln('<launch>')
-    ..writeln('  <arg name="robot_dir" default="\$(dirname)"/>')
     ..writeln('  <arg name="use_sim_time" default="true"/>')
     ..writeln('  <group>')
     // 한 번만 건다. 아래 노드에는 네임스페이스를 따로 걸지 않는다.
@@ -1184,7 +1183,7 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('    <node pkg="nav2_amcl" exec="amcl" name="amcl"')
     ..writeln('          output="screen">')
     ..writeln(
-      '      <param from="\$(var robot_dir)/nav2_params.yaml"/>',
+      '      <param from="\$(dirname)/nav2_params.yaml"/>',
     )
     ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
     // 지도는 로봇마다 가르지 않는다. `/map` 은 RMF 의 building_map_server 가
@@ -1205,7 +1204,7 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
       ..writeln('')
       ..writeln('    <node pkg="$package" exec="$node" name="$node"')
       ..writeln('          output="screen">')
-      ..writeln('      <param from="\$(var robot_dir)/nav2_params.yaml"/>')
+      ..writeln('      <param from="\$(dirname)/nav2_params.yaml"/>')
       ..writeln(
         '      <param name="use_sim_time" value="\$(var use_sim_time)"/>',
       );
@@ -1456,7 +1455,7 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('-->')
     ..writeln('<launch>');
   if (!robot.isMobile) {
-    buffer.writeln('  <arg name="robot_dir" default="\$(dirname)"/>');
+
     // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
     // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신 ros2_control
     // 컨트롤러를 올린다.
@@ -1476,7 +1475,7 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
       // 루프 전체를 막는다.** 시간이 안 흘러 /clock 도 odom 도 나오지 않는다.
       // 그래서 펼친 URDF 에 네임스페이스를 끼워 넣는 스크립트를 거친다.
       ..writeln(
-        '             value="\$(command \'\$(var robot_dir)'
+        '             value="\$(command \'\$(dirname)'
         '/robot_description.sh\')"/>',
       )
       ..writeln('    </node>')
@@ -1506,7 +1505,6 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     return buffer.toString();
   }
   buffer
-    ..writeln('  <arg name="robot_dir" default="\$(dirname)"/>')
     ..writeln('  <group>')
     // 벤더의 upload_robot.launch.py 를 그대로 쓰지 않는다. 그 launch 가 펼치는
     // xacro 는 링크 이름에는 네임스페이스를 안 붙이면서 <gazebo reference> 에는
@@ -1522,7 +1520,7 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('      <param name="frame_prefix" value="${robot.gzName}/"/>')
     ..writeln(
       '      <param name="robot_description"'
-      ' value="\$(command \'\$(var robot_dir)/robot_description.sh\')"/>',
+      ' value="\$(command \'\$(dirname)/robot_description.sh\')"/>',
     )
     ..writeln('    </node>')
     ..writeln('    <node pkg="joint_state_publisher"')

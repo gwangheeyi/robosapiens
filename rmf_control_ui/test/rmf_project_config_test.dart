@@ -155,6 +155,17 @@ void main() {
       expect(xml, contains('exec="joint_state_publisher"'));
     });
 
+    test('파일 자리를 arg 로 돌려쓰지 않는다', () {
+      // 같은 이름의 <arg> 를 여러 include 가 선언하면 launch 안에서 범위가
+      // 겹쳐 먼저 읽은 값이 나머지에 쓰인다. 실제로 pinky_02 가 pinky_01 의
+      // URDF 로 올라가서 라이다가 안 돌았다.
+      for (final robot in robots) {
+        final xml = buildRobotSpawnLaunchXml(robot);
+        expect(xml, isNot(contains('robot_dir')));
+        expect(xml, contains(r'$(dirname)/robot_description.sh'));
+      }
+    });
+
     test('create 가 그 로봇의 robot_description 을 절대 이름으로 가리킨다', () {
       for (final robot in robots) {
         final xml = buildRobotSpawnLaunchXml(robot);

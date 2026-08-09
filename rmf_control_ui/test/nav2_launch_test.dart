@@ -85,7 +85,7 @@ void main() {
     test('모든 노드가 이 로봇의 파라미터를 읽는다', () {
       final nodes = RegExp('<node pkg=').allMatches(xml).length;
       final params = RegExp(
-        r'<param from="\$\(var robot_dir\)/nav2_params.yaml"/>',
+        r'<param from="\$\(dirname\)/nav2_params.yaml"/>',
       ).allMatches(xml).length;
       // lifecycle_manager 만 파라미터 파일을 안 읽는다.
       expect(params, nodes - 1);
@@ -104,6 +104,21 @@ void main() {
 
     test('sim 시간을 쓴다 — Gazebo 와 시계를 맞춰야 한다', () {
       expect(xml, contains('name="use_sim_time"'));
+    });
+
+    test('lifecycle_manager 만은 벽시계로 잰다', () {
+      // 전이 응답을 기다리는 시간 제한이 sim 시계에 걸리면 `Configuring` 에서
+      // 영영 멈춘다. 실제로 map_server 가 거기서 멈춰 있었다.
+      final manager = xml.substring(xml.indexOf('nav2_lifecycle_manager'));
+      expect(manager, contains('name="use_sim_time" value="false"'));
+    });
+
+    test('파일 자리를 arg 로 돌려쓰지 않는다', () {
+      // 같은 이름의 <arg> 를 여러 include 가 선언하면 launch 안에서 범위가
+      // 겹쳐 먼저 읽은 값이 나머지에 쓰인다. 실제로 pinky_02 가 pinky_01 의
+      // URDF 로 올라갔다.
+      expect(xml, isNot(contains('robot_dir')));
+      expect(xml, contains(r'$(dirname)/nav2_params.yaml'));
     });
   });
 
