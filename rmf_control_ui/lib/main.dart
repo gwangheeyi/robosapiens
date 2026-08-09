@@ -4678,6 +4678,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
       mapDirectory: _deployedMapDirectory,
+      mapName: _robotDeployedMap?.summary.name ?? _mapName,
       backendRunning: () => _backendRunning,
       onStartBackend: _startBackendFromDetail,
       onResubscribe: _resubscribeRobots,
@@ -19116,6 +19117,7 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.metersPerPixel,
     required this.waypointLabel,
     required this.mapDirectory,
+    required this.mapName,
     required this.backendRunning,
     required this.onStartBackend,
     required this.onResubscribe,
@@ -19143,6 +19145,9 @@ class _RobotDetailDialog extends StatefulWidget {
   /// 배포 산출물이 있는 곳. 이 로봇만 올리는 launch 가 그 안에 있다.
   final String? mapDirectory;
 
+  /// 지금 프로젝트의 맵 이름. 배포 시각을 볼 때 쓴다.
+  final String mapName;
+
   /// 이 프로젝트의 백엔드가 떠 있는가.
   final bool Function() backendRunning;
 
@@ -19161,6 +19166,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
 
   /// ROS 에 물어본 결과. 아직 안 물어봤으면 모른다.
   RobotLinkProbe _probe = RobotLinkProbe.unknown;
+  ProjectBackendAge _age = const ProjectBackendAge();
   bool _probing = false;
   String? _fixMessage;
   bool _fixOk = true;
@@ -19197,9 +19203,21 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     } catch (_) {
       probe = RobotLinkProbe.unknown;
     }
+    // 떠 있는 백엔드가 지금 배포본으로 뜬 것인지도 함께 본다.
+    var age = const ProjectBackendAge();
+    final directory = widget.mapDirectory;
+    if (directory != null) {
+      try {
+        age = await readBackendAge(
+          mapDirectory: directory,
+          mapName: widget.mapName,
+        );
+      } catch (_) {}
+    }
     if (!mounted) return;
     setState(() {
       _probe = probe;
+      _age = age;
       _probing = false;
     });
   }
@@ -19217,6 +19235,11 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
         spawnX: registered?.spawnX,
         spawnY: registered?.spawnY,
         backendRunning: widget.backendRunning(),
+        staleBackendDetail: _age.stale
+            ? '${_hhmm(_age.startedAt!)} 에 뜬 월드입니다. '
+                  '배포는 ${_hhmm(_age.deployedAt!)} — 다시 띄우세요. '
+                  '`ros2 launch` 는 띄울 때 한 번만 파일을 읽습니다.'
+            : null,
         nodesUp: _probe.nodesUp,
         topicSeen: _probe.topicSeen,
         topicFlowing: _probe.topicFlowing,
@@ -19227,6 +19250,10 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       ),
     );
   }
+
+  static String _hhmm(DateTime at) =>
+      '${at.hour.toString().padLeft(2, '0')}:'
+      '${at.minute.toString().padLeft(2, '0')}';
 
   Future<void> _applyFix(RobotLinkAction action) async {
     final registered = _registered;

@@ -200,3 +200,58 @@ Future<RobotLinkFixResult> _run(
     return RobotLinkFixResult(ok: false, message: '$error');
   }
 }
+
+/// 지금 도는 백엔드가 언제 떴는지, 배포는 언제였는지.
+class ProjectBackendAge {
+  const ProjectBackendAge({this.startedAt, this.deployedAt});
+
+  /// 백엔드가 뜬 시각. 안 떠 있으면 null.
+  final DateTime? startedAt;
+
+  /// 마지막 배포 시각. 산출물이 없으면 null.
+  final DateTime? deployedAt;
+
+  /// 배포가 백엔드보다 나중인가.
+  ///
+  /// `ros2 launch` 는 파일을 띄울 때 한 번만 읽는다. 나중에 배포해도 이미 뜬
+  /// 월드에는 안 들어간다. 실제로 로봇 0대이던 시절의 Gazebo 가 34분째 돌고
+  /// 있었고, 그동안 토픽 이름만 있고 값은 하나도 안 왔다.
+  bool get stale =>
+      startedAt != null &&
+      deployedAt != null &&
+      deployedAt!.isAfter(startedAt!);
+}
+
+/// 백엔드가 뜬 시각과 마지막 배포 시각을 견준다.
+Future<ProjectBackendAge> readBackendAge({
+  required String mapDirectory,
+  required String mapName,
+}) async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) {
+    return const ProjectBackendAge();
+  }
+  DateTime? deployedAt;
+  // bringup 이 로봇 목록을 담는다. 이것이 바뀌었으면 다시 띄워야 한다.
+  final bringup = File('$mapDirectory/${mapName}_bringup.launch.xml');
+  if (bringup.existsSync()) deployedAt = bringup.lastModifiedSync();
+
+  DateTime? startedAt;
+  try {
+    // 가장 오래 산 것이 그 판을 띄운 프로세스다.
+    final found = await Process.run('bash', [
+      '-lc',
+      _withRosEnvironment(
+        'pgrep -u "\$(id -u)" -f ${_quote(mapDirectory)} '
+        "| xargs -r ps -o etimes= -p 2>/dev/null | sort -rn | head -1",
+      ),
+    ]).timeout(const Duration(seconds: 10));
+    final seconds = int.tryParse('${found.stdout}'.trim());
+    if (seconds != null && seconds > 0) {
+      startedAt = DateTime.now().subtract(Duration(seconds: seconds));
+    }
+  } catch (_) {
+    // 못 물어봤으면 모르는 채로 둔다.
+  }
+  return ProjectBackendAge(startedAt: startedAt, deployedAt: deployedAt);
+}
+

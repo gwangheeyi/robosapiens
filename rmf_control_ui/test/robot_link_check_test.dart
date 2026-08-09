@@ -15,6 +15,7 @@ void main() {
     double? spawnX = 1.761,
     double? spawnY = -1.025,
     bool backendRunning = true,
+    String? staleBackend,
     bool? nodesUp = true,
     bool? topicSeen = true,
     bool? topicFlowing = true,
@@ -27,6 +28,7 @@ void main() {
     spawnX: spawnX,
     spawnY: spawnY,
     backendRunning: backendRunning,
+    staleBackendDetail: staleBackend,
     nodesUp: nodesUp,
     topicSeen: topicSeen,
     topicFlowing: topicFlowing,
@@ -132,6 +134,25 @@ void main() {
         RobotLinkAction.spawnRobot.detail,
         contains('이미 떠 있는 월드에'),
       );
+    });
+  });
+
+  group('옛날 설정으로 뜬 백엔드', () {
+    test('떠 있어도 끊긴 것으로 본다', () {
+      // ros2 launch 는 띄울 때 한 번만 파일을 읽는다. 로봇 0대이던 시절의
+      // Gazebo 가 34분째 돌면서, 토픽 이름만 있고 값은 하나도 안 왔다.
+      final links = checkRobotLinks(
+        facts(staleBackend: '06:05 에 뜬 월드입니다. 배포는 06:39'),
+      );
+      expect(links[1].state, RobotLinkState.broken);
+      expect(links[1].detail, contains('06:39'));
+      expect(links[1].action, RobotLinkAction.startBackend);
+      // 뒤는 볼 수 없다. 엉뚱한 데를 고치게 하면 안 된다.
+      expect(links[2].state, RobotLinkState.unknown);
+    });
+
+    test('버튼 이름이 다시 띄우라고 말한다', () {
+      expect(RobotLinkAction.startBackend.label, '백엔드 다시 띄우기');
     });
   });
 }

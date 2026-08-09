@@ -41,7 +41,7 @@ enum RobotLinkAction {
 extension RobotLinkActionLabel on RobotLinkAction {
   String get label => switch (this) {
     RobotLinkAction.chooseStation => '자리 고르기',
-    RobotLinkAction.startBackend => '백엔드 띄우기',
+    RobotLinkAction.startBackend => '백엔드 다시 띄우기',
     RobotLinkAction.spawnRobot => '이 로봇만 올리기',
     RobotLinkAction.startBridge => '다리만 잇기',
     RobotLinkAction.resubscribe => '다시 구독하기',
@@ -91,6 +91,7 @@ class RobotLinkFacts {
     required this.spawnX,
     required this.spawnY,
     required this.backendRunning,
+    this.staleBackendDetail,
     required this.nodesUp,
     required this.topicFlowing,
     required this.topicSeen,
@@ -108,6 +109,13 @@ class RobotLinkFacts {
 
   /// 이 프로젝트의 백엔드가 떠 있는가.
   final bool backendRunning;
+
+  /// 배포가 백엔드보다 나중인가.
+  ///
+  /// `ros2 launch` 는 파일을 띄울 때 한 번만 읽는다. 나중에 배포해도 이미 뜬
+  /// 월드에는 안 들어간다. 로봇 0대이던 시절의 Gazebo 가 34분째 돌면서, 토픽
+  /// 이름만 있고 값은 하나도 안 온 일이 있었다.
+  final String? staleBackendDetail;
 
   /// 이 로봇의 노드가 떠 있는가 (`/<네임스페이스>/robot_state_publisher`).
   /// 확인 못 했으면 null. spawn launch 가 돌았는지를 말해 준다.
@@ -204,9 +212,14 @@ List<RobotLink> checkRobotLinks(RobotLinkFacts facts) {
 
   add(
     'Gazebo',
-    good: facts.backendRunning,
+    // 떠 있어도 옛날 설정으로 뜬 것이면 없는 것과 같다. 이름만 있고 값이
+    // 안 오는 상태가 되어, 아래 고리를 아무리 봐도 원인이 안 나온다.
+    good: facts.backendRunning && facts.staleBackendDetail == null,
     okDetail: '월드가 떠 있습니다.',
-    badDetail: '월드가 안 떠 있습니다. 올릴 곳이 없습니다.',
+    // 인자는 먼저 계산된다. 끊기지 않았을 때도 이 값이 만들어지므로 `!` 를
+    // 쓰면 안 된다.
+    badDetail:
+        facts.staleBackendDetail ?? '월드가 안 떠 있습니다. 올릴 곳이 없습니다.',
     action: RobotLinkAction.startBackend,
   );
 

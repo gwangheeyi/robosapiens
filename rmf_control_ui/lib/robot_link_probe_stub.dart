@@ -48,3 +48,18 @@ Future<RobotLinkFixResult> startSingleRobotBridge({
   ok: false,
   message: '웹에서는 다리를 띄울 수 없습니다.',
 );
+
+class ProjectBackendAge {
+  const ProjectBackendAge({this.startedAt, this.deployedAt});
+
+  final DateTime? startedAt;
+  final DateTime? deployedAt;
+
+  bool get stale => false;
+}
+
+Future<ProjectBackendAge> readBackendAge({
+  required String mapDirectory,
+  required String mapName,
+}) async => const ProjectBackendAge();
+
