@@ -11,7 +11,8 @@
 관련 문서: [Pinky 가상 로봇 · Fleet Adapter 연동](PINKY_FLEET_INTEGRATION.md) ·
 [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) ·
 [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) ·
-[좌표계](COORDINATE_FRAMES.md)
+[좌표계](COORDINATE_FRAMES.md) ·
+[Nav2 길](NAV2_PATH.md)
 
 ## 2. 무엇이 무엇을 띄우나
 

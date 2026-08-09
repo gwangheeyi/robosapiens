@@ -15,6 +15,8 @@ import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
+import 'occupancy_grid.dart';
+import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
 import 'operations_log.dart';
@@ -4095,6 +4097,64 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// Nav2 가 쓸 점유격자를 지금 도면에서 만든다.
+  ///
+  /// RMF 는 nav graph 만으로 길을 찾으므로 이 격자가 필요 없다. 필요한 것은
+  /// **로봇 쪽**이다 — AMCL 이 라이다로 제 위치를 잡고 Nav2 가 장애물을 피할 때
+  /// 쓴다. building.yaml 에 나가는 것과 **같은 원본**(바닥 다각형과 벽 선분)을
+  /// 쓰므로 Gazebo 에서 라이다가 보는 벽과 격자의 벽이 어긋나지 않는다.
+  OccupancyGrid? _buildOccupancyGrid() {
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return null;
+    GridPoint toWorld(Offset point) {
+      final world = rmfWorldFromPixel(point.dx, point.dy, scale);
+      return (x: world.x, y: world.y);
+    }
+
+    return buildOccupancyGrid(
+      floorOutline: [for (final point in _floorOutline()) toWorld(point)],
+      walls: [
+        for (final wall in _visibleWallSegments())
+          (toWorld(wall.$1), toWorld(wall.$2)),
+      ],
+      resolution: _occupancyResolution(),
+    );
+  }
+
+  double _occupancyResolution() {
+    final bounds = _floorBounds;
+    return occupancyResolutionFor(
+      robotWidth: _robotWidthMeters,
+      floorShorterSide: bounds == null
+          ? null
+          : math.min(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY),
+    );
+  }
+
+  /// 만든 격자를 맵 디렉터리에 쓴다. 조용히 한다.
+  ///
+  /// 도면에서 파생되는 산출물이라 `.world` 처럼 프로젝트를 내보낼 때마다 다시
+  /// 만든다. 실패해도 하려던 일(띄우기·내리기)은 계속한다.
+  Future<OccupancyGridExportResult?> _exportOccupancyGrid(
+    String mapName,
+  ) async {
+    final grid = _buildOccupancyGrid();
+    if (grid == null) return null;
+    try {
+      return await exportOccupancyGrid(
+        mapName: mapName,
+        grid: grid,
+        note:
+            'rmf_control_ui 가 $mapName 도면에서 만들었다. 손으로 고치면 다음 '
+            '내보내기 때 덮어써진다.\n'
+            '좌표는 RMF 월드 — 원점은 도면 왼쪽 위, 건물 안은 y 가 음수다.\n'
+            '벽 두께는 RMF 와 같은 ${rmfWallThickness}m 다.',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 자리 맞추기 창을 연다.
   Future<void> _showSpawnCheck() => showMovableDialog<void>(
     context: context,
@@ -7725,6 +7785,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         await _syncTelemetry();
       }
       if (_drawing != null) await _writeMapProject(project);
+      // Nav2 지도도 도면에서 파생되는 산출물이다. 도면이 바뀌었는데 예전 격자를
+      // 그대로 두면 AMCL 이 없는 벽을 보고 헤맨다.
+      await _exportOccupancyGrid(project);
       final files = await loadMapProjectFiles(project);
       if (files.isEmpty) return;
       await exportProjectConfigFiles(mapName: project, files: files);
