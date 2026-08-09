@@ -222,4 +222,35 @@ void main() {
     expect(find.textContaining('앱 Mock 데이터'), findsWidgets);
     expect(find.textContaining('앱 Mock 1'), findsOneWidget);
   });
+
+  testWidgets('자리 맞추기가 로봇 메뉴에 있다', (tester) async {
+    await openRobotMenu(tester);
+
+    // 좌표를 맞추는 과정이 눈에 안 보이는 곳에서만 일어나면, 로봇이 건물 밖
+    // 허공에 떨어져 있어도 사람이 알 길이 없다.
+    expect(find.text('자리 맞추기'), findsOneWidget);
+  });
+
+  testWidgets('축척이 없으면 무엇을 먼저 해야 하는지 알린다', (tester) async {
+    await openRobotMenu(tester);
+
+    await tester.tap(find.text('자리 맞추기'));
+    await tester.pumpAndSettle();
+
+    // 지도도 로봇도 없는 상태다. 빈 창만 띄우면 왜 아무것도 없는지 모른다.
+    expect(find.textContaining('맵 관리에서 길이 기준'), findsOneWidget);
+    expect(find.textContaining('축척(길이 기준)을 재고 로봇을 등록하면'), findsOneWidget);
+    // 맞출 것이 없을 때 버튼을 눌리게 두면 눌러도 아무 일이 없다.
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.ancestor(
+              of: find.text('맞출 것이 없습니다'),
+              matching: find.byType(FilledButton),
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
+  });
 }

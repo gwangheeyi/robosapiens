@@ -20,6 +20,7 @@ import 'rmf_project_config.dart';
 import 'operations_log.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
+import 'robot_spawn_check.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
 import 'rmf_project_runner.dart';
@@ -4060,6 +4061,93 @@ class _ControlDashboardState extends State<ControlDashboard> {
         )
         .map((entry) => entry.key)
         .firstOrNull;
+  }
+
+  /// 등록된 로봇의 자리가 지도와 맞는지 살핀다.
+  List<SpawnCheck> get _spawnChecks => checkRobotSpawns(
+    robots: _fleetRobots,
+    pixelOf: (robot) {
+      final station = _stationPixelFor(robot);
+      return station == null ? null : (dx: station.dx, dy: station.dy);
+    },
+    insideFloor: (dx, dy) => _isInsideFloor(Offset(dx, dy)),
+    metersPerPixel: _metersPerPixel,
+  );
+
+  /// 바닥이 있는 범위. RMF 월드 좌표(m).
+  ///
+  /// 자리가 이 밖이면 이동 로봇은 올라가자마자 허공에서 떨어진다.
+  ({double minX, double maxX, double minY, double maxY})? get _floorBounds {
+    final points = _floorMask?.points;
+    final scale = _metersPerPixel;
+    if (points == null || points.isEmpty || scale == null || scale <= 0) {
+      return null;
+    }
+    final pixels = _pointsBounds(points);
+    // y 는 뒤집히므로 아래쪽 픽셀이 더 작은 미터가 된다.
+    final topLeft = rmfWorldFromPixel(pixels.left, pixels.top, scale);
+    final bottomRight = rmfWorldFromPixel(pixels.right, pixels.bottom, scale);
+    return (
+      minX: topLeft.x,
+      maxX: bottomRight.x,
+      minY: bottomRight.y,
+      maxY: topLeft.y,
+    );
+  }
+
+  /// 자리 맞추기 창을 연다.
+  Future<void> _showSpawnCheck() => showMovableDialog<void>(
+    context: context,
+    builder: (_) => _SpawnCheckDialog(
+      checksOf: () => _spawnChecks,
+      metersPerPixel: _metersPerPixel,
+      floorBounds: _floorBounds,
+      onRefit: _refitSpawnPoints,
+      onHeading: _setSpawnHeading,
+    ),
+  );
+
+  /// 등록된 자리를 지금 지도 기준으로 다시 맞춘다. 바뀐 대수를 돌려준다.
+  Future<int> _refitSpawnPoints() async {
+    final before = _fleetRobots;
+    final after = _withMapSpawnPoints(before);
+    if (identical(after, before)) return 0;
+    var changed = 0;
+    for (var i = 0; i < after.length; i++) {
+      if (after[i].spawnX != before[i].spawnX ||
+          after[i].spawnY != before[i].spawnY) {
+        changed++;
+      }
+    }
+    setState(() => _fleetRobots = after);
+    await _syncTelemetry();
+    await _saveSettingToOpenProject(
+      label: '로봇 자리',
+      detail: '$changed대의 자리를 지도 기준으로 맞췄습니다.',
+    );
+    return changed;
+  }
+
+  /// 로봇이 그 자리에서 볼 방향을 정한다.
+  Future<void> _setSpawnHeading(RmfProjectRobot robot, double heading) async {
+    final index = _fleetRobots.indexWhere(
+      (item) => item.robotId == robot.robotId,
+    );
+    if (index < 0) return;
+    final updated = [..._fleetRobots];
+    updated[index] = robot.withSpawn(
+      spawnX: robot.spawnX,
+      spawnY: robot.spawnY,
+      spawnHeading: heading,
+    );
+    setState(() => _fleetRobots = updated);
+    await _syncTelemetry();
+    await _saveSettingToOpenProject(
+      label: '로봇 방향',
+      detail:
+          '${robot.robotId} 를 '
+          '${(heading * 180 / math.pi).toStringAsFixed(0)}° 로 돌렸습니다.',
+    );
   }
 
   /// 등록된 Gazebo 로봇의 위치 토픽을 구독한다.
@@ -9438,6 +9526,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   unawaited(_unregisterFleetRobot(robot)),
                               onRegisterFromChargers: () =>
                                   unawaited(_registerRobotsFromChargers()),
+                              onCheckSpawns: () =>
+                                  unawaited(_showSpawnCheck()),
+                              spawnChecks: _spawnChecks,
                               onStartBackend: _startBackendForOpenProject,
                               onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
@@ -11404,6 +11495,8 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onEditRegisteredRobot,
     required this.onUnregisterRobot,
     required this.onRegisterFromChargers,
+    required this.onCheckSpawns,
+    required this.spawnChecks,
     required this.onStartBackend,
     required this.onRefreshScripts,
     required this.telemetry,
@@ -11436,6 +11529,12 @@ class _RobotManagementPage extends StatefulWidget {
   final ValueChanged<RmfProjectRobot> onEditRegisteredRobot;
   final ValueChanged<RmfProjectRobot> onUnregisterRobot;
   final VoidCallback onRegisterFromChargers;
+
+  /// 등록된 로봇이 설 자리가 지도와 맞는지 살피는 창을 연다.
+  final VoidCallback onCheckSpawns;
+
+  /// 자리 점검 결과. 버튼에 경고를 띄울지 여기서 가린다.
+  final List<SpawnCheck> spawnChecks;
 
   /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
   final Future<void> Function() onStartBackend;
@@ -11782,6 +11881,13 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                   ],
                 ),
               ),
+              // 좌표가 틀려도 화면에서는 티가 안 난다. 문제가 있으면 버튼
+              // 자체가 붉어져서 누르기 전에 보이게 한다.
+              _SpawnCheckButton(
+                checks: widget.spawnChecks,
+                onPressed: widget.onCheckSpawns,
+              ),
+              const SizedBox(width: 6),
               TextButton.icon(
                 onPressed: widget.onRegisterFromChargers,
                 icon: const Icon(Icons.auto_awesome, size: 18),
@@ -17729,6 +17835,421 @@ class _OperationsAnalyticsPageState extends State<_OperationsAnalyticsPage> {
 /// 작업 상세는 "이 작업이 어떻게 되고 있나"를 본다. 이것은 "이 로봇이 어떤
 /// 로봇이고 지금 어떤가"를 본다. 로봇을 눌렀을 때 작업 이야기가 나오면 찾던
 /// 것이 아니다.
+/// `자리 맞추기` 버튼. 문제가 있으면 눌러 보기 전에 버튼이 알린다.
+class _SpawnCheckButton extends StatelessWidget {
+  const _SpawnCheckButton({required this.checks, required this.onPressed});
+
+  final List<SpawnCheck> checks;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final bad = checks.where((check) => !check.isOk).length;
+    final outside = checks
+        .where((check) => check.issue == SpawnIssue.outsideFloor)
+        .length;
+    // 바닥 밖은 이동 로봇을 허공에서 떨어뜨리므로 가장 세게 알린다.
+    final color = outside > 0
+        ? const Color(0xFFDC2626)
+        : bad > 0
+        ? const Color(0xFFEA580C)
+        : null;
+    return Tooltip(
+      message: checks.isEmpty
+          ? '축척과 등록된 로봇이 있어야 자리를 살필 수 있습니다.'
+          : spawnCheckSummary(checks),
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: color == null
+            ? null
+            : TextButton.styleFrom(
+                foregroundColor: color,
+                backgroundColor: color.withValues(alpha: .10),
+              ),
+        icon: Icon(
+          bad > 0 ? Icons.warning_amber_rounded : Icons.my_location,
+          size: 18,
+        ),
+        label: Text(bad > 0 ? '자리 맞추기 · $bad대' : '자리 맞추기'),
+      ),
+    );
+  }
+}
+
+/// 등록된 로봇이 설 자리가 지도와 맞는지 살피고 맞춘다.
+///
+/// 좌표는 눈에 안 보이는 값이라 틀려도 티가 안 난다. 홈1 에 올린 로봇이 건물
+/// 밖 허공에서 끝없이 떨어지고 있어도 화면은 멀쩡했다 — 바퀴는 허공에서도
+/// 돌아서 odom 이 정상으로 보였기 때문이다. 그래서 사람이 눌러서 확인할 수
+/// 있어야 한다.
+class _SpawnCheckDialog extends StatefulWidget {
+  const _SpawnCheckDialog({
+    required this.checksOf,
+    required this.metersPerPixel,
+    required this.floorBounds,
+    required this.onRefit,
+    required this.onHeading,
+  });
+
+  /// 지금 결과. 맞춘 뒤 다시 부른다.
+  final List<SpawnCheck> Function() checksOf;
+
+  final double? metersPerPixel;
+
+  /// 바닥이 있는 범위(m). 자리가 이 밖이면 로봇이 떨어진다.
+  final ({double minX, double maxX, double minY, double maxY})? floorBounds;
+
+  /// 지도 기준으로 다시 맞춘다. 몇 대가 바뀌었는지 돌려준다.
+  final Future<int> Function() onRefit;
+
+  /// 이 로봇이 그 자리에서 볼 방향을 정한다. 라디안.
+  final Future<void> Function(RmfProjectRobot robot, double heading) onHeading;
+
+  @override
+  State<_SpawnCheckDialog> createState() => _SpawnCheckDialogState();
+}
+
+class _SpawnCheckDialogState extends State<_SpawnCheckDialog> {
+  bool _working = false;
+
+  static const Map<SpawnIssue, Color> _colors = {
+    SpawnIssue.ok: Color(0xFF16A34A),
+    SpawnIssue.outsideFloor: Color(0xFFDC2626),
+    SpawnIssue.stale: Color(0xFFEA580C),
+    SpawnIssue.noStation: Color(0xFFEA580C),
+    SpawnIssue.noCoordinate: Color(0xFF64748B),
+  };
+
+  /// 방향은 8방위면 충분하다. 자리에 세우는 것이지 정밀 정렬이 아니다.
+  static const List<(double, String)> _headings = [
+    (0, '0° 오른쪽'),
+    (45, '45°'),
+    (90, '90° 위'),
+    (135, '135°'),
+    (180, '180° 왼쪽'),
+    (225, '225°'),
+    (270, '270° 아래'),
+    (315, '315°'),
+  ];
+
+  String _meters(({double x, double y})? point) => point == null
+      ? '없음'
+      : '${point.x.toStringAsFixed(3)}, ${point.y.toStringAsFixed(3)} m';
+
+  Future<void> _refit() async {
+    setState(() => _working = true);
+    try {
+      final changed = await widget.onRefit();
+      if (!mounted) return;
+      setState(() {});
+      final message = changed == 0
+          ? '바꿀 자리가 없었습니다.'
+          : '$changed대의 자리를 지도 기준으로 맞췄습니다.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            changed == 0
+                ? message
+                : '$message 이미 Gazebo에 올라간 로봇은 그대로입니다 — '
+                      '백엔드를 내렸다가 다시 띄워 주세요.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  String _asText(List<SpawnCheck> checks) {
+    final buffer = StringBuffer()
+      ..writeln('자리 맞추기')
+      ..writeln(spawnCheckSummary(checks))
+      ..writeln();
+    final scale = widget.metersPerPixel;
+    buffer.writeln(
+      scale == null
+          ? '축척: 없음 (맵 관리에서 길이 기준을 먼저 재야 합니다)'
+          : '축척: ${scale.toStringAsFixed(6)} m/px '
+                '(${(1 / scale).toStringAsFixed(0)} px/m)',
+    );
+    final bounds = widget.floorBounds;
+    if (bounds != null) {
+      buffer.writeln(
+        '바닥: x ${bounds.minX.toStringAsFixed(2)} ~ '
+        '${bounds.maxX.toStringAsFixed(2)} m · '
+        'y ${bounds.minY.toStringAsFixed(2)} ~ '
+        '${bounds.maxY.toStringAsFixed(2)} m',
+      );
+    }
+    for (final check in checks) {
+      buffer
+        ..writeln()
+        ..writeln(
+          '${check.robot.robotId} · ${check.robot.displayName} '
+          '(${check.robot.chargerWaypoint ?? '자리 없음'}) — '
+          '${check.issue.label}',
+        )
+        ..writeln('  저장된 자리: ${_meters(check.stored)}')
+        ..writeln('  지도 기준  : ${_meters(check.fromMap)}')
+        ..writeln(
+          '  방향       : '
+          '${(check.robot.spawnHeading * 180 / math.pi).toStringAsFixed(0)}°',
+        )
+        ..writeln('  ${check.issue.detail}');
+    }
+    return buffer.toString();
+  }
+
+  Widget _summaryLine(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 52,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        Expanded(child: SelectableText(value)),
+      ],
+    ),
+  );
+
+  Widget _card(SpawnCheck check) {
+    final color = _colors[check.issue]!;
+    final robot = check.robot;
+    final degrees = (robot.spawnHeading * 180 / math.pi) % 360;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: check.isOk ? .05 : .10),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: color, width: check.isOk ? 1 : 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                check.isOk
+                    ? Icons.check_circle_outline
+                    : Icons.warning_amber_rounded,
+                color: color,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SelectableText(
+                  '${robot.robotId} · ${robot.displayName}',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  check.issue.label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _summaryLine(
+            '자리',
+            '${robot.chargerWaypoint ?? '고르지 않았습니다'}'
+                ' (${robot.kind.waypointCategory})',
+          ),
+          _summaryLine('저장', _meters(check.stored)),
+          if (check.fromMap != null &&
+              (check.stored == null ||
+                  check.issue != SpawnIssue.ok))
+            _summaryLine('지도', '${_meters(check.fromMap)}  ← 맞추면 이 값이 됩니다'),
+          const SizedBox(height: 4),
+          SelectableText(
+            check.issue.detail,
+            style: TextStyle(color: color, fontSize: 12, height: 1.4),
+          ),
+          // 자리를 못 찾으면 `맞추기` 로도 못 고친다. 눌러도 안 바뀌는 이유를
+          // 여기서 알려 준다.
+          if (check.fromMap == null && check.issue != SpawnIssue.noStation)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: SelectableText(
+                '자리 Waypoint `${robot.chargerWaypoint ?? ''}` 를 지도에서 '
+                '못 찾아서 `맞추기` 로는 고칠 수 없습니다. '
+                '로봇 등록에서 자리를 다시 골라 주세요.',
+                style: TextStyle(color: color, fontSize: 12, height: 1.4),
+              ),
+            ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const SizedBox(
+                width: 52,
+                child: Text(
+                  '방향',
+                  style: TextStyle(
+                    color: Color(0xFF64748B),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              DropdownButton<double>(
+                value: _headings
+                    .map((item) => item.$1)
+                    .firstWhere(
+                      (value) => (value - degrees).abs() < .5,
+                      orElse: () => 0,
+                    ),
+                isDense: true,
+                underline: const SizedBox.shrink(),
+                items: [
+                  for (final item in _headings)
+                    DropdownMenuItem(value: item.$1, child: Text(item.$2)),
+                ],
+                onChanged: _working
+                    ? null
+                    : (value) async {
+                        if (value == null) return;
+                        await widget.onHeading(robot, value * math.pi / 180);
+                        if (mounted) setState(() {});
+                      },
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  '이 자리에서 로봇이 볼 방향입니다.',
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final checks = widget.checksOf();
+    final scale = widget.metersPerPixel;
+    final bounds = widget.floorBounds;
+    final fixable = checks.where((check) => check.willChange).length;
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.my_location, size: 22),
+          SizedBox(width: 8),
+          Text('자리 맞추기'),
+        ],
+      ),
+      content: SizedBox(
+        width: 720,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(11),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF1F5F9),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _summaryLine(
+                    '축척',
+                    scale == null
+                        ? '없습니다 — 맵 관리에서 길이 기준을 먼저 재 주세요.'
+                        : '${scale.toStringAsFixed(6)} m/px '
+                              '(${(1 / scale).toStringAsFixed(0)} px/m)',
+                  ),
+                  _summaryLine(
+                    '바닥',
+                    bounds == null
+                        ? '바닥 영역이 없습니다 — 맵 관리에서 바닥을 먼저 그려 주세요.'
+                        : 'x ${bounds.minX.toStringAsFixed(2)} ~ '
+                              '${bounds.maxX.toStringAsFixed(2)} m · '
+                              'y ${bounds.minY.toStringAsFixed(2)} ~ '
+                              '${bounds.maxY.toStringAsFixed(2)} m',
+                  ),
+                  _summaryLine('결과', spawnCheckSummary(checks)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: checks.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Text(
+                        '살펴볼 것이 없습니다.\n\n'
+                        '축척(길이 기준)을 재고 로봇을 등록하면 여기서 '
+                        '자리가 지도와 맞는지 확인할 수 있습니다.',
+                        style: TextStyle(color: Color(0xFF64748B), height: 1.6),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      child: Column(
+                        children: [for (final check in checks) _card(check)],
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: _asText(checks)));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('내용을 복사했습니다.')));
+          },
+          icon: const Icon(Icons.copy_all_outlined, size: 18),
+          label: const Text('복사'),
+        ),
+        FilledButton.icon(
+          onPressed: _working || fixable == 0 ? null : _refit,
+          icon: _working
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.auto_fix_high, size: 18),
+          label: Text(
+            fixable == 0 ? '맞출 것이 없습니다' : '지도 기준으로 맞추기 · $fixable대',
+          ),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('닫기'),
+        ),
+      ],
+    );
+  }
+}
+
 class _RobotDetailDialog extends StatefulWidget {
   const _RobotDetailDialog({
     required this.robotId,
