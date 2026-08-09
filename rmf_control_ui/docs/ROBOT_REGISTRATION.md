@@ -130,6 +130,10 @@ rmf_maps/gwanghee/
 ├── gwanghee.building.yaml          건물 맵
 ├── gwanghee.world                  Gazebo 월드
 ├── nav_graphs/0.yaml               주행 그래프
+├── nav2_map/                       Nav2 점유격자 — 도면에서 만든다
+│   ├── gwanghee.pgm
+│   ├── gwanghee.yaml
+│   └── README.md
 │
 ├── gwanghee_pinky_config.yaml      fleet adapter (이동 로봇만)
 ├── fleet.yaml                      로봇 목록 요약
@@ -137,6 +141,8 @@ rmf_maps/gwanghee/
 │
 ├── gwanghee.launch.xml             Open-RMF 실행
 ├── gwanghee_bringup.launch.xml     Gazebo 실행 — 아래 것들을 include
+├── gwanghee_nav2.launch.xml        Nav2 실행 — 지도 하나 + 로봇마다 한 벌
+├── gwanghee_nav2_adapter.py        RMF ↔ Nav2 를 잇는다
 ├── run_gwanghee.sh                 전체 실행
 ├── stop_gwanghee.sh                정리
 │
@@ -144,14 +150,21 @@ rmf_maps/gwanghee/
     ├── PK-01/
     │   ├── robot.yaml              등록 정보
     │   ├── spawn.launch.xml        이 로봇만 올리는 launch
+    │   ├── robot_description.sh    URDF 를 만든다 (벤더 xacro 를 손본다)
+    │   ├── nav2.launch.xml         이 로봇의 Nav2
+    │   ├── nav2_params.yaml        이 로봇 이름에 맞춘 Nav2 파라미터
     │   ├── bridge.yaml             이 로봇의 토픽 (보기용)
     │   └── README.md               설명
     └── OMX-01/
         ├── robot.yaml
         ├── spawn.launch.xml
+        ├── robot_description.sh
         ├── bridge.yaml
         └── README.md
 ```
+
+설치 로봇에는 `nav2.launch.xml` 과 `nav2_params.yaml` 이 없습니다. 한자리에 붙어
+있어 길을 찾을 일이 없습니다.
 
 **한 대를 빼거나 옮길 때 그 디렉터리만 보면 됩니다.**
 
@@ -191,36 +204,50 @@ station_waypoint: OMX1 # 설비 자리
 
 프로젝트 bringup 이 이 파일을 `<include>` 합니다.
 
-**이동 로봇** — `pinky_description` 이 URDF 를 `robot_description` 토픽에 올리고,
-`create` 가 그 토픽에서 스폰합니다.
+**이동 로봇** — `robot_description.sh` 가 URDF 를 만들고
+`robot_state_publisher` 가 그것을 토픽에 올리면, `create` 가 그 토픽에서
+스폰합니다.
 
 ```xml
 <launch>
   <group>
-    <include file="$(find-pkg-share pinky_description)/launch/upload_robot.launch.py">
-      <arg name="namespace" value="pinky_01"/>
-      <arg name="use_sim_time" value="True"/>
-      <arg name="is_sim" value="True"/>
-    </include>
+    <push-ros-namespace namespace="pinky_01"/>
+    <node pkg="robot_state_publisher" exec="robot_state_publisher"
+          name="robot_state_publisher" output="screen">
+      <param name="use_sim_time" value="True"/>
+      <param name="frame_prefix" value="pinky_01/"/>
+      <param name="robot_description"
+             value="$(command '$(dirname)/robot_description.sh')"/>
+    </node>
+    <node pkg="joint_state_publisher" exec="joint_state_publisher"
+          name="joint_state_publisher" output="screen">
+      <param name="source_list" value="[joint_states]"/>
+    </node>
     <node pkg="ros_gz_sim" exec="create" output="screen"
           args="-name pinky_01 -topic /pinky_01/robot_description
-                -x 1.482 -y 0.517 -z 0.1 -Y 0.000">
+                -x 1.761 -y -0.638 -z 0.1 -Y 0.000">
       <param name="use_sim_time" value="True"/>
     </node>
   </group>
 </launch>
 ```
 
-`namespace` 인자 **하나**가 세 가지를 함께 정합니다. 여기에
-`<push-ros-namespace>` 를 겹쳐 걸면 노드만 두 겹이 되어 셋이 어긋나고, `create`
+> 벤더의 `upload_robot.launch.py` 를 쓰지 않습니다. 그 launch 가 펼치는 xacro 는
+> **`<gazebo reference>` 에만 네임스페이스를 붙여서 라이다·카메라·IMU 가 통째로
+> 버려집니다.** `robot_description.sh` 가 펼친 뒤 그것을 고칩니다. 벤더 launch 가
+> 하던 일(`frame_prefix` · `joint_state_publisher`)은 그대로 맞춰 두었습니다.
+> 자세한 것은 [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) 함정 6.
+
+네임스페이스는 그룹에 **한 번만** 겁니다. 노드에 또 걸면 두 겹이 되어, `create`
 가 오지 않을 `robot_description` 을 영영 기다립니다.
 
 1. 노드 네임스페이스 — `/pinky_01/robot_state_publisher`
 2. URDF 링크·프레임 접두사 — `pinky_01/base_link`
 3. Gazebo 플러그인의 토픽 접두사 — `/pinky_01/odom`
 
-`is_sim:=True` 가 빠지면 diff drive 도 LiDAR 도 없는 껍데기가 스폰됩니다.
-보이기는 하는데 `cmd_vel` 을 줘도 꿈쩍하지 않습니다.
+`robot_description.sh` 가 xacro 에 `is_sim:=true` 를 넘깁니다. 이것이 빠지면
+diff drive 도 LiDAR 도 없는 껍데기가 스폰됩니다. 보이기는 하는데 `cmd_vel` 을
+줘도 꿈쩍하지 않습니다.
 
 **설치 로봇** — xacro 를 직접 펼쳐 올리고 ros2_control 컨트롤러를 붙입니다.
 
@@ -232,7 +259,7 @@ station_waypoint: OMX1 # 설비 자리
       <param name="use_sim_time" value="True"/>
       <param name="frame_prefix" value="omx_01/"/>
       <param name="robot_description"
-             value="$(command 'xacro $(find-pkg-share open_manipulator_description)/urdf/open_manipulator_x/open_manipulator_x.urdf.xacro use_sim:=true')"/>
+             value="$(command '$(dirname)/robot_description.sh')"/>
     </node>
     <node pkg="ros_gz_sim" exec="create" output="screen"
           args="-name omx_01 -topic robot_description

@@ -33,20 +33,39 @@ Nav2 길로 가면 Gazebo에서 만든 것이 실물에 **그대로** 갑니다.
 | 단계 | 상태 |
 |------|------|
 | ① 점유격자 지도 | **끝** — 앱이 도면에서 만듭니다 |
-| ② Nav2 네임스페이스 정리 | 아직 |
-| ③ EasyFullControl 어댑터 | 아직 |
+| ② Nav2 네임스페이스 정리 | **끝** — 핑키 두 대로 확인했습니다 |
+| ③ EasyFullControl 어댑터 | **거의** — 충전 Waypoint 하나가 막고 있습니다 |
 | ④ 실물 핑키 | 아직 |
 
-### 지금 끊겨 있는 곳
+### 실제로 확인한 것
 
 ```
-/robot_state          Publisher 0   Subscription 1   ← RMF가 듣는데 아무도 말 안 함
-/robot_path_requests  Publisher 1   Subscription 0   ← RMF가 말하는데 아무도 안 들음
+/pinky_01/scan        9.91Hz          /pinky_02/scan   9.96Hz
+URDF                  pinky_01/…                       pinky_02/…
+map → odom            [1.761, −0.638]                  [0.312, −0.299]
+노드                   17개                              17개
 ```
 
-`rmf_demos_fleet_adapter`는 이 두 토픽으로 로봇을 몹니다. 양쪽 다 상대가
-없습니다. **RMF가 허공에 배차하고 있습니다.** 화면에서 로봇이 움직이는 것은
-앱이 계산한 값입니다. ③에서 이 고리를 잇습니다.
+pinky_01에만 `cmd_vel`을 주면 **1.761 → 2.112(0.351m)** 움직이고 pinky_02는
+**그대로**입니다. 서로 간섭하지 않습니다.
+
+AMCL이 도면에서 만든 지도(`154 × 172 @ 0.021 m/pix`)로 홈1에서 정확히 자리를
+잡습니다. **맞추는 작업은 한 번도 없었습니다.**
+
+### 아직 막혀 있는 곳
+
+어댑터가 뜨고 로봇을 등록하다 죽습니다.
+
+```
+[FleetUpdateHandle::add_robot] Unable to find nearest charging waypoint.
+```
+
+`building.yaml`에는 **충전1**이 있는데 **Lane이 하나도 안 붙어 있어** nav
+graph로 넘어가지 못했습니다. nav graph의 waypoint 8개 중 충전 waypoint가
+**0개**입니다.
+
+> **할 일** — 맵 관리에서 **충전1에 Lane을 연결**하고 배포하면 nav graph에
+> 들어갑니다. RMF는 로봇을 플릿에 넣을 때 충전 Waypoint를 최소 하나 요구합니다.
 
 ---
 
@@ -122,46 +141,84 @@ ros2 lifecycle set /map_server activate
 
 ---
 
-## 4. ② Nav2 네임스페이스 — 다음
+## 4. ② Nav2 네임스페이스 — 끝
 
-`pinky_navigation/params/nav2_params.yaml`이 네임스페이스를 모릅니다.
+`pinky_navigation/params/nav2_params.yaml`은 로봇 한 대를 전제로 쓰였습니다. 두
+대를 올리면 **서로의 라이다를 보고** TF가 충돌합니다.
+
+**벤더 파일은 고치지 않습니다.** 읽어서 로봇마다 다시 씁니다. 벤더가 맞춰 둔
+속도·컨트롤러 설정과 주석을 그대로 살리면서 이름만 가릅니다. 실제 파일(337줄)에
+돌려 **31개를 바꾸고 경고 0개**입니다.
+
+| | |
+|---|---|
+| **가름** | `base_frame_id`·`odom_frame_id`·`robot_base_frame`·`local_frame`, local costmap의 `global_frame`, 라이다·오도메트리 토픽 |
+| **함께 씀** | `map` 프레임 — 같은 건물이니까요 |
+
+### 맨 위 칸의 노드 이름도 갈라야 합니다
 
 ```yaml
-scan_topic: scan            global_frame_id: "map"
-topic: /scan                odom_frame_id: "odom"
-                            robot_base_frame: base_footprint
+amcl:            →   /pinky_01/amcl:
+local_costmap:   →   /pinky_01/local_costmap:
 ```
 
-핑키 두 대를 올리면 **서로의 라이다를 보고** `map`·`odom` TF가 충돌합니다.
-벤더 bridge yaml이 상대 이름을 써서 로봇들이 서로 부딪혔던 것과 같은
-문제입니다 — [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md)를 보세요.
+`amcl:`은 `/amcl`을 뜻합니다. 그대로 두면 `/pinky_01/amcl`에는 **파라미터가
+하나도 안 붙고 조용히 기본값으로 돕니다.** 오류도 안 납니다.
 
-로봇마다 갈라야 할 것:
+### 벤더 파일의 버그 하나
 
-- 토픽 — `/pinky_01/scan`, `/pinky_01/cmd_vel`, `/pinky_01/odom`
-- TF 프레임 — `pinky_01/base_footprint`, `pinky_01/odom`
-- `map`은 **함께 씁니다.** 같은 건물이니까요
+```yaml
+initial_pose: [0, 0, 0]      # AMCL이 못 읽습니다
+```
+
+AMCL은 `initial_pose.x/.y/.z/.yaw`로 선언합니다. 리스트는 맞는 이름이 없어
+**조용히 버려집니다.** 다시 쓸 때 제대로 된 모양으로 고치면서 **로봇을 올린
+자리**를 넣습니다. 자리 맞추기에서 고친 spawn 좌표가 그대로 AMCL 초기 위치가
+됩니다.
+
+### 지도는 `/map`을 쓸 수 없습니다
+
+RMF의 `building_map_server`가 이미 그 이름으로 `BuildingMap`을 냅니다. 같이
+쓰면 한 토픽에 형식이 둘 올라갑니다.
+
+```
+/map   Type: ['nav_msgs/msg/OccupancyGrid', 'rmf_building_map_msgs/msg/BuildingMap']
+```
+
+`/nav2_map`으로 옮겼습니다. costmap의 `static_layer`도 지도를 따로 구독하는데
+벤더 파일에 그 토픽이 안 적혀 있어 기본값 `map`, 즉 `/pinky_01/map`을 보고
+있었습니다. 다시 쓸 때 넣어 줍니다.
+
+### `lifecycle_manager`만은 벽시계로 잽니다
+
+전이 응답을 기다리는 시간 제한이 sim 시계에 걸리면 **`Configuring`에서 영영
+멈춥니다.** 실제로 `map_server`가 거기서 멈춰 있었습니다. 관리자가 하는 일은
+순서대로 켜고 끄는 것뿐이라 벽시계가 맞습니다.
 
 ---
 
-## 5. ③ EasyFullControl 어댑터 — 그다음
+## 5. ③ EasyFullControl 어댑터 — 거의
 
-`rmf_demos_fleet_adapter`(slotcar 전용)를 걷어내고, RMF와 Nav2를 잇는 노드를
-둡니다. `rmf_adapter.EasyFullControl`이 Python으로 열려 있습니다.
-
-```python
-from rmf_adapter import EasyFullControl
-from rmf_adapter.easy_full_control import (
-    RobotCallbacks, Destination, RobotState, FleetConfiguration,
-)
-```
-
-이을 것 둘:
+`rmf_demos_fleet_adapter`(slotcar 전용) 대신 `<맵>_nav2_adapter.py`를 앱이
+만듭니다. `rmf_adapter.EasyFullControl`이 Python으로 열려 있습니다.
 
 | 방향 | RMF | 로봇 |
 |------|-----|------|
 | 명령 | `Destination` (nav graph waypoint) | Nav2 `NavigateToPose` |
-| 보고 | `RobotState` (위치·배터리·상태) | `/amcl_pose`, 배터리 토픽 |
+| 보고 | `RobotState` (위치·배터리) | TF `map → <로봇>/base_footprint` |
+
+**RMF가 아는 이름과 ROS 네임스페이스가 다릅니다** — RMF는 `PK-01`을, ROS는
+`pinky_01`을 압니다. 그 짝도 어댑터가 짓습니다.
+
+### 설정은 이미 맞습니다
+
+우리가 만들던 fleet adapter 설정이 `FleetConfiguration.from_config_files`에
+**스키마 그대로** 읽힙니다. 플릿 이름·로봇 목록·nav graph를 다 가져옵니다.
+
+### 확인한 것과 막힌 것
+
+어댑터가 떠서 로봇을 RMF에 등록하는 데까지 갑니다. 그다음 §2의 충전 Waypoint
+문제로 멈춥니다.
 
 **이 노드가 실물에서도 그대로 돕니다.** Nav2가 아래에서 Gazebo를 몰든 진짜
 모터를 몰든 위쪽은 같기 때문입니다.
@@ -192,3 +249,140 @@ SLAM 지도의 원점은 **로봇이 SLAM을 시작한 자리**이고, RMF의 �
 
 > 도면이 실제 건물과 충분히 같다면 SLAM 지도 없이 도면 지도를 그대로 써도
 > 됩니다. 많은 현장이 그렇게 합니다. 겹쳐 보고 정하면 됩니다.
+
+---
+
+## 7. 라이다가 아예 안 돌던 세 겹
+
+Nav2를 붙이려다 발견했습니다. **AMCL은 라이다가 없으면 아무것도 못 합니다.**
+세 가지가 겹쳐 있었고, 하나만 고쳐서는 안 됐습니다.
+
+**셋 다 오류를 내지 않습니다.** 토픽 이름은 다리(bridge)가 만들어서 보이는데
+데이터만 영영 안 옵니다.
+
+### 겹 ① 월드에 센서 시스템이 없다
+
+월드는 `rmf_building_map_tools`가 제 템플릿(`gz_world.sdf`)에서 만드는데,
+거기에는 시스템 플러그인이 **셋뿐**입니다 — Physics · UserCommands ·
+SceneBroadcaster. RMF의 시범 로봇(slotcar)은 라이다를 안 쓰니 필요가
+없었습니다.
+
+실행 스크립트가 **매번 채웁니다**(`ensure_world_sensors`). 배포할 때마다 월드가
+다시 만들어지므로 한 번 넣고 마는 것으로는 안 됩니다.
+
+```xml
+<plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+  <render_engine>ogre2</render_engine>
+</plugin>
+<plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+```
+
+### 겹 ② 헤드리스에 렌더링이 없다
+
+`gz sim -s`는 그릴 자리가 없습니다. **gpu_lidar는 GPU로 거리를 잽니다.** 그릴
+자리가 없으면 아무것도 발행하지 않습니다. bringup에 헤드리스 렌더링 옵션을
+넣었습니다.
+
+> XML 주석 안에는 붙임표 두 개를 쓸 수 없습니다. 옵션 이름을 주석에 그대로
+> 적었다가 파일이 깨져 bringup이 통째로 안 떴습니다.
+
+### 겹 ③ 벤더 xacro의 `<gazebo reference>` 접두사
+
+```xml
+<link name="rplidar_link"/>                   ← 접두사 없음
+<gazebo reference="pinky_01/rplidar_link">    ← 접두사 있음  ✗
+  <sensor name="pinky_01/gpu_lidar" type="gpu_lidar">
+```
+
+맞는 링크가 없으니 그 `<gazebo>` 블록이 **통째로 버려집니다.** 라이다·카메라·
+IMU가 하나도 안 올라가고, 바퀴 마찰(`mu1`·`mu2`·`kp`)도 같이 사라집니다.
+
+링크에 접두사를 안 붙이는 것은 **일부러**입니다 — TF는
+`robot_state_publisher`의 `frame_prefix`가 붙입니다. 그러니 `reference` 쪽을
+떼는 것이 맞습니다.
+
+**무조건 떼면 안 됩니다.** 조인트 이름에는 접두사가 붙어 있습니다.
+
+```
+reference="rplidar_link"                          ← 링크: 뗐음
+reference="pinky_01/robot_lamp_mount_fixed_joint" ← 조인트: 그대로
+```
+
+가리키는 것이 링크일 때만 뗍니다. 뗀 뒤에도 붙을 곳이 없으면 경고합니다 —
+벤더가 파일을 바꾸면 여기 걸립니다. 벤더 파일은 건드리지 않고 펼친 뒤에
+고칩니다(`robots/<ID>/robot_description.sh`). OMX에 쓰던 방식과 같습니다.
+
+---
+
+## 8. 로봇 두 대를 올릴 때 — arg 이름이 겹칩니다
+
+pinky_02가 **pinky_01의 URDF로** 올라갔습니다. 라이다도 odom도 안 나왔습니다.
+
+로봇마다 만드는 `spawn.launch.xml`이 저마다 이렇게 선언했습니다.
+
+```xml
+<arg name="robot_dir" default="$(dirname)"/>
+```
+
+**같은 이름의 `<arg>`를 여러 include가 선언하면 launch 안에서 범위가 겹쳐 먼저
+읽은 값이 나머지에 쓰입니다.** PK-02가 PK-01 디렉터리의 스크립트를 돌렸습니다.
+
+arg를 없애고 `$(dirname)`을 쓰는 자리에 직접 적습니다. 파일마다 제 자리를
+가리키고 이름이 겹칠 일도 없습니다.
+
+> [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md)의 함정들과 같은 부류입니다
+> — 겉으로는 조용하고, 증상은 엉뚱한 데서 나타납니다.
+
+---
+
+## 9. 확인할 때 걸리는 것
+
+### `tf2_echo`는 sim 시간을 켜야 합니다
+
+안 켜면 **프레임이 없다고 나옵니다.** AMCL이 안 도는 것처럼 보여서 한참
+헤맸습니다.
+
+```bash
+# 이렇게 하면 "Invalid frame ID map ... does not exist"
+ros2 run tf2_ros tf2_echo map pinky_01/base_footprint
+
+# 이렇게 해야 보입니다
+ros2 run tf2_ros tf2_echo map pinky_01/base_footprint \
+  --ros-args -p use_sim_time:=true
+```
+
+### 라이다가 도는지 보는 법
+
+토픽 이름이 보이는 것은 아무 뜻이 없습니다 — 다리가 만든 것입니다. **Gazebo
+쪽에 발행자가 있는지**를 봐야 합니다.
+
+```bash
+gz topic -i -t /pinky_01/scan     # "No publishers" 면 센서가 안 도는 것
+ros2 topic hz /pinky_01/scan      # 10Hz 정도 나와야 정상
+```
+
+### 머신 용량
+
+Gazebo(라이다 2개) + Nav2 2벌 + RMF + 앱을 한 머신에서 돌리면 **부하 26 / 코어
+12**가 나옵니다. 스캔이 시계보다 2~3초 뒤처지고 AMCL이 흔들립니다.
+
+설계 문제가 아니라 용량 문제입니다. **실제 운용에서는 로봇의 Nav2가 로봇 위에서
+도므로** 이 부하는 생기지 않습니다. 시뮬레이터에서 여러 대를 함께 시험할 때만
+겪습니다.
+
+---
+
+## 10. 점검표
+
+이 순서대로 확인하면 어디서 끊겼는지 알 수 있습니다.
+
+| # | 확인 | 정상 |
+|---|------|------|
+| 1 | `gz topic -i -t /<로봇>/scan` | 발행자 1 |
+| 2 | `ros2 topic hz /<로봇>/scan` | 10Hz 안팎 |
+| 3 | `ros2 topic info /nav2_map` | `OccupancyGrid`, 발행자 1 |
+| 4 | `ros2 lifecycle get /map_server` | `active` |
+| 5 | `ros2 lifecycle get /<로봇>/amcl` | `active` |
+| 6 | `tf2_echo map <로봇>/base_footprint` (**sim 시간 켜고**) | 자리가 나옴 |
+| 7 | nav graph에 `is_charger` | 최소 1개 |
+| 8 | 어댑터 로그 | `RMF 에 붙었습니다` |

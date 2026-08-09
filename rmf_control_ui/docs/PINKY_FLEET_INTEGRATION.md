@@ -278,13 +278,19 @@ ros2 run ros_gz_sim create -name pinky_01 -topic /pinky_01/robot_description ...
 
 ### 6.3.2 네임스페이스는 한 번만 건다
 
-`upload_robot.launch.py`의 `namespace` 인자 **하나**가 세 가지를 함께 정합니다.
+xacro 에 넘기는 `namespace` 인자 **하나**가 세 가지를 함께 정합니다.
 
 1. 노드 네임스페이스 (`/pinky_01/robot_state_publisher`)
 2. URDF 링크·프레임 접두사 (`pinky_01/base_link`)
 3. Gazebo 플러그인의 토픽 접두사 (`/pinky_01/odom`)
 
-여기에 `<push-ros-namespace>`를 겹쳐 걸면 **1번만 두 배**가 되어 셋이 어긋납니다.
+네임스페이스를 두 번 걸면 **1번만 두 배**가 되어 셋이 어긋납니다.
+
+> 지금은 벤더의 `upload_robot.launch.py` 를 쓰지 않고 `robot_description.sh` 로
+> 직접 펼칩니다 — 그 launch 가 펼치는 xacro 에서 라이다·카메라·IMU 가 통째로
+> 버려지기 때문입니다. 자세한 것은
+> [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) 함정 6 과
+> [Nav2 길](NAV2_PATH.md) §7.
 
 ```
 /pinky_01/pinky_01/robot_state_publisher   ← 노드는 두 겹
@@ -892,6 +898,9 @@ rmf-web WebSocket ws://127.0.0.1:8000/_internal
   흘러가는지, `robots/<로봇 ID>/` 에 무엇이 들어 있는지
 - [관제 노드별 하는 일](RMF_NODES.md) — 백엔드를 띄우면 어떤 노드가 올라오고
   무엇이 없으면 무엇이 안 되는지
+- [좌표계](COORDINATE_FRAMES.md) — 로봇이 홈1이 아니라 0,0 에 있을 때
+- [Gazebo에서 실물 핑키까지 — Nav2 길](NAV2_PATH.md) — 점유격자·Nav2·
+  EasyFullControl 어댑터
 - [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) — 네임스페이스가 닿아야
   하는 네 곳과 이번에 밟은 함정 넷
 - [맵 작성 및 배포 가이드](MAP_AUTHORING_AND_DEPLOYMENT.md) — 맵을 만들고

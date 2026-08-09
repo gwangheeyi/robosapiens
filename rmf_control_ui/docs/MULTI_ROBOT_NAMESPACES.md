@@ -9,7 +9,7 @@
 안 걸었을 때보다 나쁜 증상이 나옵니다 — 조용히 멈추거나, 상관없는 로봇까지
 같이 죽습니다.
 
-이 문서는 이번에 실제로 밟은 함정 넷을 증거와 함께 정리합니다.
+이 문서는 실제로 밟은 함정 여섯을 증거와 함께 정리합니다.
 
 | # | 함정 | 증상 |
 |---|---|---|
@@ -17,6 +17,10 @@
 | 2 | 토픽 다리 이름이 상대 경로였다 | 두 로봇이 같은 토픽을 씀 |
 | 3 | **URDF 안의 플러그인에 안 닿았다** | **시뮬레이션 전체가 멈춤** |
 | 4 | 정리할 때 네임스페이스를 안 봤다 | 프로세스가 살아남음 |
+| 5 | **launch `<arg>` 이름이 겹쳤다** | **두 번째 로봇이 첫 번째의 URDF로 올라감** |
+| 6 | URDF의 `<gazebo reference>`에만 접두사가 붙었다 | 라이다·카메라·IMU가 통째로 사라짐 |
+
+**여섯 다 오류를 내지 않습니다.** 그것이 이 문제들의 공통점입니다.
 
 관련 문서: [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) ·
 [관제 노드별 하는 일](RMF_NODES.md) ·
@@ -35,8 +39,13 @@
 ④ 토픽 다리 설정      ros_topic_name: "/pinky_01/odom"
 ```
 
-①②③은 Pinky의 경우 `upload_robot.launch.py` 의 **`namespace` 인자 하나**가
-함께 정합니다. ④는 우리가 만드는 `<맵이름>_gz_bridge.yaml` 입니다.
+①②③은 xacro 에 넘기는 **`namespace` 인자 하나**가 함께 정합니다. ④는 우리가
+만드는 `<맵이름>_gz_bridge.yaml` 입니다.
+
+> 처음에는 벤더의 `upload_robot.launch.py` 를 그대로 include 했습니다. 지금은
+> 쓰지 않습니다 — 그 launch 가 펼치는 xacro 에 함정 6 이 있어서, 우리가
+> `robot_description.sh` 로 펼치고 손봅니다. 벤더 launch 가 하던 일
+> (`frame_prefix` · `joint_state_publisher`)은 그대로 맞춰 두었습니다.
 
 **③이 이번 사고의 핵심입니다.** 플러그인은 URDF 안에 적혀 있어서, launch 에
 네임스페이스를 걸어도 닿지 않을 수 있습니다.
@@ -75,33 +84,37 @@
 
 ### 고침
 
-**인자로만 겁니다.** `push-ros-namespace` 는 쓰지 않습니다.
+**규칙은 하나입니다: 한 번만 건다.**
+
+지금은 이동 로봇도 설치 로봇도 우리가 노드를 직접 쓰므로, 둘 다
+`push-ros-namespace` 로 **그룹에 한 번만** 겁니다. 노드에는 따로 걸지 않습니다.
 
 ```xml
 <group>
-  <include file=".../upload_robot.launch.py">
-    <arg name="namespace" value="pinky_01"/>
-  </include>
+  <push-ros-namespace namespace="pinky_01"/>
+  <node pkg="robot_state_publisher" exec="robot_state_publisher"
+        name="robot_state_publisher">
+    <param name="frame_prefix" value="pinky_01/"/>
+    <param name="robot_description"
+           value="$(command '$(dirname)/robot_description.sh')"/>
+  </node>
   <node pkg="ros_gz_sim" exec="create"
         args="-name pinky_01 -topic /pinky_01/robot_description"/>
 </group>
 ```
 
-`create` 의 `-topic` 도 **절대 이름**으로 적습니다. 상대 이름이면 그룹 밖의
+`create` 의 `-topic` 은 **절대 이름**으로 적습니다. 상대 이름이면 그룹 밖의
 루트 `/robot_description` 을 기다립니다.
 
-### 예외 — 설치 로봇
+### 남의 launch 를 include 할 때는 반대다
 
-OMX 쪽은 `push-ros-namespace` 를 **씁니다.** 그 그룹 안의 노드에는
-네임스페이스를 따로 걸지 않으므로 두 겹이 되지 않습니다.
+`namespace` 인자를 받는 launch 를 include 한다면 **인자로만** 겁니다.
+`push-ros-namespace` 를 겹치면 노드만 두 겹이 되어 위의 사고가 납니다.
 
-**규칙은 하나입니다: 한 번만 건다.** 어느 쪽으로 거는지는 include 하는 launch
-가 네임스페이스 인자를 받느냐에 달렸습니다.
-
-| include 하는 launch | 거는 법 |
+| 무엇을 띄우나 | 거는 법 |
 |---|---|
-| `namespace` 인자를 받음 (Pinky) | 인자로만 |
-| 인자가 없음 (OMX 는 우리가 직접 노드를 씀) | `push-ros-namespace` 로만 |
+| 우리가 노드를 직접 씀 (지금) | `push-ros-namespace` 로만 |
+| `namespace` 인자를 받는 launch 를 include | 그 인자로만 |
 
 ## 4. 함정 2 — 토픽 다리 이름이 상대 경로
 
@@ -219,8 +232,10 @@ urdf = re.sub(
 
 ```xml
 <param name="robot_description"
-       value="$(command '$(var robot_dir)/robot_description.sh')"/>
+       value="$(command '$(dirname)/robot_description.sh')"/>
 ```
+
+> `$(var robot_dir)` 같은 `<arg>` 로 돌려쓰면 안 됩니다 — 함정 5 를 보세요.
 
 - `<ros><namespace>` — 플러그인이 만드는 `controller_manager` 를 그 아래에 둔다
 - `<robot_param_node>` — URDF 를 어느 노드에서 받아올지 알려 준다
@@ -248,11 +263,15 @@ controller_manager    /omx_01/controller_manager   ← 네임스페이스가 붙
 |---|---|
 | `gz-sim-diff-drive-system` (Pinky) | xacro 의 `${namespace}` 인자 — **닿는다** |
 | `gz-sim-joint-state-publisher-system` | 같음 — 닿는다 |
-| `gpu_lidar` · `camera` 센서 | 같음 — 닿는다 |
+| `gpu_lidar` · `camera` · `imu` 센서 | 이름은 닿는데 **센서 자체가 안 올라갔다** — 함정 6 |
 | `gz_ros2_control` (OMX) | 하드코딩 — **안 닿는다** |
 
-Pinky 쪽이 괜찮았던 것은 벤더 xacro 가 `namespace` 를 인자로 받아 모든 토픽에
-붙여 주기 때문입니다. OMX 쪽은 그런 인자가 없습니다.
+Pinky 의 주행 플러그인이 괜찮았던 것은 벤더 xacro 가 `namespace` 를 인자로 받아
+토픽에 붙여 주기 때문입니다. OMX 쪽은 그런 인자가 없습니다.
+
+> **센서는 별개였습니다.** 이름은 제대로 붙는데 `<gazebo reference>` 가 없는
+> 링크를 가리켜서 블록이 통째로 버려졌습니다. 이 표를 처음 쓸 때는 라이다를
+> 확인하지 않았고, 나중에 Nav2 를 붙이다가 드러났습니다 — 함정 6.
 
 ## 6. 나누면 안 되는 것
 
@@ -320,7 +339,77 @@ ros2 launch rmf_maps/<맵>/robots/PK-01/spawn.launch.xml
 **③이 중요합니다.** 토픽 이름이 목록에 있다고 값이 오는 것은 아닙니다. 다리가
 광고만 하고 Gazebo 가 아무것도 안 보내는 상태가 실제로 있었습니다.
 
-## 9. 점검표
+## 9. 함정 5 — launch `<arg>` 이름이 겹친다
+
+**증상**: pinky_02 가 **pinky_01 의 URDF 로** 올라갔습니다. 라이다도 odom 도
+하나도 안 나왔습니다.
+
+로봇마다 만드는 `spawn.launch.xml` 이 저마다 이렇게 선언했습니다.
+
+```xml
+<arg name="robot_dir" default="$(dirname)"/>
+...
+<param name="robot_description"
+       value="$(command '$(var robot_dir)/robot_description.sh')"/>
+```
+
+파일마다 제 디렉터리를 가리키라고 넣은 것인데, **같은 이름의 `<arg>` 를 여러
+include 가 선언하면 launch 안에서 범위가 겹쳐 먼저 읽은 값이 나머지에
+쓰입니다.** PK-02 가 PK-01 디렉터리의 스크립트를 돌렸습니다.
+
+확인은 이렇게 했습니다.
+
+```
+$ ros2 param get /pinky_02/robot_state_publisher robot_description | grep -o 'reference="[^"]*"'
+reference="pinky_01/robot_lamp_mount_fixed_joint"     ← pinky_01 것이다
+```
+
+스크립트 자체는 멀쩡했습니다. 직접 돌리면 `pinky_02/…` 가 나옵니다.
+
+### 고침
+
+arg 를 없애고 `$(dirname)` 을 **쓰는 자리에 직접** 적습니다.
+
+```xml
+<param name="robot_description"
+       value="$(command '$(dirname)/robot_description.sh')"/>
+```
+
+파일마다 제 자리를 가리키고 이름이 겹칠 일도 없습니다.
+
+**규칙**: include 되는 파일에서는 `<arg>` 로 값을 만들어 돌려쓰지 않습니다.
+
+## 10. 함정 6 — `<gazebo reference>` 에만 접두사가 붙었다
+
+벤더 xacro 는 **링크 이름에는 네임스페이스를 안 붙이면서** `<gazebo reference>`
+에는 붙입니다.
+
+```xml
+<link name="rplidar_link"/>                   ← 접두사 없음
+<gazebo reference="pinky_01/rplidar_link">    ← 접두사 있음
+  <sensor name="pinky_01/gpu_lidar" type="gpu_lidar">
+```
+
+맞는 링크가 없으니 그 `<gazebo>` 블록이 **통째로 버려집니다.** 라이다·카메라·
+IMU 가 하나도 안 올라가고 바퀴 마찰 설정도 같이 사라집니다.
+
+링크에 접두사를 안 붙이는 것은 **일부러**입니다 — TF 는
+`robot_state_publisher` 의 `frame_prefix` 가 붙입니다. 그러니 `reference` 쪽을
+떼는 것이 맞습니다.
+
+**다만 무조건 떼면 안 됩니다.** 조인트 이름에는 접두사가 붙어 있습니다.
+
+| reference | 가리키는 것 | 어떻게 |
+|---|---|---|
+| `pinky_01/rplidar_link` | 링크 `rplidar_link` | **뗀다** |
+| `pinky_01/robot_lamp_mount_fixed_joint` | 조인트 `pinky_01/…` | **그대로** |
+
+벤더 파일은 건드리지 않고 펼친 뒤에 고칩니다
+(`robots/<로봇 ID>/robot_description.sh`). 함정 3 의 OMX 와 같은 방식입니다.
+
+자세한 것은 [Nav2 길](NAV2_PATH.md) §7.
+
+## 11. 점검표
 
 로봇을 여러 대 올릴 때 확인할 것.
 
@@ -332,8 +421,10 @@ ros2 launch rmf_maps/<맵>/robots/PK-01/spawn.launch.xml
 - [ ] **Gazebo 안에서 도는 플러그인에 네임스페이스가 닿는가**
 - [ ] 각 로봇이 제 `controller_manager` 를 갖는가 (설치 로봇)
 - [ ] `is_sim:=True` 가 들어갔는가 (안 그러면 껍데기만 뜬다)
+- [ ] include 되는 파일에서 **같은 이름의 `<arg>`** 를 쓰지 않았는가
+- [ ] 로봇마다 **제 URDF** 가 올라갔는가 (`robot_description` 의 `reference=` 를 본다)
 
-## 10. 이번에 함께 드러난 것 — 네임스페이스와 무관한 함정
+## 12. 이번에 함께 드러난 것 — 네임스페이스와 무관한 함정
 
 원인을 찾는 과정에서 별개 문제 둘이 함께 나왔습니다. 같이 적어 둡니다.
 
