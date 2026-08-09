@@ -53,3 +53,6 @@ ProjectLogTail readLogTail(String path, {int count = 50}) => ProjectLogTail(
   run: readLogTail('$mapDirectory/$mapName.log', count: count),
   errors: readLogTail('$mapDirectory/$mapName.err.log', count: count),
 );
+
+String? truncateLog(String path) => '웹에서는 로그를 비울 수 없습니다.';
+

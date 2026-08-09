@@ -127,3 +127,20 @@ ProjectLogTail readLogTail(String path, {int count = 50}) {
   run: readLogTail('$mapDirectory/$mapName.log', count: count),
   errors: readLogTail('$mapDirectory/$mapName.err.log', count: count),
 );
+
+/// 로그를 비운다. **지우지 않는다.**
+///
+/// `rm` 으로 지우면 Gazebo 가 그 파일을 열고 있는 동안 자리가 안 돌아온다.
+/// `ls` 에도 `du` 에도 안 보이는데 `df` 는 그대로다 — 실측 1.05GB 가 그렇게
+/// 잡혀 있었다. 길이를 0으로 만들면 열려 있는 채로 자리가 돌아온다.
+String? truncateLog(String path) {
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  try {
+    file.openSync(mode: FileMode.write).closeSync();
+    return null;
+  } catch (error) {
+    return '$error';
+  }
+}
+

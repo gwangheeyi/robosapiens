@@ -20037,6 +20037,60 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
     if (mounted) setState(() => _logs = logs);
   }
 
+  /// 로그를 비운다. 되돌릴 수 없으니 한 번 묻는다.
+  Future<void> _confirmClear() async {
+    final logs = _logs;
+    if (logs == null) return;
+    final ok = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.delete_sweep_outlined, size: 32),
+        title: const Text('로그 비우기'),
+        content: SizedBox(
+          width: 420,
+          child: SelectableText(
+            '실행 로그와 오류 로그를 비웁니다. 되돌릴 수 없습니다.\n\n'
+            '${logs.run.path}  ${_size(logs.run.sizeBytes)}\n'
+            '${logs.errors.path}  ${_size(logs.errors.sizeBytes)}\n\n'
+            '백엔드가 돌고 있어도 괜찮습니다. 지우는 것이 아니라 길이를 0으로 '
+            '만드는 것이라, 열려 있는 채로 디스크 자리가 돌아옵니다.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+            child: const Text('비우기'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final failed = [
+      for (final path in [logs.run.path, logs.errors.path])
+        if (truncateLog(path) case final error?) '$path — $error',
+    ];
+    _reload();
+    if (!mounted) return;
+    if (failed.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('로그를 비웠습니다.')));
+      return;
+    }
+    await showWaypointErrorDialog(
+      context,
+      title: '로그 비우기',
+      message: '비우지 못한 파일이 있습니다.\n\n${failed.join('\n')}',
+    );
+  }
+
   String _size(int bytes) => bytes >= 1 << 30
       ? '${(bytes / (1 << 30)).toStringAsFixed(1)}GB'
       : bytes >= 1 << 20
@@ -20084,6 +20138,17 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
                 onPressed: _reload,
                 icon: const Icon(Icons.refresh, size: 18),
                 label: const Text('다시 읽기'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: tail == null || tail.sizeBytes == 0
+                    ? null
+                    : _confirmClear,
+                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                label: const Text('로그 비우기'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFB91C1C),
+                ),
               ),
               const SizedBox(width: 8),
               OutlinedButton.icon(

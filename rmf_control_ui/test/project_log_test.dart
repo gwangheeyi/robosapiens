@@ -81,4 +81,26 @@ void main() {
     expect(logs.run.lines.single.text, '보통 줄');
     expect(logs.errors.lines.single.isError, isTrue);
   });
+
+  group('로그 비우기', () {
+    test('지우지 않고 길이를 0으로 만든다', () {
+      // rm 으로 지우면 Gazebo 가 열고 있는 동안 자리가 안 돌아온다. 실측
+      // 1.05GB 가 ls 에도 du 에도 안 보이는 채로 잡혀 있었다.
+      final file = File('${dir.path}/m.log')..writeAsStringSync('가득\n' * 100);
+      expect(file.lengthSync(), greaterThan(0));
+      expect(truncateLog(file.path), isNull);
+      expect(file.existsSync(), isTrue, reason: '파일은 남아 있어야 한다');
+      expect(file.lengthSync(), 0);
+    });
+
+    test('없는 파일은 조용히 넘어간다', () {
+      expect(truncateLog('${dir.path}/없다.log'), isNull);
+    });
+
+    test('비운 뒤에는 읽을 줄이 없다', () {
+      File('${dir.path}/m.log').writeAsStringSync('한 줄\n');
+      truncateLog('${dir.path}/m.log');
+      expect(readLogTail('${dir.path}/m.log').lines, isEmpty);
+    });
+  });
 }
