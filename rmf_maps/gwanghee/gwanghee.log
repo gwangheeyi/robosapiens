@@ -3279,3 +3279,9 @@
   ↑ 같은 줄 7번 더
 [rmf_traffic_schedule-1] [INFO] [1786314825.838858271] [rmf_traffic_schedule_primary]: [ScheduleNode::update_mirrors] Sending remedial update starting from the beginning going to 676 for query 1
 [gazebo-1] ODE Message 2: Trimesh-trimesh contach hash table bucket overflow - close contacts might not be culled in AddContactToNode() [collision_trimesh_trimesh.cpp:224]
+  ↑ 같은 줄 31807번 더
+[schedule_visualizer_node-4] [INFO] [1786314865.829157854] [schedule_data_node]: Requesting new schedule update because update timed out
+[python3-12] [INFO] [1786314865.830176213] [gwanghee_pinky_fleet_adapter]: Requesting new schedule update because update timed out
+[python3-12] [INFO] [1786314865.830249756] [gwanghee_pinky_fleet_adapter]: [rmf_traffic_ros2::MirrorManager::request_update] Requesting changes for query ID [1] since version [677]
+[schedule_visualizer_node-4] [INFO] [1786314865.829235238] [schedule_data_node]: [rmf_traffic_ros2::MirrorManager::request_update] Requesting changes for query ID [1] since version [677]
+[gazebo-1] ODE Message 2: Trimesh-trimesh contach hash table bucket overflow - close contacts might not be culled in AddContactToNode() [collision_trimesh_trimesh.cpp:224]
