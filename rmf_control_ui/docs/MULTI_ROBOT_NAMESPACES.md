@@ -20,7 +20,8 @@
 
 관련 문서: [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) ·
 [관제 노드별 하는 일](RMF_NODES.md) ·
-[Pinky 연동](PINKY_FLEET_INTEGRATION.md)
+[Pinky 연동](PINKY_FLEET_INTEGRATION.md) ·
+[좌표계](COORDINATE_FRAMES.md)
 
 ## 2. 네임스페이스가 닿아야 하는 네 곳
 

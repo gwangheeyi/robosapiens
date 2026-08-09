@@ -36,10 +36,21 @@ String _withRosEnvironment(String command) {
 
 /// 로봇 한 대의 위치 토픽을 읽는 자식 프로세스.
 class _RobotFeed {
-  _RobotFeed({required this.robotId, required this.topic});
+  _RobotFeed({
+    required this.robotId,
+    required this.topic,
+    this.spawnX,
+    this.spawnY,
+    this.spawnHeading = 0,
+  });
 
   final String robotId;
   final String topic;
+
+  /// 로봇을 올린 자리. odom 의 원점이라서 월드 좌표로 옮길 때 필요하다.
+  final double? spawnX;
+  final double? spawnY;
+  final double spawnHeading;
   Process? process;
   StreamSubscription<String>? lines;
   RobotPose? pose;
@@ -116,10 +127,20 @@ class RobotTelemetryBridge {
   Future<void> sync(Iterable<RmfProjectRobot> robots) async {
     final wanted = {
       for (final robot in robots)
-        if (robot.runsInGazebo) robot.robotId: '/${robot.gzName}/odom',
+        if (robot.runsInGazebo) robot.robotId: robot,
     };
     for (final id in _feeds.keys.toList()) {
-      if (wanted[id] == _feeds[id]!.topic) continue;
+      final feed = _feeds[id]!;
+      final robot = wanted[id];
+      // 스폰 자리가 바뀌면 odom 을 옮길 기준이 달라진다. 토픽이 같아도 다시
+      // 붙여야 위치가 어긋나지 않는다.
+      if (robot != null &&
+          '/${robot.gzName}/odom' == feed.topic &&
+          robot.spawnX == feed.spawnX &&
+          robot.spawnY == feed.spawnY &&
+          robot.spawnHeading == feed.spawnHeading) {
+        continue;
+      }
       await _feeds.remove(id)!.close();
     }
     for (final entry in wanted.entries) {
@@ -129,8 +150,15 @@ class RobotTelemetryBridge {
     _controller.add(status);
   }
 
-  Future<void> _open(String robotId, String topic) async {
-    final feed = _RobotFeed(robotId: robotId, topic: topic);
+  Future<void> _open(String robotId, RmfProjectRobot robot) async {
+    final topic = '/${robot.gzName}/odom';
+    final feed = _RobotFeed(
+      robotId: robotId,
+      topic: topic,
+      spawnX: robot.spawnX,
+      spawnY: robot.spawnY,
+      spawnHeading: robot.spawnHeading,
+    );
     _feeds[robotId] = feed;
     try {
       final process = await Process.start('bash', [
@@ -144,7 +172,13 @@ class RobotTelemetryBridge {
           .listen((line) {
             final pose = RobotPose.parseCsv(line, DateTime.now());
             if (pose == null) return;
-            feed.pose = pose;
+            // odom 은 올린 자리가 원점이다. 그대로 두면 홈1 에 세운 로봇이
+            // 지도 원점에 그려진다.
+            feed.pose = pose.toWorld(
+              spawnX: feed.spawnX,
+              spawnY: feed.spawnY,
+              spawnHeading: feed.spawnHeading,
+            );
             feed.error = null;
             _controller.add(status);
           });

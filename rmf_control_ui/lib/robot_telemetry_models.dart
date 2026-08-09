@@ -49,6 +49,26 @@ class RobotPose {
     );
     return RobotPose(x: values[0], y: values[1], heading: heading, at: at);
   }
+
+  /// odom 원점을 스폰 자리로 옮겨 월드 좌표를 만든다.
+  ///
+  /// Gazebo 의 바퀴 플러그인이 내는 `/…/odom` 은 월드 좌표가 아니라 **로봇을
+  /// 올린 자리에서부터** 잰 값이다. 홈1 에 세워 두어도 방금 올린 로봇은 0, 0
+  /// 을 낸다. 실제 로봇도 마찬가지로 odom 은 켠 자리가 원점이고, 지도 좌표는
+  /// 측위(AMCL 등)가 따로 얹어 준다.
+  ///
+  /// 스폰 자세를 모르면 옮길 수 없으므로 받은 값을 그대로 돌려준다.
+  RobotPose toWorld({double? spawnX, double? spawnY, double spawnHeading = 0}) {
+    if (spawnX == null || spawnY == null) return this;
+    final cos = math.cos(spawnHeading);
+    final sin = math.sin(spawnHeading);
+    return RobotPose(
+      x: spawnX + x * cos - y * sin,
+      y: spawnY + x * sin + y * cos,
+      heading: heading + spawnHeading,
+      at: at,
+    );
+  }
 }
 
 /// 토픽을 받고 있는지.

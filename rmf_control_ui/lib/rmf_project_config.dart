@@ -124,6 +124,28 @@ class RmfProjectRobot {
   final double? spawnY;
   final double spawnHeading;
 
+  /// 올릴 자리만 바꾼 사본.
+  ///
+  /// spawn 좌표는 늘 자리 Waypoint 에서 나오므로, 지도를 다시 읽었을 때 이름은
+  /// 그대로 두고 좌표만 다시 계산해 넣는다.
+  RmfProjectRobot withSpawn({
+    required double? spawnX,
+    required double? spawnY,
+    double? spawnHeading,
+  }) => RmfProjectRobot(
+    robotId: robotId,
+    displayName: displayName,
+    model: model,
+    gzName: gzName,
+    zones: zones,
+    kind: kind,
+    dataSource: dataSource,
+    chargerWaypoint: chargerWaypoint,
+    spawnX: spawnX,
+    spawnY: spawnY,
+    spawnHeading: spawnHeading ?? this.spawnHeading,
+  );
+
   bool get isMobile => kind == RmfRobotKind.mobile;
 
   /// Gazebo 에 올릴 로봇인가. Mock 은 앱 안에만 있고, 실물은 이미 있다.
@@ -1050,6 +1072,71 @@ sweep_rmf_core
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';
+
+/// 지도 그림의 픽셀을 RMF 월드 좌표(m)로 옮긴다.
+///
+/// RMF 지도 생성기(`rmf_building_map_tools`)는 building.yaml 에 적힌 픽셀을
+/// 그대로 `(px × 축척, −py × 축척)` 으로 옮긴다. 원점은 **그림의 왼쪽 위**이고
+/// y 는 위로 갈수록 커진다. Gazebo 월드도 nav graph 도 이 좌표를 쓰므로,
+/// 로봇을 올릴 자리도 반드시 이 좌표로 적어야 한다.
+///
+/// 화면에 사람이 읽으라고 보여 주는 바닥 좌표는 바닥 왼쪽 **아래**가 원점이라
+/// y 부호가 반대다. 그 값을 spawn 좌표로 쓰면 로봇이 건물 밖 허공에 놓여
+/// 끝없이 떨어진다.
+({double x, double y}) rmfWorldFromPixel(
+  double px,
+  double py,
+  double metersPerPixel,
+) => (x: px * metersPerPixel, y: -py * metersPerPixel);
+
+/// [rmfWorldFromPixel] 의 역. 토픽이 준 미터를 화면 픽셀로 되돌린다.
+({double dx, double dy}) pixelFromRmfWorld(
+  double x,
+  double y,
+  double metersPerPixel,
+) => (dx: x / metersPerPixel, dy: -y / metersPerPixel);
+
+/// 등록된 로봇의 올릴 자리를 지금 지도에서 다시 계산한다.
+///
+/// spawn 좌표는 언제나 자리 Waypoint 에서 나온다. 예전 판은 화면에 보여 주는
+/// 바닥 좌표(바닥 왼쪽 아래가 원점, y 는 위로)를 그대로 넣었는데, RMF 는 그림
+/// 왼쪽 위가 원점이고 y 가 아래로 갈수록 음수다. 그렇게 저장된 프로젝트는 로봇을
+/// 건물 밖 허공에 올려서 끝없이 떨어뜨렸다. 사람에게 다시 등록하라고 시키는
+/// 대신 여기서 고쳐 준다.
+///
+/// [pixelOf] 는 로봇이 선 Waypoint 의 지도 픽셀을 돌려준다. 자리를 못 찾으면
+/// null 을 돌려주고, 그런 로봇은 건드리지 않는다 — 지도가 아직 안 올라왔을 수
+/// 있고, 그때 지워 버리면 멀쩡한 등록이 좌표를 잃는다.
+///
+/// 바꿀 것이 없으면 받은 목록을 그대로 돌려준다. 부르는 쪽이 `identical` 로
+/// 달라졌는지 가려서 쓸데없이 다시 그리거나 저장하지 않게 한다.
+List<RmfProjectRobot> robotsWithMapSpawnPoints(
+  List<RmfProjectRobot> robots,
+  ({double dx, double dy})? Function(RmfProjectRobot robot) pixelOf,
+  double metersPerPixel,
+) {
+  if (metersPerPixel <= 0) return robots;
+  var changed = false;
+  final result = <RmfProjectRobot>[];
+  for (final robot in robots) {
+    final pixel = pixelOf(robot);
+    if (pixel == null) {
+      result.add(robot);
+      continue;
+    }
+    final spawn = rmfWorldFromPixel(pixel.dx, pixel.dy, metersPerPixel);
+    if (robot.spawnX != null &&
+        robot.spawnY != null &&
+        (spawn.x - robot.spawnX!).abs() < 1e-6 &&
+        (spawn.y - robot.spawnY!).abs() < 1e-6) {
+      result.add(robot);
+      continue;
+    }
+    changed = true;
+    result.add(robot.withSpawn(spawnX: spawn.x, spawnY: spawn.y));
+  }
+  return changed ? result : robots;
+}
 
 /// 로봇 하나가 쓰는 디렉터리 이름. `robots/<로봇 ID>`.
 ///

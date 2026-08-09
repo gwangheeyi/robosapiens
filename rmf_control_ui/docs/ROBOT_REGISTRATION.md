@@ -8,7 +8,8 @@
 - 로봇을 **추가·수정·삭제**할 때 실제로 무슨 일이 일어나는가
 
 관련 문서: [Pinky 가상 로봇 · Fleet Adapter 연동](PINKY_FLEET_INTEGRATION.md) ·
-[한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md)
+[한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) ·
+[좌표계](COORDINATE_FRAMES.md)
 
 ## 2. 등록은 스폰보다 먼저다
 

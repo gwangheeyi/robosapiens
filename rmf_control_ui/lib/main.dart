@@ -4001,20 +4001,65 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
   }
 
-  /// 미터 좌표를 지도 픽셀로 되돌린다. [_floorCoordinate] 의 역이다.
+  /// 지도 픽셀을 RMF 월드 좌표(m)로 옮긴다.
   ///
-  /// 토픽은 미터로 오고 화면은 픽셀로 그린다. 등록할 때 spawn 좌표를
-  /// `floor * scale` 로 만들었으므로 그대로 거꾸로 간다.
+  /// RMF 지도 생성기는 building.yaml 에 적힌 픽셀을 그대로
+  /// `(px × 축척, −py × 축척)` 으로 옮긴다. 원점은 **그림의 왼쪽 위**이고 y 는
+  /// 위로 갈수록 커진다. 그래서 Gazebo 월드도 nav graph 도 이 좌표를 쓴다.
+  ///
+  /// 사람에게 보여 주는 [_floorCoordinate] 와는 다르다. 그쪽은 바닥 왼쪽
+  /// **아래**가 원점이라 읽기 좋지만, 그 값을 그대로 spawn 좌표로 쓰면 로봇이
+  /// 바닥 밖에 놓인다 — y 부호가 반대라서 건물 바깥 허공에 떨어진다.
+  Offset? _rmfMetersFromPixel(Offset point) {
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return null;
+    final world = rmfWorldFromPixel(point.dx, point.dy, scale);
+    return Offset(world.x, world.y);
+  }
+
+  /// RMF 월드 좌표(m)를 지도 픽셀로 되돌린다. [_rmfMetersFromPixel] 의 역이다.
+  ///
+  /// 토픽은 미터로 오고 화면은 픽셀로 그린다.
   Offset? _pixelFromMeters(double xMeters, double yMeters) {
     final scale = _metersPerPixel;
     if (scale == null || scale <= 0) return null;
-    final floorPoints = _floorMask?.points;
-    if (floorPoints == null || floorPoints.isEmpty) return null;
-    final bounds = _pointsBounds(floorPoints);
-    return Offset(
-      xMeters / scale + bounds.left,
-      bounds.bottom - yMeters / scale,
-    );
+    final pixel = pixelFromRmfWorld(xMeters, yMeters, scale);
+    return Offset(pixel.dx, pixel.dy);
+  }
+
+  /// 등록된 로봇의 올릴 자리를 지금 지도에서 다시 계산한다.
+  ///
+  /// spawn 좌표는 언제나 자리 Waypoint 에서 나온다. 예전 판은 화면에 보여 주는
+  /// 바닥 좌표를 그대로 넣었고, 그 좌표는 원점도 y 방향도 RMF 와 달랐다. 그렇게
+  /// 저장된 프로젝트는 로봇을 건물 밖 허공에 올려서 끝없이 떨어뜨린다. 사람에게
+  /// 다시 등록하라고 시키는 대신 여기서 고쳐 준다.
+  ///
+  /// 자리를 못 찾은 로봇은 그대로 둔다 — 지도가 아직 안 올라왔을 수 있고, 그때
+  /// 지워 버리면 멀쩡한 등록이 좌표를 잃는다.
+  List<RmfProjectRobot> _withMapSpawnPoints(List<RmfProjectRobot> robots) {
+    final scale = _metersPerPixel;
+    if (scale == null) return robots;
+    return robotsWithMapSpawnPoints(robots, (robot) {
+      final station = _stationPixelFor(robot);
+      return station == null ? null : (dx: station.dx, dy: station.dy);
+    }, scale);
+  }
+
+  /// 로봇이 선 자리 Waypoint 의 지도 픽셀.
+  ///
+  /// 자리는 종류에 맞는 카테고리에서만 찾는다. 이동 로봇이 설비 자리를, 설치
+  /// 로봇이 충전 자리를 잡으면 실행에서 어긋난다.
+  Offset? _stationPixelFor(RmfProjectRobot robot) {
+    final station = robot.chargerWaypoint?.trim();
+    if (station == null || station.isEmpty) return null;
+    return _waypointTypes.entries
+        .where(
+          (entry) =>
+              entry.value == robot.kind.waypointCategory &&
+              (_waypointNames[entry.key] ?? '').trim() == station,
+        )
+        .map((entry) => entry.key)
+        .firstOrNull;
   }
 
   /// 등록된 Gazebo 로봇의 위치 토픽을 구독한다.
@@ -6755,7 +6800,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 (b['seq'] as num?) ?? 0,
               ),
             );
-      _fleetRobots = [
+      // 예전 판이 잘못된 좌표계로 저장해 둔 자리를 지금 지도 기준으로 고친다.
+      _fleetRobots = _withMapSpawnPoints([
         for (final row in rows)
           RmfProjectRobot.fromJson({
             ...row,
@@ -6765,7 +6811,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 .where((zone) => zone.isNotEmpty)
                 .toList(),
           }),
-      ];
+      ]);
     });
     await _syncTelemetry();
   }
@@ -6841,8 +6887,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇의 자리이고 설비 Waypoint 는 설치 로봇의 자리이므로, spawn 좌표와
   /// 자리를 한꺼번에 채울 수 있다.
   List<RmfProjectRobot> _robotsFromChargers() {
-    final metersPerPixel = _metersPerPixel;
-    final scale = metersPerPixel ?? 1;
     final robots = <RmfProjectRobot>[];
     for (final kind in RmfRobotKind.values) {
       final stations = <Offset, String>{
@@ -6855,7 +6899,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       for (final entry in stations.entries) {
         index++;
         final serial = index.toString().padLeft(2, '0');
-        final floor = _floorCoordinate(entry.key);
+        // Gazebo 도 nav graph 도 RMF 월드 좌표를 쓴다. 화면에 보여 주는 바닥
+        // 좌표를 그대로 넣으면 로봇이 건물 밖 허공에 놓여 끝없이 떨어진다.
+        final spawn = _rmfMetersFromPixel(entry.key);
         robots.add(
           kind == RmfRobotKind.mobile
               ? RmfProjectRobot(
@@ -6865,8 +6911,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   gzName: 'pinky_$serial',
                   zones: const ['ambient', 'chilled', 'frozen'],
                   chargerWaypoint: entry.value,
-                  spawnX: floor.dx * scale,
-                  spawnY: floor.dy * scale,
+                  spawnX: spawn?.dx,
+                  spawnY: spawn?.dy,
                 )
               : RmfProjectRobot(
                   robotId: 'OMX-$serial',
@@ -6877,8 +6923,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   // 설치 로봇은 배차를 받지 않으므로 구획 자격이 필요 없다.
                   zones: const [],
                   chargerWaypoint: entry.value,
-                  spawnX: floor.dx * scale,
-                  spawnY: floor.dy * scale,
+                  spawnX: spawn?.dx,
+                  spawnY: spawn?.dy,
                 ),
         );
       }
@@ -7165,10 +7211,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             )
                             .map((entry) => entry.key)
                             .firstOrNull;
-                  final scale = _metersPerPixel ?? 1;
-                  final floor = source == null
+                  // RMF 월드 좌표로 넣는다. 화면용 바닥 좌표를 넣으면 y 부호가
+                  // 반대라 로봇이 건물 밖에 떨어진다.
+                  final spawn = source == null
                       ? null
-                      : _floorCoordinate(source);
+                      : _rmfMetersFromPixel(source);
                   Navigator.pop(
                     dialogContext,
                     RmfProjectRobot(
@@ -7188,12 +7235,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           : gzController.text.trim(),
                       zones: zones.toList()..sort(),
                       chargerWaypoint: charger,
-                      spawnX: floor == null
-                          ? existing?.spawnX
-                          : floor.dx * scale,
-                      spawnY: floor == null
-                          ? existing?.spawnY
-                          : floor.dy * scale,
+                      spawnX: spawn == null ? existing?.spawnX : spawn.dx,
+                      spawnY: spawn == null ? existing?.spawnY : spawn.dy,
                       spawnHeading: existing?.spawnHeading ?? 0,
                     ),
                   );
@@ -7586,6 +7629,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final project = _openProjectName;
     if (project == null) return;
     try {
+      // 올릴 자리도 같이 맞춘다. 예전 판이 잘못된 좌표계로 저장해 둔 채로
+      // 스크립트를 다시 만들면 로봇이 또 건물 밖에 놓인다.
+      final corrected = _withMapSpawnPoints(_fleetRobots);
+      if (!identical(corrected, _fleetRobots)) {
+        setState(() => _fleetRobots = corrected);
+        await _syncTelemetry();
+      }
       if (_drawing != null) await _writeMapProject(project);
       final files = await loadMapProjectFiles(project);
       if (files.isEmpty) return;
