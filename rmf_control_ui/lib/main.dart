@@ -7536,6 +7536,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// `ros2 launch` 는 파일만 읽으므로 띄우기 전에 설정을 디스크로 풀어 놓는다.
   /// 내보내기를 깜빡해 `파일이 없습니다` 로 막히는 것이 잦다.
+  /// 디스크의 설정 파일을 MySQL 의 최신 내용으로 맞춘다.
+  ///
+  /// 조용히 한다. 실패해도 하려던 일(띄우기·내리기)은 계속 시도한다 — 예전
+  /// 스크립트라도 없는 것보다는 낫다.
+  Future<void> _refreshProjectScripts() async {
+    final project = _openProjectName;
+    if (project == null) return;
+    try {
+      final files = await loadMapProjectFiles(project);
+      if (files.isEmpty) return;
+      await exportProjectConfigFiles(mapName: project, files: files);
+    } catch (_) {}
+  }
+
   Future<void> _startBackendForOpenProject() async {
     final project = _openProjectName;
     if (project == null) {
@@ -9327,6 +9341,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRegisterFromChargers: () =>
                                   unawaited(_registerRobotsFromChargers()),
                               onStartBackend: _startBackendForOpenProject,
+                              onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
                             )
                           : _selectedMenu == 3
@@ -11291,6 +11306,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onUnregisterRobot,
     required this.onRegisterFromChargers,
     required this.onStartBackend,
+    required this.onRefreshScripts,
     required this.telemetry,
   });
 
@@ -11321,6 +11337,9 @@ class _RobotManagementPage extends StatefulWidget {
 
   /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
   final Future<void> Function() onStartBackend;
+
+  /// 디스크의 실행·중지 스크립트를 MySQL 의 최신 내용으로 맞춘다.
+  final Future<void> Function() onRefreshScripts;
 
   /// Gazebo 에서 실제로 값을 받고 있는지.
   final RobotTelemetryStatus telemetry;
@@ -11452,6 +11471,12 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _rmfBusy = true);
+    // 디스크의 중지 스크립트를 최신으로 맞춘 뒤 돌린다.
+    //
+    // 원장은 MySQL 이지만 실제로 도는 것은 디스크의 파일이다. 앱을 고쳐도
+    // 내보내기를 안 하면 예전 스크립트가 계속 돌아, 고친 것이 반영되지 않는다.
+    await widget.onRefreshScripts();
+    if (!mounted) return;
     // 무엇을 띄웠느냐에 따라 내리는 스크립트가 다르다. 예전에는 무조건 office
     // 데모 스크립트만 돌려서, 맵 프로젝트로 띄운 fleet_manager 가 그대로
     // 남았다.

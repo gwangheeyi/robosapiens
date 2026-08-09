@@ -864,8 +864,12 @@ ps -o pgid= -p \$\$ | tr -d ' ' > "\$PGID_FILE"
 
 cleanup() {
   echo "정리 중..."
-  rm -f "\$PGID_FILE"
   kill \$(jobs -p) 2>/dev/null || true
+  # PGID 파일은 지우지 않는다.
+  #
+  # 이 셸이 먼저 끝나고 자식이 살아남는 일이 있다. 그때 파일까지 지우면
+  # 그 그룹을 끊을 손잡이가 사라져, 중지 스크립트도 다음 실행의 남은 항목
+  # 검사도 그 프로세스를 영영 못 찾는다. 파일은 중지 스크립트가 지운다.
 }
 trap cleanup EXIT INT TERM
 
@@ -916,6 +920,7 @@ MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 # 이 프로젝트가 쓰는 로봇 네임스페이스. 인자에 맵 경로가 없는 노드는 이 이름으로
 # 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
 ROBOT_NAMESPACES="${robots.where((robot) => robot.runsInGazebo).map((robot) => robot.gzName).join(' ')}"
+RMF_WS="\${RMF_WS:-\$HOME/rmf_ws}"
 
 # INT → TERM → KILL 로 올려 가며 내린다.
 #
@@ -965,7 +970,9 @@ sweep_map_dir() {
     [[ -z "\$pid" || "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && continue
     # pgrep 과 여기 사이에 끝난 프로세스가 있을 수 있다. 없으면 조용히 넘긴다.
     [[ -r "/proc/\$pid/cmdline" ]] || continue
-    args="\$(tr '\\0' ' ' < "/proc/\$pid/cmdline" 2>/dev/null || true)"
+    # 2>/dev/null 을 먼저 건다. 뒤에 걸면 입력 리다이렉트가 먼저 실패하면서
+    # 셸이 그 오류를 그대로 찍는다 — pgrep 과 여기 사이에 끝난 프로세스가 있다.
+    args="\$(tr '\\0' ' ' 2>/dev/null < "/proc/\$pid/cmdline" || true)"
     # 이 스크립트 자신과 이것을 부른 셸은 건드리지 않는다.
     [[ "\$args" == *"stop_$mapName.sh"* ]] && continue
     [[ "\$args" == *"\$MAP_DIR"* ]] || continue
@@ -1022,6 +1029,24 @@ sweep_namespaces() {
 }
 
 sweep_namespaces
+
+# 마지막으로 RMF core 를 쓸어낸다.
+#
+# schedule node 나 supervisor 는 인자에 맵 경로도 로봇 네임스페이스도 없다.
+# launch 가 죽고 PGID 파일도 없으면 어떤 방법으로도 못 찾는다. RMF core 는
+# 한 번에 하나만 뜰 수 있으므로, 백엔드를 내리기로 한 이상 이것이 대상이다.
+sweep_rmf_core() {
+  mapfile -t pids < <(
+    pgrep -u "\$(id -u)" -f "\$RMF_WS/install/rmf_" 2>/dev/null || true
+  )
+  if ((\${#pids[@]} == 0)); then
+    echo "RMF core: 남은 것 없음"
+    return
+  fi
+  stop_pids "RMF core" "\${pids[@]}"
+}
+
+sweep_rmf_core
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';

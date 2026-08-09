@@ -673,6 +673,22 @@ void main() {
       expect(onlyPinky, isNot(contains('open_manipulator_description')));
     });
 
+    test('PGID 파일을 실행 스크립트가 지우지 않는다', () {
+      // 이 셸이 먼저 끝나고 자식이 살아남는 일이 있다. 그때 파일까지 지우면
+      // 그 그룹을 끊을 손잡이가 사라진다.
+      final run = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      final cleanup = run.substring(
+        run.indexOf('cleanup() {'),
+        run.indexOf('trap cleanup'),
+      );
+      expect(cleanup, isNot(contains('rm -f')));
+      expect(cleanup, contains('kill'));
+    });
+
     test('출력을 파이프가 아니라 파일로 보낸다', () {
       // 앱이 파이프에 물려 띄우면, 읽는 쪽이 없을 때 64KB 가 차는 순간 Gazebo 가
       // write 에서 영원히 멈춘다. 물리가 돌지 않아 모델도 안 올라오고 토픽에
@@ -801,6 +817,22 @@ void main() {
       expect(withRobots, contains(r'__ns:=/$ns'));
       // Gazebo 로 돌리지 않는 로봇은 띄운 적이 없으니 내릴 것도 없다.
       expect(withRobots, isNot(contains('mock_01')));
+    });
+
+    test('RMF core 도 마지막에 쓸어낸다', () {
+      // schedule node 나 supervisor 는 인자에 맵 경로도 로봇 네임스페이스도
+      // 없다. launch 가 죽고 PGID 파일까지 없으면 어떤 방법으로도 못 찾는다.
+      expect(script, contains('sweep_rmf_core'));
+      expect(script, contains('RMF core'));
+      expect(script, contains('/install/rmf_'));
+    });
+
+    test('없어진 프로세스에 대해 잔소리하지 않는다', () {
+      // pgrep 과 /proc 읽기 사이에 끝난 프로세스가 있다. 2>/dev/null 을 입력
+      // 리다이렉트보다 먼저 걸어야 셸이 오류를 찍지 않는다.
+      final redirect = script.indexOf('< "/proc/');
+      final suppress = script.indexOf('2>/dev/null', script.indexOf('args="'));
+      expect(suppress, lessThan(redirect));
     });
 
     test('로봇이 없어도 스크립트가 돈다', () {
