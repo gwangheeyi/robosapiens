@@ -20099,15 +20099,28 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
                         );
                       },
                 icon: const Icon(Icons.copy_all_outlined, size: 18),
-                label: const Text('복사'),
+                label: const Text('전체 복사'),
               ),
             ],
           ),
           if (tail != null) ...[
             const SizedBox(height: 6),
-            SelectableText(
-              tail.path,
-              style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+            Row(
+              children: [
+                Expanded(
+                  child: SelectableText(
+                    tail.path,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF94A3B8),
+                    ),
+                  ),
+                ),
+                const Text(
+                  '마우스로 끌어 몇 줄만 고른 뒤 Ctrl+C 로도 복사됩니다.',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                ),
+              ],
             ),
           ],
           const SizedBox(height: 12),
@@ -20140,30 +20153,39 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
                         ),
                       ),
                     )
-                  : Scrollbar(
-                      thumbVisibility: true,
-                      child: ListView.builder(
-                        // 마지막 줄이 아래에 오게 둔다. 로그는 끝이 중요하다.
-                        itemCount: tail.lines.length,
-                        itemBuilder: (context, index) {
-                          final line = tail.lines[index];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 2),
-                            child: SelectableText(
-                              line.text,
-                              style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                height: 1.5,
-                                color: line.isError
-                                    ? const Color(0xFFFCA5A5)
-                                    : line.isWarning
-                                    ? const Color(0xFFFCD34D)
-                                    : const Color(0xFFCBD5E1),
-                              ),
-                            ),
-                          );
-                        },
+                  // 마우스로 여러 줄을 끌어 고를 수 있어야 한다. 줄마다
+                  // SelectableText 를 두면 그 줄 안에서만 골라진다.
+                  // SelectionArea 로 감싸고 안은 보통 Text 로 둔다.
+                  //
+                  // ListView.builder 는 화면 밖 줄을 만들지 않아 스크롤한
+                  // 부분이 선택에서 빠진다. 50줄뿐이니 통째로 둔다.
+                  : SelectionArea(
+                      child: Scrollbar(
+                        thumbVisibility: true,
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (final line in tail.lines)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 2),
+                                  child: Text(
+                                    line.text,
+                                    style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                      height: 1.5,
+                                      color: line.isError
+                                          ? const Color(0xFFFCA5A5)
+                                          : line.isWarning
+                                          ? const Color(0xFFFCD34D)
+                                          : const Color(0xFFCBD5E1),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
             ),

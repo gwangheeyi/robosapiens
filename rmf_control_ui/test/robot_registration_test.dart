@@ -311,4 +311,25 @@ void main() {
       );
     });
   });
+
+  group('로그 고르기', () {
+    test('여러 줄을 끌어 고를 수 있다', () {
+      // 줄마다 SelectableText 를 두면 그 줄 안에서만 골라진다. 여러 줄을
+      // 끌려면 SelectionArea 로 감싸고 안은 보통 Text 여야 한다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final page = source.substring(source.indexOf('class _ProjectLogPageState'));
+      expect(page, contains('SelectionArea('));
+      expect(page, isNot(contains('child: SelectableText(\n                                    line.text')));
+    });
+
+    test('화면 밖 줄도 선택에 들어간다', () {
+      // ListView.builder 는 화면 밖 줄을 만들지 않아 스크롤한 부분이 선택에서
+      // 빠진다. 50줄뿐이니 통째로 둔다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final page = source.substring(source.indexOf('class _ProjectLogPageState'));
+      // 주석에는 남아 있으므로 실제로 쓰는지를 본다.
+      expect(page, isNot(contains('child: ListView.builder(')));
+      expect(page, contains('for (final line in tail.lines)'));
+    });
+  });
 }
