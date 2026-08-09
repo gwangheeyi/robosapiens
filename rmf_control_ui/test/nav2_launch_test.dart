@@ -158,6 +158,26 @@ void main() {
       expect(empty, contains('nav2_map_server'));
     });
 
+    test('RMF 와 Nav2 를 잇는 어댑터를 함께 띄운다', () {
+      // 이것이 없으면 RMF 가 배차해도 로봇이 안 움직인다.
+      // rmf_demos_fleet_adapter 는 slotcar 전용이라 우리 핑키에게는 상대가 없다.
+      final withFleet = buildProjectNav2LaunchXml(
+        mapName: 'gwanghee',
+        robots: const [pinky],
+        fleetName: 'gwanghee_pinky',
+      );
+      expect(withFleet, contains('gwanghee_nav2_adapter.py'));
+      expect(withFleet, contains('gwanghee_pinky_config.yaml'));
+      expect(withFleet, contains('nav_graphs/0.yaml'));
+      // ROS 패키지에 든 노드가 아니라 우리가 만든 스크립트다.
+      expect(withFleet, contains('<executable'));
+      // 플릿 이름을 모르면 띄우지 않는다. 설정 파일 자리를 알 수 없다.
+      expect(
+        buildProjectNav2LaunchXml(mapName: 'gwanghee', robots: const [pinky]),
+        isNot(contains('nav2_adapter')),
+      );
+    });
+
     test('손대지 못한 것을 파일 맨 위에 적는다', () {
       // 이 launch 가 안 뜰 때 사람이 제일 먼저 여는 파일이다.
       final warned = buildProjectNav2LaunchXml(

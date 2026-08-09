@@ -6869,7 +6869,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildProjectNav2LaunchXml(
           mapName: mapName,
           robots: _fleetRobots,
+          fleetName: fleet.fleetName,
           warnings: nav2.warnings,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: '${mapName}_nav2_adapter.py',
+        kind: 'nav2',
+        description:
+            'RMF 와 Nav2 를 잇는다. RMF 가 주는 목적지를 NavigateToPose 로 '
+            '바꾸고 TF 에서 읽은 위치를 RMF 에 되돌린다. 이것이 없으면 RMF 가 '
+            '배차해도 로봇이 안 움직인다 — rmf_demos_fleet_adapter 는 slotcar '
+            '전용이라 우리 핑키에게는 상대가 없다.',
+        executable: true,
+        content: buildNav2FleetAdapterScript(
+          mapName: mapName,
+          fleetName: fleet.fleetName,
+          robots: _fleetRobots,
         ),
         generatedAt: now,
       ),
