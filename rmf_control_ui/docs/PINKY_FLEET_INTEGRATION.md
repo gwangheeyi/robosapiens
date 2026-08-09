@@ -892,6 +892,8 @@ rmf-web WebSocket ws://127.0.0.1:8000/_internal
   흘러가는지, `robots/<로봇 ID>/` 에 무엇이 들어 있는지
 - [관제 노드별 하는 일](RMF_NODES.md) — 백엔드를 띄우면 어떤 노드가 올라오고
   무엇이 없으면 무엇이 안 되는지
+- [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) — 네임스페이스가 닿아야
+  하는 네 곳과 이번에 밟은 함정 넷
 - [맵 작성 및 배포 가이드](MAP_AUTHORING_AND_DEPLOYMENT.md) — 맵을 만들고
   `nav_graphs/0.yaml`을 얻는 과정
 - [앱 전용 Mock 로봇 가이드](APP_MOCK_ROBOTS.md) — 지금의 Mock 주행 범위
