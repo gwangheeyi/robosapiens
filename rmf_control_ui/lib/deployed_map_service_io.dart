@@ -129,11 +129,14 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     }
     final waypoints = <Offset>[];
     final names = <Offset, String>{};
+    final categories = <Offset, String>{};
     for (final value in data['waypoints'] as List<dynamic>) {
       final waypoint = value as Map<String, dynamic>;
       final point = decodePoint(waypoint['point']);
       waypoints.add(point);
       names[point] = waypoint['name'] as String? ?? '';
+      final category = (waypoint['category'] as String? ?? '').trim();
+      if (category.isNotEmpty) categories[point] = category;
     }
     return DeployedMapData(
       summary: summary,
@@ -146,6 +149,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
       lanes: lanes,
       waypoints: waypoints,
       waypointNames: names,
+      waypointCategories: categories,
       laneDirections: directions,
     );
   }

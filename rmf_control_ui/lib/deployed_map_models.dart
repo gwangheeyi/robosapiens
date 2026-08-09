@@ -23,6 +23,7 @@ class DeployedMapData {
     required this.lanes,
     required this.waypoints,
     required this.waypointNames,
+    this.waypointCategories = const {},
     this.laneDirections = const {},
   });
   final DeployedMapSummary summary;
@@ -32,6 +33,13 @@ class DeployedMapData {
   final List<(Offset, Offset)> lanes;
   final List<Offset> waypoints;
   final Map<Offset, String> waypointNames;
+
+  /// Waypoint 하나마다의 분류(`충전` · `설비` · `대기` …).
+  ///
+  /// 이것이 없으면 로봇 화면에서 자리 목록이 비어 보인다. 맵을 편집기에서
+  /// 열어 두지 않았을 뿐인데 "맵에 충전 Waypoint 가 없습니다" 로 보였고,
+  /// 그대로 저장하면 이미 골라 둔 자리가 지워졌다.
+  final Map<Offset, String> waypointCategories;
 
   /// 레인별 통행 방향(`양방향` | `정방향`). 빠진 레인은 양방향으로 본다.
   ///

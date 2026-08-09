@@ -1094,4 +1094,50 @@ void main() {
       expect(xml, contains('ws://127.0.0.1:8000/_internal'));
     });
   });
+
+  group('자리를 안 고른 로봇', () {
+    // 자리를 조용히 지우는 버그가 있었다. 창을 열었다 닫기만 해도 충전1 이
+    // 사라졌고, 자리가 없으면 spawn 좌표도 없어져 Gazebo 에 로봇이 아예 안
+    // 올라갔다 — 토픽이 하나도 안 나온 원인이다.
+    const noStation = RmfProjectRobot(
+      robotId: 'PK-01',
+      displayName: '핑키 1호',
+      model: 'PINKY-GZ',
+      gzName: 'pinky_01',
+      zones: ['ambient'],
+      dataSource: RobotDataSource.gazebo,
+    );
+
+    test('bringup 이 조용히 넘기지 않는다', () {
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: const [noStation],
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, contains('spawn 좌표가 없다'));
+      expect(xml, contains('지도 원점에 놓인다'));
+      // 그래도 올리기는 한다. 안 올리면 왜 없는지 알 데가 없다.
+      expect(xml, contains('PK-01/spawn.launch.xml'));
+    });
+
+    test('자리가 있으면 그 말은 안 나온다', () {
+      const placed = RmfProjectRobot(
+        robotId: 'PK-01',
+        displayName: '핑키 1호',
+        model: 'PINKY-GZ',
+        gzName: 'pinky_01',
+        zones: ['ambient'],
+        dataSource: RobotDataSource.gazebo,
+        chargerWaypoint: '충전1',
+        spawnX: 1.761,
+        spawnY: -1.025,
+      );
+      final xml = buildProjectBringupXml(
+        mapName: 'gwanghee',
+        robots: const [placed],
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(xml, isNot(contains('spawn 좌표가 없다')));
+    });
+  });
 }

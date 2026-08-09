@@ -852,11 +852,21 @@ String buildProjectBringupXml({
       ..writeln(
         '  <!-- ${robot.robotId} · ${robot.displayName} '
         '· ${robot.kind.label} @ ${robot.chargerWaypoint ?? '자리 미지정'} -->',
-      )
-      ..writeln(
-        '  <include file="\$(var map_dir)/'
-        '${robotDirectoryName(robot)}/spawn.launch.xml"/>',
       );
+    // 자리를 안 고르면 spawn 좌표가 없어 지도 원점(0,0)에 놓인다. 건물 밖일
+    // 때가 많고, 그러면 로봇은 올라왔는데 아무 데도 안 보인다. 조용히 넘기지
+    // 않고 파일에 적어 둔다.
+    if (robot.spawnX == null || robot.spawnY == null) {
+      buffer.writeln(
+        '  <!-- 주의: 자리를 안 골라 spawn 좌표가 없다. '
+        '지도 원점에 놓인다. 로봇 등록에서 '
+        '${robot.kind.waypointCategory} Waypoint 를 고르세요. -->',
+      );
+    }
+    buffer.writeln(
+      '  <include file="\$(var map_dir)/'
+      '${robotDirectoryName(robot)}/spawn.launch.xml"/>',
+    );
   }
   buffer
     ..writeln('')

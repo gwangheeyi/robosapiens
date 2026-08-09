@@ -4079,11 +4079,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Offset? _stationPixelFor(RmfProjectRobot robot) {
     final station = robot.chargerWaypoint?.trim();
     if (station == null || station.isEmpty) return null;
-    return _waypointTypes.entries
+    final types = _waypointTypes.isNotEmpty
+        ? _waypointTypes
+        : (_robotDeployedMap?.waypointCategories ?? const <Offset, String>{});
+    final names = _waypointTypes.isNotEmpty
+        ? _waypointNames
+        : (_robotDeployedMap?.waypointNames ?? const <Offset, String>{});
+    return types.entries
         .where(
           (entry) =>
               entry.value == robot.kind.waypointCategory &&
-              (_waypointNames[entry.key] ?? '').trim() == station,
+              (names[entry.key] ?? '').trim() == station,
         )
         .map((entry) => entry.key)
         .firstOrNull;
@@ -7399,14 +7405,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// 이동 로봇은 충전 Waypoint 에, 설치 로봇은 설비 Waypoint 에 선다. 맵에 있는
   /// 것 중에서 고르므로 이름을 잘못 적을 일이 없다.
-  List<String> _stationWaypointNames(RmfRobotKind kind) =>
-      [
-        for (final entry in _waypointTypes.entries)
-          if (entry.value == kind.waypointCategory)
-            (_waypointNames[entry.key] ?? '').trim()
-          else
-            '',
-      ].where((name) => name.isNotEmpty).toList()..sort();
+  /// 로봇이 설 수 있는 자리 Waypoint 이름.
+  ///
+  /// 편집기에 맵이 열려 있지 않으면 `_waypointTypes` 가 비어 있다. 그때는
+  /// 로봇 화면에서 불러온 배포 맵을 본다 — 그러지 않으면 자리 목록이 통째로
+  /// 비어, 이미 골라 둔 자리가 저장할 때 지워졌다.
+  List<String> _stationWaypointNames(RmfRobotKind kind) {
+    final types = _waypointTypes.isNotEmpty
+        ? _waypointTypes
+        : (_robotDeployedMap?.waypointCategories ?? const <Offset, String>{});
+    final names = _waypointTypes.isNotEmpty
+        ? _waypointNames
+        : (_robotDeployedMap?.waypointNames ?? const <Offset, String>{});
+    return [
+      for (final entry in types.entries)
+        if (entry.value == kind.waypointCategory)
+          (names[entry.key] ?? '').trim()
+        else
+          '',
+    ].where((name) => name.isNotEmpty).toList()..sort();
+  }
 
   /// 자리 Waypoint 하나마다 로봇 한 대를 만든다.
   ///
@@ -7481,9 +7499,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (zones.isEmpty && kind == RmfRobotKind.mobile) {
       zones = {'ambient', 'chilled', 'frozen'};
     }
-    if (charger != null && !_stationWaypointNames(kind).contains(charger)) {
-      charger = null;
-    }
+    // 골라 둔 자리를 조용히 지우지 않는다. 맵을 열지 않은 채로 로봇을 한 번
+    // 열어 보기만 해도 자리가 사라졌고, 자리가 없으면 spawn 좌표도 없어져
+    // Gazebo 에 로봇이 아예 안 올라갔다 — 토픽이 하나도 안 나온 원인이다.
+    final missingStation =
+        charger != null && !_stationWaypointNames(kind).contains(charger);
 
     final saved = await showMovableDialog<RmfProjectRobot>(
       context: context,
@@ -7654,18 +7674,34 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       key: ValueKey(kind),
-                      initialValue: stations.contains(charger) ? charger : null,
+                      initialValue: charger,
                       isExpanded: true,
                       decoration: InputDecoration(
                         labelText: isMobile ? '충전 Waypoint' : '설비 Waypoint',
+                        // 목록이 빈 이유를 밝힌다. 예전에는 맵을 안 열었을
+                        // 뿐인데 "Waypoint 가 없습니다" 라고만 해서, 지도에
+                        // 멀쩡히 있는 자리를 없는 것으로 알게 했다.
                         helperText: stations.isEmpty
-                            ? '맵에 ${kind.waypointCategory} 카테고리 Waypoint가 없습니다.'
+                            ? '맵이 열려 있지 않거나 '
+                                  '${kind.waypointCategory} 카테고리 Waypoint가 '
+                                  '없습니다. 로봇 화면에서 배포 맵을 먼저 '
+                                  '불러오세요.'
+                            : missingStation
+                            ? '$charger 를 지금 맵에서 찾지 못했습니다. '
+                                  '그대로 두면 값은 지워지지 않습니다.'
                             : isMobile
                             ? 'spawn 위치와 복귀 지점이 됩니다.'
                             : '이 자리에 고정 설치됩니다.',
                         border: const OutlineInputBorder(),
                       ),
                       items: [
+                        // 지금 맵에서 못 찾은 자리도 목록에 남겨 둔다. 빼면
+                        // 창을 열었다 닫기만 해도 값이 사라진다.
+                        if (missingStation)
+                          DropdownMenuItem(
+                            value: charger,
+                            child: Text('$charger  (지금 맵에서 못 찾음)'),
+                          ),
                         for (final name in stations)
                           DropdownMenuItem(value: name, child: Text(name)),
                       ],
