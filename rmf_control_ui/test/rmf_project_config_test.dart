@@ -778,12 +778,42 @@ void main() {
         robots: const [pinky],
       );
       expect(script, contains(r'LOG_FILE="$MAP_DIR/mixed.log"'));
-      expect(script, contains(r'exec > "$LOG_FILE" 2>&1'));
+      // 거르는 awk 를 거쳐 파일로 간다. 이 awk 가 파이프를 쉬지 않고 읽으므로
+      // 교착은 여전히 나지 않는다.
+      expect(script, contains('exec > >(exec awk'));
       // 리다이렉트는 로봇을 띄우기 전에 걸려야 한다.
       expect(
-        script.indexOf(r'exec > "$LOG_FILE"'),
+        script.indexOf('exec > >(exec awk'),
         lessThan(script.indexOf('Gazebo bringup')),
       );
+    });
+
+    test('같은 줄이 반복되면 접어서 쓴다', () {
+      // Gazebo 의 ODE 가 물리 스텝마다 같은 경고를 찍어 로그가 시간당 1.8GB 씩
+      // 찼다. 실측 3.4GB 짜리가 남아 있었다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      expect(script, contains(r'if ($0 == last) {'));
+      expect(script, contains('같은 줄 " dup "번 더'));
+      // 넘치면 한 번 밀어 두고 새로 쓴다. 최대 두 배까지만 남는다.
+      expect(script, contains(r'LOG_MAX_MB="${LOG_MAX_MB:-200}"'));
+      expect(script, contains(r'maxmb * 1048576'));
+    });
+
+    test('에러만 따로 모은 파일을 하나 더 쓴다', () {
+      // 에러만 남기면 안 된다. 원인을 알려 준 것은 대부분 ERROR 가 아니라
+      // 뜨는 순서였다. 그래서 전체는 그대로 두고 요약을 따로 쓴다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      expect(script, contains(r'ERR_FILE="$MAP_DIR/mixed.err.log"'));
+      expect(script, contains('Traceback'));
+      expect(script, contains(r'print $0 > err'));
     });
 
     test('없으면 무엇을 빌드해야 하는지 알려 준다', () {

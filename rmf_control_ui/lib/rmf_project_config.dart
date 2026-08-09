@@ -933,8 +933,57 @@ fi
 # 64KB 가 차는 순간 Gazebo 가 write 에서 영원히 멈춘다. 물리가 돌지 않아
 # 모델도 안 올라오고 토픽에 값도 오지 않는다. 파일로 보내면 막힐 일이 없고,
 # 무슨 일이 있었는지 나중에 볼 수도 있다.
+#
+# 다만 그대로 두면 감당이 안 된다. Gazebo 의 ODE 가 메시끼리 닿을 때마다
+# 같은 경고 한 줄을 물리 스텝마다 찍어, 시간당 1.8GB 씩 찼다. 그래서 거른다.
+#
+#   1. launch 접두사만 있고 내용이 없는 줄은 버린다.
+#   2. 바로 앞과 똑같은 줄은 세기만 하고, 다른 줄이 오면 "몇 번 더" 로 접는다.
+#   3. 그래도 넘치면 한 번 밀어 두고 새로 쓴다 (최대 2 배까지만 남는다).
+#
+# 에러만 남기지는 않는다. 지금까지 원인을 알려 준 것은 대부분 ERROR 가 아니라
+# 뜨는 순서였다 — Gazebo 가 먼저인지, /clock 이 나왔는지, 다리가 어느 토픽을
+# 걸었는지. 대신 ERROR·경고·역추적만 따로 모은 파일을 하나 더 쓴다.
 LOG_FILE="\$MAP_DIR/$mapName.log"
-exec > "\$LOG_FILE" 2>&1
+ERR_FILE="\$MAP_DIR/$mapName.err.log"
+LOG_MAX_MB="\${LOG_MAX_MB:-200}"
+: > "\$ERR_FILE"
+
+# 이 awk 는 파이프를 쉬지 않고 읽는다. 읽는 쪽이 있어야 위의 교착이 안 난다.
+exec > >(exec awk -v out="\$LOG_FILE" -v err="\$ERR_FILE" -v maxmb="\$LOG_MAX_MB" '
+function put(text) {
+  print text > out
+  fflush(out)
+  bytes += length(text) + 1
+  if (bytes > maxmb * 1048576) {
+    close(out)
+    system("mv -f \\"" out "\\" \\"" out ".1\\" 2>/dev/null")
+    bytes = 0
+    print "=== 로그가 " maxmb "MB 를 넘어 " out ".1 로 밀었다 ===" > out
+    fflush(out)
+  }
+}
+function fold() {
+  if (dup > 0) { put("  ↑ 같은 줄 " dup "번 더") ; dup = 0 }
+}
+{
+  if (\$0 ~ /^\\[[^]]+\\] *\$/) next
+  if (\$0 == last) {
+    dup++
+    # 오래 접혀 있으면 로그가 멎은 것처럼 보인다. 가끔 살아 있다고 알린다.
+    if (dup % 100000 == 0) put("  ↑ 같은 줄 " dup "번째, 계속 접는 중")
+    next
+  }
+  fold()
+  put(\$0)
+  last = \$0
+  if (\$0 ~ /ERROR|error:|Error|Traceback|Warning|WARN|없는 파일|실패/) {
+    print \$0 > err
+    fflush(err)
+  }
+}
+END { fold() }
+') 2>&1
 echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
