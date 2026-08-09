@@ -1760,6 +1760,7 @@ import rmf_adapter
 from rmf_adapter import Adapter
 import rmf_adapter.easy_full_control as rmf_easy
 
+from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String as StringMsg
@@ -1865,10 +1866,22 @@ class RobotAdapter:
         handle.get_result_async().add_done_callback(self.on_goal_result)
 
     def on_goal_result(self, future):
-        self.node.get_logger().info(f'[{self.name}] 도착했습니다.')
+        # 결과를 봐야 한다. 안 보고 끝났다고 알리면 RMF 는 그 자리에 닿은 줄
+        # 알고 다음 단계로 넘어간다 — 픽업에 가지도 않았는데 드랍오프로 가는
+        # 것이 이것 때문이었다.
+        status = getattr(future.result(), 'status', None)
+        ok = status == GoalStatus.STATUS_SUCCEEDED
         with self.lock:
             self.goal_handle = None
-        report(robot=self.name, event='navigate_done')
+        if ok:
+            self.node.get_logger().info(f'[{self.name}] 도착했습니다.')
+            report(robot=self.name, event='navigate_done')
+        else:
+            self.node.get_logger().error(
+                f'[{self.name}] 목적지에 닿지 못했습니다 (Nav2 status '
+                f'{status}). 도착 반경이 코스트맵 한 칸보다 촘촘하면 영영 '
+                f'못 맞춥니다.')
+            report(robot=self.name, event='navigate_failed', status=status)
         self.finish()
 
     def finish(self):

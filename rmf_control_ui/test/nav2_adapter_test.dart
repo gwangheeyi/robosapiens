@@ -107,4 +107,21 @@ void main() {
       expect(script, contains('nav graph 에서'));
     });
   });
+
+  group('실패를 도착이라고 하지 않는다', () {
+    test('Nav2 결과를 보고 가른다', () {
+      // 안 보고 끝났다고 알리면 RMF 는 그 자리에 닿은 줄 알고 다음 단계로
+      // 넘어간다. 픽업에 가지도 않았는데 드랍오프로 가는 것이 이것이었다.
+      expect(script, contains('from action_msgs.msg import GoalStatus'));
+      expect(script, contains('GoalStatus.STATUS_SUCCEEDED'));
+      expect(script, contains("event='navigate_failed'"));
+      expect(script, contains('목적지에 닿지 못했습니다'));
+    });
+
+    test('실패해도 붙잡고 있지 않는다', () {
+      // 안 알리면 그 작업이 영영 안 끝난다.
+      final tail = script.substring(script.indexOf('def on_goal_result'));
+      expect(tail.substring(0, 900), contains('self.finish()'));
+    });
+  });
 }
