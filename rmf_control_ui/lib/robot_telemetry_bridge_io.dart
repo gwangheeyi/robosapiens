@@ -90,6 +90,15 @@ class RobotTelemetryBridge {
   static final RobotTelemetryBridge instance = RobotTelemetryBridge._();
 
   final Map<String, _RobotFeed> _feeds = {};
+
+  /// 죽은 구독을 다시 띄우는 시계.
+  ///
+  /// 백엔드는 앱과 따로 오르내린다. 사람이 다시 붙여 주기를 기다리면 그동안
+  /// 화면은 조용한데 왜 조용한지 알 수 없다.
+  Timer? _healer;
+
+  /// 다시 붙일 로봇. 마지막으로 [sync] 에 들어온 것을 기억해 둔다.
+  final Map<String, RmfProjectRobot> _wanted = {};
   final StreamController<RobotTelemetryStatus> _controller =
       StreamController<RobotTelemetryStatus>.broadcast();
 
@@ -135,6 +144,11 @@ class RobotTelemetryBridge {
       // 스폰 자리가 바뀌면 odom 을 옮길 기준이 달라진다. 토픽이 같아도 다시
       // 붙여야 위치가 어긋나지 않는다.
       if (robot != null &&
+          // 프로세스가 죽었으면 다시 띄워야 한다. 백엔드를 내렸다 올리면
+          // `ros2 topic echo` 도 함께 죽는데, 여기서 그냥 넘기면 앱은
+          // 영영 아무 값도 못 받는다 — 등록도 토픽도 멀쩡한데 화면만
+          // 조용한 것이 그 증상이었다.
+          feed.process != null &&
           '/${robot.gzName}/odom' == feed.topic &&
           robot.spawnX == feed.spawnX &&
           robot.spawnY == feed.spawnY &&
@@ -147,7 +161,34 @@ class RobotTelemetryBridge {
       if (_feeds.containsKey(entry.key)) continue;
       await _open(entry.key, entry.value);
     }
+    _wanted
+      ..clear()
+      ..addAll(wanted);
+    _startHealer();
     _controller.add(status);
+  }
+
+  /// 5초마다 죽은 구독을 다시 띄운다.
+  ///
+  /// 붙을 것이 없으면 시계도 멈춘다. 살려 둘 이유가 없다.
+  void _startHealer() {
+    if (_wanted.isEmpty) {
+      _healer?.cancel();
+      _healer = null;
+      return;
+    }
+    _healer ??= Timer.periodic(const Duration(seconds: 5), (_) async {
+      final dead = [
+        for (final entry in _wanted.entries)
+          if (_feeds[entry.key]?.process == null) entry,
+      ];
+      if (dead.isEmpty) return;
+      for (final entry in dead) {
+        await _feeds.remove(entry.key)?.close();
+        await _open(entry.key, entry.value);
+      }
+      _controller.add(status);
+    });
   }
 
   Future<void> _open(String robotId, RmfProjectRobot robot) async {
@@ -182,6 +223,16 @@ class RobotTelemetryBridge {
             feed.error = null;
             _controller.add(status);
           });
+      // 끝나면 표시를 남긴다. 남기지 않으면 죽은 것을 살아 있는 것으로 알고
+      // 다시 띄우지 않는다.
+      unawaited(
+        process.exitCode.then((code) {
+          if (feed.process != process) return;
+          feed.process = null;
+          feed.error = '토픽 읽기가 끝났습니다. 백엔드가 내려갔을 수 있습니다.';
+          _controller.add(status);
+        }),
+      );
       // 토픽이 없으면 여기로 사유가 온다. 조용히 아무 값도 안 오는 것보다
       // 왜 안 오는지 보이는 편이 낫다.
       unawaited(
@@ -203,6 +254,9 @@ class RobotTelemetryBridge {
 
   /// 전부 끊는다. 앱을 닫거나 프로젝트를 바꿀 때 부른다.
   Future<void> stop() async {
+    _healer?.cancel();
+    _healer = null;
+    _wanted.clear();
     for (final feed in _feeds.values.toList()) {
       await feed.close();
     }

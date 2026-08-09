@@ -128,6 +128,15 @@ class RmfTaskBridge {
             final event = RmfTaskProgress.parse(line);
             if (event != null) _controller.add(event);
           });
+      // 백엔드가 내려가면 이 프로세스도 죽는다. 표시를 안 남기면 살아 있는
+      // 줄 알고 다시 안 띄워, 로봇은 도는데 화면의 진행률만 멈춘다.
+      unawaited(
+        process.exitCode.then((_) {
+          if (_echo != process) return;
+          _echo = null;
+          _watchedFleet = null;
+        }),
+      );
     } catch (_) {
       // 토픽이 아직 없을 수 있다. 그때는 조용히 놔둔다 — 백엔드를 띄우면
       // 다시 부른다.
