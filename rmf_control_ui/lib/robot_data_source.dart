@@ -6,8 +6,10 @@
 library;
 
 import 'rmf_project_config.dart';
+import 'robot_sensor_models.dart';
 
 export 'rmf_project_config.dart' show RobotDataSource;
+export 'robot_sensor_models.dart' show RobotTopic;
 
 /// 고른 실행 방식과 실제로 값을 만들어 낸 곳은 다를 수 있다.
 ///
@@ -33,13 +35,82 @@ bool dataSourceMismatch({
 ({List<String> incoming, List<String> outgoing}) robotTopics(
   RmfProjectRobot? robot,
 ) {
-  if (robot == null) return (incoming: const [], outgoing: const []);
+  final detail = robotTopicDetails(robot);
+  return (
+    incoming: [
+      for (final topic in detail)
+        if (topic.incoming) topic.name,
+    ],
+    outgoing: [
+      for (final topic in detail)
+        if (!topic.incoming) topic.name,
+    ],
+  );
+}
+
+/// 로봇이 주고받는 토픽. 형식과 무엇인지까지 담는다.
+///
+/// 토픽 목록은 **출처와 상관없이 같습니다.** 실물이든 Gazebo 든 같은 이름으로
+/// 같은 형식을 주고받아야 위쪽(Nav2·RMF·앱)이 그대로 돕니다. Mock 만은 아무
+/// 토픽도 쓰지 않습니다 — 앱 안에만 있는 로봇이라 주고받을 상대가 없습니다.
+List<RobotTopic> robotTopicDetails(RmfProjectRobot? robot) {
+  if (robot == null) return const [];
+  // Mock 은 앱이 제 안에서 굴린다. 토픽을 적어 두면 오지 않을 것을 기다리는
+  // 것처럼 보인다.
+  if (!robot.dataSource.usesTopics) return const [];
   final ns = '/${robot.gzName}';
   if (!robot.isMobile) {
-    return (incoming: ['$ns/joint_states'], outgoing: const <String>[]);
+    return [
+      RobotTopic(
+        name: '$ns/joint_states',
+        type: 'sensor_msgs/JointState',
+        incoming: true,
+        what: '관절이 지금 어디에 있는가',
+      ),
+    ];
   }
-  return (
-    incoming: ['$ns/odom', '$ns/scan', '$ns/joint_states'],
-    outgoing: ['$ns/cmd_vel'],
-  );
+  return [
+    RobotTopic(
+      name: '$ns/odom',
+      type: 'nav_msgs/Odometry',
+      incoming: true,
+      what: '바퀴로 잰 위치. 켠 자리가 원점이다',
+    ),
+    RobotTopic(
+      name: '$ns/scan',
+      type: 'sensor_msgs/LaserScan',
+      incoming: true,
+      what: '라이다. 둘레의 거리',
+    ),
+    RobotTopic(
+      name: '$ns/camera/image_raw',
+      type: 'sensor_msgs/Image',
+      incoming: true,
+      what: '앞을 보는 카메라',
+    ),
+    RobotTopic(
+      name: '$ns/camera/camera_info',
+      type: 'sensor_msgs/CameraInfo',
+      incoming: true,
+      what: '카메라의 렌즈 값',
+    ),
+    RobotTopic(
+      name: '$ns/imu_raw',
+      type: 'sensor_msgs/Imu',
+      incoming: true,
+      what: '기울기와 회전',
+    ),
+    RobotTopic(
+      name: '$ns/joint_states',
+      type: 'sensor_msgs/JointState',
+      incoming: true,
+      what: '바퀴가 얼마나 돌았는가',
+    ),
+    RobotTopic(
+      name: '$ns/cmd_vel',
+      type: 'geometry_msgs/Twist',
+      incoming: false,
+      what: '얼마나 빨리 어디로 갈지',
+    ),
+  ];
 }

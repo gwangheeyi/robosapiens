@@ -24,6 +24,8 @@ import 'rmf_project_config.dart';
 import 'operations_log.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
+import 'robot_sensor_feed.dart';
+import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
@@ -605,6 +607,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// runningProjectName 에 남아 있다.
   Future<ui.AppExitResponse> _handleExitRequest() async {
     await RobotTelemetryBridge.instance.stop();
+    RobotSensorFeed.instance.stop();
     final running = runningProjectName;
     if (running == null) return ui.AppExitResponse.exit;
     await stopProject(running);
@@ -4261,12 +4264,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// 등록이 바뀔 때마다 부른다. 이미 붙어 있는 것은 그대로 두므로 자주 불러도
   /// 값이 끊기지 않는다.
+  StreamSubscription<Map<String, RobotSensors>>? _sensorSubscription;
+
   Future<void> _syncTelemetry() async {
     _telemetrySubscription ??= RobotTelemetryBridge.instance.updates.listen((
       status,
     ) {
       if (!mounted) return;
       setState(() => _telemetry = status);
+    });
+    // 라이다·카메라는 relay 노드가 파일로 내려 준다. 볼 로봇만 지켜본다.
+    RobotSensorFeed.instance.watch([
+      for (final robot in _fleetRobots)
+        if (robot.isMobile && robot.dataSource.usesTopics) robot.robotId,
+    ]);
+    _sensorSubscription ??= RobotSensorFeed.instance.updates.listen((_) {
+      if (mounted) setState(() {});
     });
     try {
       await RobotTelemetryBridge.instance.sync(_fleetRobots);
@@ -4428,6 +4441,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           if (task.robotId == robotId) task,
       ],
       telemetry: () => _telemetry,
+      sensorsOf: () => RobotSensorFeed.instance.sensorsOf(robotId),
       toFloor: _floorCoordinate,
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
@@ -5815,6 +5829,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 구독을 남기면 `ros2 topic echo` 가 앱보다 오래 산다.
     unawaited(_telemetrySubscription?.cancel());
     unawaited(RobotTelemetryBridge.instance.stop());
+    // 센서 파일을 읽는 타이머도 함께 멈춘다. 남겨 두면 앱이 사라진 뒤에도
+    // 0.2초마다 디스크를 읽는다.
+    unawaited(_sensorSubscription?.cancel());
+    RobotSensorFeed.instance.stop();
     for (final robot in _mockRobots) {
       robot.image?.dispose();
     }
@@ -6871,6 +6889,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
           robots: _fleetRobots,
           fleetName: fleet.fleetName,
           warnings: nav2.warnings,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: '${mapName}_sensor_relay.py',
+        kind: 'nav2',
+        description:
+            '로봇의 라이다와 카메라를 앱이 읽을 수 있게 파일로 내려 준다. '
+            '앱에는 rclpy 가 없고 카메라 영상은 ros2 topic echo 로 읽기에 '
+            '너무 크다 — 1280×720 한 장이 YAML 로 2.7MB 다.',
+        executable: true,
+        content: buildSensorRelayScript(
+          mapName: mapName,
+          robots: _fleetRobots,
         ),
         generatedAt: now,
       ),
@@ -18421,6 +18453,138 @@ class _SpawnCheckDialogState extends State<_SpawnCheckDialog> {
   }
 }
 
+/// 라이다를 로봇 기준으로 그린다.
+///
+/// 가운데가 로봇이고 위쪽이 로봇의 앞이다. 점 하나가 라이다가 맞힌 곳이다.
+class _ScanPainter extends CustomPainter {
+  const _ScanPainter({required this.scan, required this.live});
+
+  final RobotScan scan;
+  final bool live;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = math.min(size.width, size.height) / 2 - 8;
+
+    // 거리를 가늠할 눈금. 최대 거리의 1/3 씩 세 겹.
+    final grid = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = const Color(0xFF334155);
+    for (var i = 1; i <= 3; i++) {
+      canvas.drawCircle(center, radius * i / 3, grid);
+    }
+
+    // 로봇의 앞을 가리키는 표. 이것이 없으면 어느 쪽이 앞인지 알 수 없다.
+    canvas.drawLine(
+      center,
+      center + Offset(0, -radius),
+      Paint()
+        ..strokeWidth = 1
+        ..color = const Color(0xFF475569),
+    );
+
+    final dot = Paint()
+      ..color = live ? const Color(0xFF38BDF8) : const Color(0xFF64748B);
+    for (var i = 0; i < scan.ranges.length; i++) {
+      final range = scan.ranges[i];
+      // 못 잰 값은 그리지 않는다. 최대 거리로 채워 두면 없는 벽이 둘러선다.
+      if (range <= scan.rangeMin || range >= scan.rangeMax) continue;
+      final point = scanPointOffset(
+        angle: scan.angleAt(i),
+        range: range,
+        maxRange: scan.rangeMax,
+        radius: radius,
+      );
+      canvas.drawCircle(center + Offset(point.dx, point.dy), 1.6, dot);
+    }
+
+    // 로봇 자신.
+    canvas.drawCircle(center, 3, Paint()..color = const Color(0xFFF97316));
+  }
+
+  @override
+  bool shouldRepaint(_ScanPainter oldDelegate) =>
+      oldDelegate.scan != scan || oldDelegate.live != live;
+}
+
+/// relay 가 내려 준 RGBA 화소를 그린다.
+///
+/// `decodeImageFromPixels` 는 비동기라 그리기 전에 한 번 풀어 둔다. 프레임마다
+/// 다시 풀면 화면이 깜빡인다.
+class _CameraImage extends StatefulWidget {
+  const _CameraImage({required this.frame, required this.dimmed});
+
+  final RobotCameraFrame frame;
+  final bool dimmed;
+
+  @override
+  State<_CameraImage> createState() => _CameraImageState();
+}
+
+class _CameraImageState extends State<_CameraImage> {
+  ui.Image? _image;
+  DateTime? _decodedAt;
+
+  @override
+  void initState() {
+    super.initState();
+    _decode();
+  }
+
+  @override
+  void didUpdateWidget(_CameraImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.frame.at != _decodedAt) _decode();
+  }
+
+  @override
+  void dispose() {
+    _image?.dispose();
+    super.dispose();
+  }
+
+  void _decode() {
+    final frame = widget.frame;
+    _decodedAt = frame.at;
+    ui.decodeImageFromPixels(
+      frame.pixels,
+      frame.width,
+      frame.height,
+      ui.PixelFormat.rgba8888,
+      (image) {
+        if (!mounted) {
+          image.dispose();
+          return;
+        }
+        setState(() {
+          _image?.dispose();
+          _image = image;
+        });
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final image = _image;
+    if (image == null) {
+      return const Center(
+        child: Text(
+          '읽는 중',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+      );
+    }
+    return Opacity(
+      // 멈춘 그림을 실시간으로 착각하지 않도록 흐리게 둔다.
+      opacity: widget.dimmed ? .45 : 1,
+      child: RawImage(image: image, fit: BoxFit.cover),
+    );
+  }
+}
+
 class _RobotDetailDialog extends StatefulWidget {
   const _RobotDetailDialog({
     required this.robotId,
@@ -18428,6 +18592,7 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.robotOf,
     required this.tasksOf,
     required this.telemetry,
+    required this.sensorsOf,
     required this.toFloor,
     required this.metersPerPixel,
     required this.waypointLabel,
@@ -18444,6 +18609,10 @@ class _RobotDetailDialog extends StatefulWidget {
   /// 이 로봇이 맡은 작업.
   final List<_MockTask> Function() tasksOf;
   final RobotTelemetryStatus Function() telemetry;
+
+  /// 이 로봇의 라이다·카메라. relay 노드가 파일로 내려 준 것을 읽는다.
+  final RobotSensors Function() sensorsOf;
+
   final Offset Function(Offset point) toFloor;
   final double? metersPerPixel;
   final String Function(Offset point) waypointLabel;
@@ -18536,6 +18705,198 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     padding: const EdgeInsets.only(top: 18, bottom: 6),
     child: Text(text, style: const TextStyle(fontWeight: FontWeight.w800)),
   );
+
+  /// 이 로봇이 주고받는 토픽과, 실제로 들어온 라이다·카메라.
+  ///
+  /// 작업 상세는 `무엇을 하고 있나`를 보여 주고, 여기는 `무엇을 보고 있나`를
+  /// 보여 준다. 같은 화면에 둘 다 두면 어느 쪽이 어느 쪽인지 헷갈린다.
+  List<Widget> _sensorSections() {
+    final robot = _registered;
+    final topics = robotTopicDetails(robot);
+    if (topics.isEmpty) {
+      // Mock 은 주고받는 상대가 없다. 빈 자리를 두는 대신 왜 없는지 적는다.
+      return [
+        _heading('주고받는 토픽'),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            '앱 Mock 로봇은 토픽을 쓰지 않습니다.\n'
+            '앱이 제 안에서 굴리는 로봇이라 주고받을 상대가 없습니다.',
+            style: TextStyle(color: Color(0xFF64748B), height: 1.5),
+          ),
+        ),
+      ];
+    }
+    final sensors = widget.sensorsOf();
+    final now = DateTime.now();
+    return [
+      _heading('주고받는 토픽'),
+      // 출처가 Gazebo 든 실물이든 이름과 형식은 같다. 그래야 위쪽(Nav2·RMF·앱)이
+      // 그대로 돈다.
+      for (final topic in topics) _topicRow(topic),
+      if (sensors.scan != null || sensors.camera != null) ...[
+        _heading('보고 있는 것'),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _scanView(sensors, now),
+            const SizedBox(width: 14),
+            Expanded(child: _cameraView(sensors, now)),
+          ],
+        ),
+      ] else ...[
+        _heading('보고 있는 것'),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            robot!.dataSource == RobotDataSource.gazebo
+                ? '아직 라이다도 카메라도 들어오지 않았습니다.\n'
+                      '백엔드를 띄웠는지, 센서 relay 가 도는지 확인해 주세요.'
+                : '아직 라이다도 카메라도 들어오지 않았습니다.\n'
+                      '로봇이 켜져 있고 토픽이 나오는지 확인해 주세요.',
+            style: const TextStyle(color: Color(0xFF64748B), height: 1.5),
+          ),
+        ),
+      ],
+    ];
+  }
+
+  Widget _topicRow(RobotTopic topic) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 오는 것과 가는 것을 화살표로 가른다. cmd_vel 만 로봇에게 간다.
+        SizedBox(
+          width: 22,
+          child: Text(
+            topic.incoming ? '←' : '→',
+            style: TextStyle(
+              color: topic.incoming
+                  ? const Color(0xFF2563EB)
+                  : const Color(0xFFEA580C),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                topic.name,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '${topic.type} · ${topic.what}',
+                style: const TextStyle(
+                  color: Color(0xFF64748B),
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  /// 라이다를 로봇 기준으로 그린다. 가운데가 로봇, 위쪽이 로봇의 앞이다.
+  Widget _scanView(RobotSensors sensors, DateTime now) {
+    final scan = sensors.scan;
+    final live = sensors.scanIsLive(now: now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          scan == null
+              ? '라이다 · 없음'
+              : live
+              ? '라이다 · ${scan.hits}/${scan.ranges.length}점'
+              : '라이다 · 멈춤',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+            color: live ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          width: 180,
+          height: 180,
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F172A),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: scan == null
+              ? const Center(
+                  child: Text(
+                    '값 없음',
+                    style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                  ),
+                )
+              : CustomPaint(
+                  painter: _ScanPainter(scan: scan, live: live),
+                ),
+        ),
+        if (scan != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            scan.nearest == null
+                ? '둘레에 아무것도 없습니다'
+                : '제일 가까운 것 ${scan.nearest!.toStringAsFixed(2)}m',
+            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _cameraView(RobotSensors sensors, DateTime now) {
+    final frame = sensors.camera;
+    final live = sensors.cameraIsLive(now: now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          frame == null
+              ? '카메라 · 없음'
+              : live
+              ? '카메라 · ${frame.width}×${frame.height}'
+              : '카메라 · 멈춤',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+            color: live ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+          ),
+        ),
+        const SizedBox(height: 4),
+        AspectRatio(
+          aspectRatio: frame == null
+              ? 16 / 9
+              : frame.width / math.max(1, frame.height),
+          child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F172A),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: frame == null
+                ? const Center(
+                    child: Text(
+                      '값 없음',
+                      style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                    ),
+                  )
+                : _CameraImage(frame: frame, dimmed: !live),
+          ),
+        ),
+      ],
+    );
+  }
 
   /// 값의 출처를 크게 세운 띠. 작업 상세와 같은 규칙을 쓴다.
   Widget _sourceBanner() {
@@ -18784,6 +19145,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                   ' · 방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
                   color: _sourceColors[_source],
                 ),
+              ..._sensorSections(),
               _heading('맡은 작업'),
               if (tasks.isEmpty)
                 const Padding(

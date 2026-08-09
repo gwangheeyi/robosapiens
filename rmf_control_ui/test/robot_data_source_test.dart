@@ -102,9 +102,57 @@ void main() {
       expect(topics.incoming, [
         '/pinky_01/odom',
         '/pinky_01/scan',
+        '/pinky_01/camera/image_raw',
+        '/pinky_01/camera/camera_info',
+        '/pinky_01/imu_raw',
         '/pinky_01/joint_states',
       ]);
       expect(topics.outgoing, ['/pinky_01/cmd_vel']);
+    });
+
+    test('토픽마다 무엇인지 사람 말로 적어 둔다', () {
+      // 이름만 보고 무엇인지 알 수 있는 사람은 많지 않다.
+      final detail = robotTopicDetails(pinky);
+      expect(detail, isNotEmpty);
+      for (final topic in detail) {
+        expect(topic.what, isNotEmpty, reason: '${topic.name} 설명이 없습니다');
+        expect(topic.type, contains('/'), reason: '${topic.name} 형식이 없습니다');
+      }
+      final scan = detail.firstWhere((t) => t.name.endsWith('/scan'));
+      expect(scan.incoming, isTrue);
+      final cmd = detail.firstWhere((t) => t.name.endsWith('/cmd_vel'));
+      expect(cmd.incoming, isFalse, reason: 'cmd_vel 은 로봇에게 가는 것이다');
+    });
+
+    test('Mock 로봇은 토픽이 하나도 없다', () {
+      // 앱 안에만 있는 로봇이라 주고받을 상대가 없다. 적어 두면 오지 않을 것을
+      // 기다리는 것처럼 보인다.
+      const mock = RmfProjectRobot(
+        robotId: 'MK-01',
+        displayName: '연습용',
+        model: 'PINKY-GZ',
+        gzName: 'mock_01',
+        zones: ['ambient'],
+      );
+      expect(robotTopicDetails(mock), isEmpty);
+      expect(robotTopics(mock).incoming, isEmpty);
+      expect(robotTopics(mock).outgoing, isEmpty);
+    });
+
+    test('실물과 Gazebo 는 토픽이 같다', () {
+      // 같은 이름으로 같은 형식을 주고받아야 위쪽이 그대로 돈다.
+      const real = RmfProjectRobot(
+        robotId: 'PK-01',
+        displayName: '핑키 1호',
+        model: 'PINKY-GZ',
+        gzName: 'pinky_01',
+        zones: ['ambient'],
+        dataSource: RobotDataSource.real,
+      );
+      expect(
+        robotTopicDetails(real).map((t) => t.name),
+        robotTopicDetails(pinky).map((t) => t.name),
+      );
     });
 
     test('설치 로봇은 관절 상태만 온다', () {
