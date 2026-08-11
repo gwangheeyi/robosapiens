@@ -1,7 +1,9 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/slam_map.dart';
+import 'package:rmf_control_ui/slam_map_store.dart';
 
 /// SLAM 지도를 읽고 원점을 계산하는 부분.
 ///
@@ -102,7 +104,8 @@ free_thresh: 0.25
       // map_saver 는 안 넣지만 다른 도구를 거치면 붙어 온다.
       final bytes = Uint8List.fromList([
         ...'P5\n# 어디서 만든 지도인가\n2 1\n255\n'.codeUnits,
-        7, 9,
+        7,
+        9,
       ]);
       final pgm = parsePgm(bytes);
       expect(pgm.width, 2);
@@ -120,7 +123,9 @@ free_thresh: 0.25
     test('잘린 파일은 조용히 넘기지 않는다', () {
       final bytes = Uint8List.fromList([
         ...'P5\n10 10\n255\n'.codeUnits,
-        1, 2, 3,
+        1,
+        2,
+        3,
       ]);
       expect(() => parsePgm(bytes), throwsA(isA<SlamMapParseError>()));
     });
@@ -133,9 +138,71 @@ free_thresh: 0.25
     test('한 칸 2바이트는 아직 못 읽는다고 밝힌다', () {
       final bytes = Uint8List.fromList([
         ...'P5\n2 1\n65535\n'.codeUnits,
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
       ]);
       expect(() => parsePgm(bytes), throwsA(isA<SlamMapParseError>()));
+    });
+  });
+
+  group('그림 형식 가르기', () {
+    // `map_saver` 는 `--fmt` 와 모드에 따라 PGM 도 PNG 도 낸다. 한 형식만
+    // 읽으면 `회색조 PGM 이 아닙니다: PNG` 로 막힌다 — 실제로 겪은 오류다.
+    test('앞 바이트로 알아낸다', () {
+      expect(
+        mapImageFormat(Uint8List.fromList('P5\n1 1\n255\n'.codeUnits)),
+        MapImageFormat.pgm,
+      );
+      expect(
+        mapImageFormat(Uint8List.fromList('P2\n1 1\n255\n'.codeUnits)),
+        MapImageFormat.pgm,
+      );
+      expect(
+        mapImageFormat(Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0, 0])),
+        MapImageFormat.png,
+      );
+      expect(
+        mapImageFormat(Uint8List.fromList([0x42, 0x4D, 0, 0])),
+        MapImageFormat.bmp,
+      );
+      expect(
+        mapImageFormat(Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0])),
+        MapImageFormat.jpeg,
+      );
+    });
+
+    test('모르는 것과 너무 짧은 것을 가려낸다', () {
+      expect(
+        mapImageFormat(Uint8List.fromList('hello'.codeUnits)),
+        MapImageFormat.unknown,
+      );
+      expect(
+        mapImageFormat(Uint8List.fromList([0x50])),
+        MapImageFormat.unknown,
+      );
+      expect(mapImageFormat(Uint8List(0)), MapImageFormat.unknown);
+    });
+
+    test('확장자를 믿지 않는다', () {
+      // 이름은 사람이 바꿀 수 있다. 내용을 봐야 한다.
+      final store = File('lib/slam_map_store_io.dart').readAsStringSync();
+      expect(store, contains('mapImageFormat(bytes)'));
+      expect(store, contains('MapImageFormat.pgm'));
+      expect(store, contains('ui.instantiateImageCodec'));
+    });
+
+    test('밝기로 환산하지 않고 R 을 그대로 쓴다', () {
+      // 205(모름)가 반올림에서 204·206 이 되면 free/occupied 문턱과 어긋난다.
+      final store = File('lib/slam_map_store_io.dart').readAsStringSync();
+      expect(store, contains('cells[i] = rgba[i * 4];'));
+    });
+
+    test('엔진 자원을 정리한다', () {
+      final store = File('lib/slam_map_store_io.dart').readAsStringSync();
+      expect(store, contains('image.dispose()'));
+      expect(store, contains('codec.dispose()'));
     });
   });
 
@@ -216,6 +283,85 @@ free_thresh: 0.25
       expect(again.originX, closeTo(-.486372, 1e-6));
       expect(again.originY, closeTo(-3.241447, 1e-6));
       expect(again.originYaw, closeTo(.5, 1e-6));
+    });
+  });
+
+  group('두 파일이 짝을 이룬다', () {
+    late final String store = File(
+      'lib/slam_map_store_io.dart',
+    ).readAsStringSync();
+
+    test('.pgm 과 .yaml 을 함께 쓴다', () {
+      // 하나만 쓰면 map_server 가 못 뜬다.
+      expect(store, contains('final image = slamImageName(mapName);'));
+      expect(store, contains('final yaml = slamYamlName(mapName);'));
+      expect(store, contains('writeAsBytes(_toPgm(map)'));
+      expect(store, contains('.writeAsString(stored.toYaml(note: note)'));
+      expect(store, contains('written: [image, yaml]'));
+    });
+
+    test('yaml 을 먼저 고르라고 말한다', () {
+      // 두 파일 중 무엇을 먼저 고르는지가 분명해야 한다. `.pgm` 만 골라서는
+      // 한 칸이 몇 미터인지, 원점이 어디인지 알 수 없다.
+      final page = File('lib/main.dart').readAsStringSync();
+      expect(page, contains('.yaml 을 먼저 고르세요'));
+      expect(page, contains('SLAM 지도 올리기 — .yaml 고르기'));
+      // 파일 고르기 창의 제목에도 순서를 적는다.
+      expect(page, contains('① .yaml 을 먼저 고르세요'));
+      // 실수로 다른 확장자가 넘어오면 원인을 짚는다.
+      expect(
+        page,
+        contains("!lower.endsWith('.yaml') && !lower.endsWith('.yml')"),
+      );
+    });
+
+    test('yaml 만 옮겨 왔을 때 무엇이 빠졌는지 말한다', () {
+      final store = File('lib/slam_map_store_io.dart').readAsStringSync();
+      expect(store, contains('yaml 이 가리키는 그림이 없습니다'));
+      expect(store, contains('yaml 만 옮겨 오면 그림이 없어'));
+      expect(store, contains('`.yaml` 을 다시 고르세요'));
+    });
+
+    test('두 파일 이름이 같은 뿌리를 쓴다', () {
+      // yaml 의 `image:` 가 옆 파일을 가리켜야 한다.
+      expect(slamYamlName('gwanghee'), 'gwanghee_slam.yaml');
+      expect(slamImageName('gwanghee'), 'gwanghee_slam.pgm');
+    });
+
+    test('PGM 머리글에 주석을 넣지 않는다', () {
+      // 이 파일을 읽는 것은 우리 파서가 아니라 map_server 다. 저장소의 기존
+      // toPgm 도 같은 이유로 주석을 안 넣는다 — occupancy_grid.dart 참고.
+      expect(store, contains("ascii.encode('P5\\n"));
+      expect(
+        store,
+        isNot(contains('# rmf_control_ui 가 넣은 SLAM 지도')),
+        reason: '머리글 주석은 어떤 도구가 못 읽는다',
+      );
+    });
+
+    test('머리글이 정확히 아스키 세 줄이다', () {
+      // 한글 주석을 codeUnits 로 쓰면 UTF-8 멀티바이트가 섞여 칸 수가 어긋난다.
+      final map = SlamMap(
+        imageName: 'a_slam.pgm',
+        width: 3,
+        height: 2,
+        resolution: .05,
+        originX: 0,
+        originY: 0,
+        originYaw: 0,
+        cells: Uint8List.fromList([0, 1, 2, 3, 4, 5]),
+      );
+      // 저장 함수와 같은 방식으로 머리글을 만든다.
+      final header = 'P5\n${map.width} ${map.height}\n255\n';
+      expect(header.codeUnits.every((c) => c < 128), isTrue);
+      final bytes = Uint8List.fromList([...header.codeUnits, ...map.cells]);
+      // map_server 처럼 곧바로 읽어 본다.
+      final back = parsePgm(bytes);
+      expect(back.width, 3);
+      expect(back.height, 2);
+      expect(back.cells, [0, 1, 2, 3, 4, 5]);
+      // 머리글 길이가 딱 맞아야 그림이 한 칸도 밀리지 않는다.
+      expect(bytes.length - header.length, map.cells.length);
     });
   });
 

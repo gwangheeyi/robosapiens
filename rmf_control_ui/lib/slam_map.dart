@@ -10,6 +10,7 @@
 /// `occupancy_grid_export.dart` 를 나눠 둔 것과 같은 이유다.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 /// `map_saver` 가 낸 지도 한 장.
@@ -176,6 +177,40 @@ parseSlamMapYaml(String text) {
   );
 }
 
+/// 지도 그림 파일의 종류.
+enum MapImageFormat {
+  /// 회색조 PGM. `map_saver` 의 기본(trinary 모드).
+  pgm,
+
+  /// `map_saver --fmt png` 나 scale 모드가 내는 것.
+  png,
+  bmp,
+  jpeg,
+
+  /// 모르는 형식.
+  unknown,
+}
+
+/// 앞 몇 바이트로 그림 종류를 알아낸다.
+///
+/// yaml 의 `image:` 확장자를 믿지 않는다. 이름은 사람이 바꿀 수 있고, 실제로
+/// `map_saver` 가 `--fmt` 에 따라 다른 것을 내므로 내용을 봐야 한다.
+MapImageFormat mapImageFormat(Uint8List bytes) {
+  if (bytes.length < 4) return MapImageFormat.unknown;
+  if (bytes[0] == 0x50 && (bytes[1] == 0x32 || bytes[1] == 0x35)) {
+    return MapImageFormat.pgm; // 'P2' · 'P5'
+  }
+  if (bytes[0] == 0x89 &&
+      bytes[1] == 0x50 &&
+      bytes[2] == 0x4E &&
+      bytes[3] == 0x47) {
+    return MapImageFormat.png;
+  }
+  if (bytes[0] == 0x42 && bytes[1] == 0x4D) return MapImageFormat.bmp;
+  if (bytes[0] == 0xFF && bytes[1] == 0xD8) return MapImageFormat.jpeg;
+  return MapImageFormat.unknown;
+}
+
 /// 회색조 PGM(P2/P5) 을 읽는다.
 ///
 /// `map_saver` 는 P5(날바이트)를 낸다. P2(아스키)도 받는 이유는 손으로 만든
@@ -209,7 +244,13 @@ parseSlamMapYaml(String text) {
   }
   final magic = tokens[0];
   if (magic != 'P5' && magic != 'P2') {
-    throw SlamMapParseError('회색조 PGM(P5·P2)이 아닙니다: $magic');
+    // 여기까지 오면 부르는 쪽이 형식을 안 보고 넘긴 것이다. PNG·BMP·JPEG 는
+    // 엔진으로 풀어야 하므로 `mapImageFormat` 으로 먼저 갈라야 한다.
+    throw SlamMapParseError(
+      '회색조 PGM(P5·P2)이 아닙니다: $magic\n\n'
+      'PNG·BMP·JPEG 는 다른 길로 읽습니다. 이 오류가 보이면 앱이 형식을 '
+      '가르지 않고 넘긴 것입니다.',
+    );
   }
   final width = int.tryParse(tokens[1]) ?? 0;
   final height = int.tryParse(tokens[2]) ?? 0;
@@ -261,6 +302,108 @@ parseSlamMapYaml(String text) {
     }
   }
   return (width: width, height: height, cells: cells);
+}
+
+/// 이 값이 벽으로 읽히나. `map_server` 와 같은 규칙이다.
+///
+/// 점유 확률은 `(255 - 값) / 255` 다. [negate] 면 뒤집힌다. 이 문턱은 지도마다
+/// yaml 에 따로 적혀 있으므로 지도의 값을 그대로 받아 쓴다.
+bool isOccupiedValue(
+  int value, {
+  required double occupiedThreshold,
+  bool negate = false,
+}) {
+  final probability = negate ? value / 255 : (255 - value) / 255;
+  return probability > occupiedThreshold;
+}
+
+/// 벽으로 읽히는 칸을 다 감싸는 테두리 상자(m). 벽이 없으면 null.
+///
+/// 건물의 겉테두리를 재는 셈이다. 축척을 견줄 때 `모름` 을 빼고 벽만 보는 이유는,
+/// SLAM 지도는 안 돌아본 곳이 넓게 `모름` 으로 남아 그림 크기가 건물 크기와 다르기
+/// 때문이다.
+({double widthMeters, double heightMeters, int cells})? occupiedExtent({
+  required Uint8List cells,
+  required int width,
+  required int height,
+  required double resolution,
+  required double occupiedThreshold,
+  bool negate = false,
+}) {
+  var minCol = width, maxCol = -1, minRow = height, maxRow = -1, count = 0;
+  for (var row = 0; row < height; row++) {
+    for (var col = 0; col < width; col++) {
+      final value = cells[row * width + col];
+      if (!isOccupiedValue(
+        value,
+        occupiedThreshold: occupiedThreshold,
+        negate: negate,
+      )) {
+        continue;
+      }
+      count++;
+      if (col < minCol) minCol = col;
+      if (col > maxCol) maxCol = col;
+      if (row < minRow) minRow = row;
+      if (row > maxRow) maxRow = row;
+    }
+  }
+  if (count == 0) return null;
+  return (
+    // 칸의 바깥 모서리까지 재므로 +1 이다.
+    widthMeters: (maxCol - minCol + 1) * resolution,
+    heightMeters: (maxRow - minRow + 1) * resolution,
+    cells: count,
+  );
+}
+
+/// 도면 격자와 SLAM 지도의 벽 테두리를 견준 결과.
+class WallExtentComparison {
+  const WallExtentComparison({
+    required this.drawingWidth,
+    required this.drawingHeight,
+    required this.slamWidth,
+    required this.slamHeight,
+  });
+
+  final double drawingWidth;
+  final double drawingHeight;
+  final double slamWidth;
+  final double slamHeight;
+
+  double get ratioX => drawingWidth <= 0 ? 0 : slamWidth / drawingWidth;
+  double get ratioY => drawingHeight <= 0 ? 0 : slamHeight / drawingHeight;
+
+  /// 두 축의 기하평균. 한쪽 축만 덜 스캔된 경우의 영향을 줄인다.
+  double get ratio => math.sqrt(ratioX * ratioY);
+
+  /// 도면 축척이 몇 % 어긋나 있나. 양수면 도면이 실제보다 작게 잡혀 있다.
+  double get percent => (ratio - 1) * 100;
+
+  /// 두 축의 비가 서로 얼마나 다른가.
+  ///
+  /// 크면 같은 건물이 아니거나, 회전돼 있거나, 한쪽 복도를 안 돌아본 것이다.
+  /// 그때는 이 숫자를 그대로 축척에 넣으면 안 된다.
+  double get axisDisagreement =>
+      ratio <= 0 ? double.infinity : (ratioX - ratioY).abs() / ratio;
+
+  /// 두 축이 5% 안으로 맞으면 믿어도 된다고 본다.
+  bool get trustworthy => axisDisagreement < .05;
+}
+
+/// 두 지도의 벽 테두리를 견줘 축척 차이를 낸다. 한쪽에 벽이 없으면 null.
+WallExtentComparison? compareWallExtents({
+  required ({double widthMeters, double heightMeters, int cells})? drawing,
+  required ({double widthMeters, double heightMeters, int cells})? slam,
+}) {
+  if (drawing == null || slam == null) return null;
+  if (drawing.widthMeters <= 0 || drawing.heightMeters <= 0) return null;
+  return WallExtentComparison(
+    drawingWidth: drawing.widthMeters,
+    drawingHeight: drawing.heightMeters,
+    slamWidth: slam.widthMeters,
+    slamHeight: slam.heightMeters,
+  );
 }
 
 /// 도면에서 만든 격자와 **범위를 맞춰** SLAM 지도의 원점을 계산한다.

@@ -4,8 +4,10 @@
 /// 지도를 겹쳐 보며 원점을 맞춰야 하므로 둘 다 있어야 한다.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'occupancy_grid_export.dart' show occupancyGridDirectoryName;
 import 'rmf_config_export.dart' show safeMapDirectoryName;
@@ -79,11 +81,12 @@ Future<SlamMapStoreResult> readSlamMapFrom(String yamlPath) async {
         success: false,
         message:
             'yaml 이 가리키는 그림이 없습니다: ${header.imageName}\n\n'
-            '`map_saver` 는 `.yaml` 과 `.pgm` 을 함께 냅니다. 두 파일을 같은 '
-            '디렉터리에 두고 다시 고르세요.',
+            '`map_saver` 는 yaml 과 그림(`.pgm` 또는 `.png`)을 함께 냅니다. '
+            'yaml 만 옮겨 오면 그림이 없어 지도를 만들 수 없습니다.\n\n'
+            '두 파일을 같은 디렉터리에 함께 두고, `.yaml` 을 다시 고르세요.',
       );
     }
-    final pgm = parsePgm(await imageFile.readAsBytes());
+    final pgm = await _readMapImage(await imageFile.readAsBytes());
     return SlamMapStoreResult(
       success: true,
       message: '읽었습니다.',
@@ -178,15 +181,64 @@ Future<SlamMap?> loadStoredSlamMap(String mapName) async {
   return result.map;
 }
 
+/// 지도 그림을 읽어 회색조 칸으로 만든다.
+///
+/// `map_saver` 는 `--fmt` 와 모드에 따라 **PGM 도 PNG 도** 냅니다(scale 모드는
+/// PNG 가 기본이다). 그래서 확장자나 한 형식만 믿으면 안 되고, 앞 바이트로 갈라
+/// 각자 방식으로 읽는다. PGM 은 우리가 직접 읽고(가볍다), 나머지는 엔진에 맡긴다.
+Future<({int width, int height, Uint8List cells})> _readMapImage(
+  Uint8List bytes,
+) async {
+  final format = mapImageFormat(bytes);
+  if (format == MapImageFormat.pgm) return parsePgm(bytes);
+  if (format == MapImageFormat.unknown) {
+    throw const SlamMapParseError(
+      '읽을 수 있는 지도 그림이 아닙니다.\n\n'
+      'PGM · PNG · BMP · JPEG 를 읽습니다. `map_saver` 가 낸 파일이 맞는지, '
+      'yaml 의 `image:` 가 그 파일을 가리키는지 확인하세요.',
+    );
+  }
+
+  // PNG·BMP·JPEG. 엔진으로 풀어 회색조로 옮긴다.
+  final codec = await ui.instantiateImageCodec(bytes);
+  try {
+    final frame = await codec.getNextFrame();
+    final image = frame.image;
+    try {
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data == null) {
+        throw const SlamMapParseError('지도 그림의 픽셀을 읽지 못했습니다.');
+      }
+      final rgba = data.buffer.asUint8List();
+      final count = image.width * image.height;
+      final cells = Uint8List(count);
+      for (var i = 0; i < count; i++) {
+        // 지도 그림은 회색조라 R·G·B 가 같다. R 을 그대로 쓰면 `모름`(205)
+        // 같은 값이 한 눈금도 안 틀어진다. 밝기로 환산하면 반올림에서 205 가
+        // 204 나 206 이 되어 free/occupied 문턱과 어긋난다.
+        cells[i] = rgba[i * 4];
+      }
+      return (width: image.width, height: image.height, cells: cells);
+    } finally {
+      image.dispose();
+    }
+  } finally {
+    codec.dispose();
+  }
+}
+
+/// 회색 PGM(P5) 한 장.
+///
+/// **주석(`#`)을 넣지 않는다.** `occupancy_grid.dart` 의 `toPgm` 과 같은 이유다 —
+/// 어떤 도구는 첫 줄 뒤의 주석을 못 읽는다. 이 파일을 실제로 읽는 것은 우리
+/// 파서가 아니라 `map_server` 이므로, 우리가 읽을 수 있다는 것은 근거가 되지
+/// 않는다. 이게 어디서 온 지도인지는 옆 yaml 의 주석에 적는다.
+///
+/// 머리글은 아스키로 굳혀 쓴다. `codeUnits` 로 쓰면 주석에 한글이 섞였을 때
+/// UTF-8 멀티바이트가 머리글에 들어가 칸 수가 어긋난다.
 Uint8List _toPgm(SlamMap map) {
-  final header = '''
-P5
-# rmf_control_ui 가 넣은 SLAM 지도. 원점은 이 파일 옆 yaml 에 있다.
-${map.width} ${map.height}
-255
-''';
-  final head = header.codeUnits;
-  return Uint8List(head.length + map.cells.length)
-    ..setRange(0, head.length, head)
-    ..setRange(head.length, head.length + map.cells.length, map.cells);
+  final header = ascii.encode('P5\n${map.width} ${map.height}\n255\n');
+  return Uint8List(header.length + map.cells.length)
+    ..setRange(0, header.length, header)
+    ..setRange(header.length, header.length + map.cells.length, map.cells);
 }

@@ -32,6 +32,7 @@ import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
+import 'ros2_inspect_page.dart';
 import 'slam_map.dart';
 import 'slam_map_store.dart';
 import 'rmf_project_runner.dart';
@@ -585,9 +586,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
   static const _menuGrid = 2;
   static const _menuRobots = 3;
   static const _menuFiles = 4;
-  static const _menuTasks = 5;
-  static const _menuLog = 6;
-  static const _menuAnalytics = 7;
+  static const _menuRos2 = 5;
+  static const _menuTasks = 6;
+  static const _menuLog = 7;
+  static const _menuAnalytics = 8;
 
   int _selectedMenu = _menuDashboard;
 
@@ -4706,12 +4708,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     if (_isReadingSlamMap) return;
     final picked = await FilePicker.platform.pickFiles(
-      dialogTitle: 'map_saver 가 낸 .yaml 을 고르세요',
+      dialogTitle: '① .yaml 을 먼저 고르세요 — .pgm 은 따라 읽습니다',
       type: FileType.custom,
       allowedExtensions: const ['yaml', 'yml'],
     );
     final path = picked?.files.singleOrNull?.path;
     if (path == null || !mounted) return;
+
+    // 확장자를 한 번 더 본다. 걸러 두었어도 플랫폼에 따라 다른 파일이 넘어오는
+    // 경우가 있고, 그때 `.pgm` 을 골랐다면 원인을 짚어 줘야 한다 — 그냥
+    // `읽지 못했습니다` 로 끝나면 무엇을 잘못했는지 알 수 없다.
+    final lower = path.toLowerCase();
+    if (!lower.endsWith('.yaml') && !lower.endsWith('.yml')) {
+      await showWaypointErrorDialog(
+        context,
+        title: '.yaml 을 먼저 고르세요',
+        message:
+            '고른 파일: ${path.split(RegExp(r'[/\\]')).last}\n\n'
+            '`map_saver` 는 yaml 과 그림(`.pgm` 또는 `.png`)을 함께 냅니다. '
+            '**`.yaml` 을 고르면 그림은 앱이 따라 읽습니다.** '
+            '그림만 골라서는 한 칸이 몇 미터인지, 원점이 어디인지 알 수 '
+            '없어 지도를 앉힐 수 없습니다.\n\n'
+            '두 파일은 같은 디렉터리에 함께 두세요.',
+      );
+      return;
+    }
 
     setState(() => _isReadingSlamMap = true);
     try {
@@ -4758,6 +4779,103 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } finally {
       if (mounted) setState(() => _isReadingSlamMap = false);
     }
+  }
+
+  /// 도면 축척을 SLAM 지도로 견준 결과. 둘 중 하나가 없으면 null.
+  ///
+  /// 도면의 축척은 사람이 두 점 사이 실제 거리를 재서 넣은 값이라 오차가 있다.
+  /// SLAM 은 로봇이 실제로 굴러 잰 값이라 그걸로 검증할 수 있다. 축척이 틀리면
+  /// building.yaml · nav graph · 격자 · Gazebo 메시가 한꺼번에 틀어진다.
+  WallExtentComparison? _slamScaleComparison() {
+    final slam = _slamMap;
+    final grid = _gridPreviewGrid;
+    if (slam == null || grid == null) return null;
+    return compareWallExtents(
+      drawing: occupiedExtent(
+        cells: grid.cells,
+        width: grid.width,
+        height: grid.height,
+        resolution: grid.resolution,
+        occupiedThreshold: OccupancyGrid.occupiedThreshold,
+      ),
+      slam: occupiedExtent(
+        cells: slam.cells,
+        width: slam.width,
+        height: slam.height,
+        resolution: slam.resolution,
+        occupiedThreshold: slam.occupiedThreshold,
+        negate: slam.negate,
+      ),
+    );
+  }
+
+  /// 견준 비를 도면 축척에 넣는다.
+  ///
+  /// 축척은 `meters / pixels` 이므로 measurement 의 길이에 비를 곱하면 축척도
+  /// 같은 비로 바뀐다. Waypoint 는 픽셀로 저장돼 있어 **다시 찍을 필요가 없다** —
+  /// 월드 좌표가 자동으로 다시 계산된다.
+  Future<void> _applySlamScale(double ratio) async {
+    final measurement = _measurement;
+    if (measurement == null || ratio <= 0) return;
+    final before = _metersPerPixel;
+    final ok = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.straighten, size: 32),
+        title: const Text('도면 축척을 보정할까요'),
+        content: SizedBox(
+          width: 460,
+          child: SelectableText(
+            '축척을 ${((ratio - 1) * 100).toStringAsFixed(2)}% '
+            '${ratio > 1 ? '키웁니다' : '줄입니다'}.\n\n'
+            '지금  ${before?.toStringAsFixed(8) ?? '-'} m/px\n'
+            '뒤    ${((before ?? 0) * ratio).toStringAsFixed(8)} m/px\n\n'
+            '이 값에서 building.yaml · nav graph · 그리드맵 · Gazebo 월드가 '
+            '전부 다시 나옵니다. Waypoint 는 픽셀로 저장돼 있어 다시 찍지 '
+            '않아도 됩니다 — 월드 좌표만 다시 계산됩니다.\n\n'
+            '보정한 뒤 그리드맵을 다시 만들고 배포하세요. 이미 배포된 지도와 '
+            '떠 있는 로봇은 예전 축척을 쓰고 있습니다.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('축척 보정'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    _recordUndo();
+    setState(() {
+      _measurement = _MapMeasurement(
+        start: measurement.start,
+        end: measurement.end,
+        length: measurement.length * ratio,
+        unit: measurement.unit,
+      );
+      // 축척이 바뀌면 격자도 다시 만들어야 한다. 예전 그림을 남겨 두면
+      // 보정이 반영된 것으로 오해한다.
+      _gridPreview?.dispose();
+      _gridPreview = null;
+      _gridPreviewGrid = null;
+      _gridPreviewDirectory = null;
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '축척을 ${_metersPerPixel?.toStringAsFixed(8)} m/px 로 보정했습니다. '
+          '그리드맵을 다시 만드세요.',
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
   }
 
   /// 사람이 맞춘 원점을 SLAM 지도 yaml 에 쓴다.
@@ -10473,6 +10591,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '그리드맵',
                         '로봇',
                         '설정 파일',
+                        'ROS2 확인',
                         '작업',
                         '로그 분석',
                         '운영 분석',
@@ -10952,6 +11071,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onSaveSlamOrigin: _saveSlamOrigin,
                               onUseSlamMapChanged: (value) =>
                                   setState(() => _useSlamMap = value),
+                              slamScale: _slamScaleComparison(),
+                              onApplySlamScale: (ratio) =>
+                                  unawaited(_applySlamScale(ratio)),
                               resolutionMode: _gridResolutionMode,
                               targetWidth: _gridTargetWidth,
                               targetHeight: _gridTargetHeight,
@@ -11070,6 +11192,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRun: _runProjectScript,
                               onStop: _stopProjectScript,
                             )
+                          : _selectedMenu == _menuRos2
+                          ? const Ros2InspectPage()
                           : _selectedMenu == _menuLog
                           ? _ProjectLogPage(
                               mapDirectory: _deployedMapDirectory,
@@ -12963,6 +13087,8 @@ class _GridMapPage extends StatelessWidget {
     required this.onUploadSlam,
     required this.onSaveSlamOrigin,
     required this.onUseSlamMapChanged,
+    required this.slamScale,
+    required this.onApplySlamScale,
     required this.resolutionMode,
     required this.targetWidth,
     required this.targetHeight,
@@ -13008,6 +13134,10 @@ class _GridMapPage extends StatelessWidget {
   final VoidCallback onUploadSlam;
   final void Function(double x, double y) onSaveSlamOrigin;
   final ValueChanged<bool> onUseSlamMapChanged;
+
+  /// 도면 축척과 SLAM 을 견준 결과. 둘 중 하나가 없으면 null.
+  final WallExtentComparison? slamScale;
+  final void Function(double ratio) onApplySlamScale;
 
   /// 격자 한 칸을 무엇으로 정할지.
   final _GridResolutionMode resolutionMode;
@@ -13240,7 +13370,53 @@ class _GridMapPage extends StatelessWidget {
               color: Color(0xFF475569),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
+          // `map_saver` 는 두 파일을 낸다. 무엇을 먼저 고르는지가 분명해야
+          // 한다 — `.pgm` 만 골라서는 한 칸 크기도 원점도 알 수 없다.
+          Container(
+            padding: const EdgeInsets.fromLTRB(15, 12, 15, 13),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEFF6FF),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFFBFDBFE)),
+            ),
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '.yaml 을 먼저 고르세요',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF1E40AF),
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  '`map_saver` 는 yaml 과 그림 두 파일을 냅니다. `.yaml` 을 '
+                  '고르면 옆의 그림은 앱이 따라 읽으므로 따로 고르지 않아도 '
+                  '됩니다. 그림은 PGM·PNG 어느 쪽이어도 됩니다'
+                  '(`--fmt` 에 따라 다릅니다). 두 파일은 같은 디렉터리에 함께 '
+                  '두세요.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.55,
+                    color: Color(0xFF1E3A8A),
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'ros2 run nav2_map_server map_saver_cli -f my_map',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontFamily: 'monospace',
+                    color: Color(0xFF3B5BA9),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
           OutlinedButton.icon(
             onPressed: readingSlam ? null : onUploadSlam,
             icon: readingSlam
@@ -13250,7 +13426,9 @@ class _GridMapPage extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2.2),
                   )
                 : const Icon(Icons.upload_file_outlined, size: 18),
-            label: Text(readingSlam ? '읽는 중…' : 'SLAM 지도 올리기'),
+            label: Text(
+              readingSlam ? '읽는 중…' : 'SLAM 지도 올리기 — .yaml 고르기',
+            ),
             style: OutlinedButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
             ),
@@ -13264,6 +13442,8 @@ class _GridMapPage extends StatelessWidget {
               useSlamMap: useSlamMap,
               onSaveOrigin: onSaveSlamOrigin,
               onUseSlamMapChanged: onUseSlamMapChanged,
+              scale: slamScale,
+              onApplyScale: onApplySlamScale,
             ),
           ],
         ],
@@ -13644,6 +13824,8 @@ class _SlamMapPanel extends StatefulWidget {
     required this.useSlamMap,
     required this.onSaveOrigin,
     required this.onUseSlamMapChanged,
+    required this.scale,
+    required this.onApplyScale,
   });
 
   final SlamMap map;
@@ -13654,6 +13836,10 @@ class _SlamMapPanel extends StatefulWidget {
   final bool useSlamMap;
   final void Function(double x, double y) onSaveOrigin;
   final ValueChanged<bool> onUseSlamMapChanged;
+
+  /// 도면 축척과 견준 결과. 격자를 아직 안 구웠으면 null.
+  final WallExtentComparison? scale;
+  final void Function(double ratio) onApplyScale;
 
   @override
   State<_SlamMapPanel> createState() => _SlamMapPanelState();
@@ -13767,6 +13953,13 @@ class _SlamMapPanelState extends State<_SlamMapPanel> {
                     ),
                   ),
                 ),
+              ),
+            ],
+            if (widget.scale != null) ...[
+              const SizedBox(height: 18),
+              _SlamScalePanel(
+                comparison: widget.scale!,
+                onApply: widget.onApplyScale,
               ),
             ],
             const SizedBox(height: 18),
@@ -13895,6 +14088,139 @@ class _SlamMapPanelState extends State<_SlamMapPanel> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 도면 축척을 SLAM 지도로 견준 결과.
+///
+/// **정합(alignment)의 첫 단계다.** 도면의 축척은 사람이 두 점 사이 실제 거리를
+/// 재서 넣은 값이라 오차가 있고, SLAM 은 로봇이 실제로 굴러 잰 값이다. 두 지도의
+/// 벽 테두리를 견주면 그 오차가 몇 %인지 나온다.
+///
+/// **정답이 아니라 근거다.** 테두리만 보므로 회전은 못 잡고, SLAM 이 한쪽 복도를
+/// 덜 돌았으면 그만큼 작게 나온다. 그래서 두 축의 비가 서로 어긋나면 믿지 말라고
+/// 말하고, 마지막 판단은 사람이 겹쳐 보고 한다.
+class _SlamScalePanel extends StatelessWidget {
+  const _SlamScalePanel({required this.comparison, required this.onApply});
+
+  final WallExtentComparison comparison;
+  final void Function(double ratio) onApply;
+
+  @override
+  Widget build(BuildContext context) {
+    final trust = comparison.trustworthy;
+    final percent = comparison.percent;
+    // 0.5% 안쪽이면 손댈 것이 없다. 측정 오차 범위다.
+    final matched = percent.abs() < .5;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
+      decoration: BoxDecoration(
+        color: matched
+            ? const Color(0xFFF0FDF4)
+            : (trust ? const Color(0xFFFFFBEB) : const Color(0xFFF8FAFC)),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: matched
+              ? const Color(0xFF86EFAC)
+              : (trust ? const Color(0xFFFCD34D) : const Color(0xFFE2E8F0)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                matched ? Icons.check_circle : Icons.straighten,
+                size: 17,
+                color: matched
+                    ? const Color(0xFF16A34A)
+                    : const Color(0xFF92400E),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                '축척 검증',
+                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Text(
+            '도면  ${comparison.drawingWidth.toStringAsFixed(3)} × '
+            '${comparison.drawingHeight.toStringAsFixed(3)} m\n'
+            'SLAM  ${comparison.slamWidth.toStringAsFixed(3)} × '
+            '${comparison.slamHeight.toStringAsFixed(3)} m\n'
+            '가로 ${comparison.ratioX.toStringAsFixed(4)}배 · '
+            '세로 ${comparison.ratioY.toStringAsFixed(4)}배',
+            style: const TextStyle(
+              fontSize: 12.5,
+              height: 1.6,
+              color: Color(0xFF334155),
+            ),
+          ),
+          const SizedBox(height: 9),
+          if (matched)
+            const Text(
+              '두 지도의 벽 테두리가 맞습니다. 도면 축척을 손댈 것이 없습니다.',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.55,
+                color: Color(0xFF15803D),
+              ),
+            )
+          else ...[
+            Text(
+              '도면 축척이 SLAM 대비 ${percent.abs().toStringAsFixed(2)}% '
+              '${percent > 0 ? '작게' : '크게'} 잡혀 있습니다.',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF92400E),
+              ),
+            ),
+            const SizedBox(height: 7),
+            if (!trust)
+              const Text(
+                '다만 가로와 세로의 비가 서로 5% 넘게 어긋납니다. 같은 건물이 '
+                '아니거나, 지도가 돌아가 있거나, SLAM 이 한쪽을 덜 돌아본 '
+                '것입니다. 이 숫자를 그대로 넣지 마세요 — 두 그림을 겹쳐 보고 '
+                '벽이 맞는지 먼저 확인하세요.',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.55,
+                  color: Color(0xFF991B1B),
+                ),
+              )
+            else
+              const Text(
+                '가로·세로의 비가 서로 맞으므로 축척 오차로 볼 수 있습니다. '
+                '보정하면 building.yaml · nav graph · 그리드맵 · Gazebo 월드가 '
+                '전부 다시 나옵니다. Waypoint 는 다시 찍지 않아도 됩니다.',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.55,
+                  color: Color(0xFF78350F),
+                ),
+              ),
+            const SizedBox(height: 10),
+            FilledButton.tonalIcon(
+              onPressed: () => onApply(comparison.ratio),
+              icon: const Icon(Icons.straighten, size: 17),
+              label: Text(
+                '도면 축척 ${percent > 0 ? '키우기' : '줄이기'} '
+                '(${comparison.ratio.toStringAsFixed(4)}배)',
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          const Text(
+            '벽으로 읽히는 칸의 테두리만 견줍니다. 회전은 못 잡습니다.',
+            style: TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8)),
+          ),
+        ],
       ),
     );
   }
@@ -15247,6 +15573,8 @@ class _NavigationRail extends StatelessWidget {
       (Icons.grid_on_outlined, '그리드맵'),
       (Icons.smart_toy_outlined, '로봇'),
       (Icons.description_outlined, '설정 파일'),
+      // 설정 파일 바로 뒤다. 내보낸 설정으로 뜬 것이 실제로 무엇인지 보는 자리다.
+      (Icons.hub_outlined, 'ROS2 확인'),
       (Icons.assignment_outlined, '작업'),
       (Icons.receipt_long_outlined, '로그 분석'),
       (Icons.analytics_outlined, '운영 분석'),
