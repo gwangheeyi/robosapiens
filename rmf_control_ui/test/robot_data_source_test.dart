@@ -168,22 +168,35 @@ void main() {
       expect(topics.outgoing, isEmpty);
     });
 
-    test('다리 설정에 실제로 있는 이름만 알려 준다', () {
+    test('이동 로봇이 알려 주는 이름은 다리 설정에 다 있다', () {
       // 화면과 <맵이름>_gz_bridge.yaml 이 다르면, 있는 줄 알고 찾다가 못 찾는다.
+      //
+      // 설치 로봇은 견주지 않는다. 그 토픽은 다리를 거치지 않기 때문이다 —
+      // gz_ros2_control 이 Gazebo 안에서 controller_manager 를 띄우고
+      // joint_state_broadcaster 가 ROS 로 직접 낸다. 다리 설정에 없는 것이
+      // 맞고, 그래도 화면에는 나와야 한다.
       final bridge = buildProjectGzBridgeYaml(
         mapName: 'gwanghee',
         robots: const [pinky, omx],
       );
-      for (final robot in const [pinky, omx]) {
-        final topics = robotTopics(robot);
-        for (final topic in [...topics.incoming, ...topics.outgoing]) {
-          expect(
-            bridge,
-            contains('ros_topic_name: "$topic"'),
-            reason: '$topic 이 다리 설정에 없다',
-          );
-        }
+      final topics = robotTopics(pinky);
+      for (final topic in [...topics.incoming, ...topics.outgoing]) {
+        expect(
+          bridge,
+          contains('ros_topic_name: "$topic"'),
+          reason: '$topic 이 다리 설정에 없다',
+        );
       }
+    });
+
+    test('설치 로봇 토픽은 다리에 없어도 화면에는 나온다', () {
+      // ros2_control 이 직접 내는 것이라 다리 설정에서는 찾을 수 없다.
+      final bridge = buildProjectGzBridgeYaml(
+        mapName: 'gwanghee',
+        robots: const [pinky, omx],
+      );
+      expect(robotTopics(omx).incoming, ['/omx_01/joint_states']);
+      expect(bridge, isNot(contains('ros_topic_name: "/omx_01/joint_states"')));
     });
   });
 }

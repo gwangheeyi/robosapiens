@@ -83,6 +83,78 @@ void main() {
     expect(find.byType(AlertDialog), findsOneWidget);
   });
 
+  testWidgets('끄는 자리가 팝업 위에 있다', (tester) async {
+    // 예전에는 손잡이가 화면 맨 위에 그려져 팝업에서 82px 떨어져 있었다.
+    // 아무도 잡을 수 없었고, 테스트가 키로 직접 끌었던 탓에 드러나지 않았다.
+    await openDialog(tester);
+
+    final grab = tester.getRect(handle);
+    final box = tester.getRect(
+      find
+          .descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(Material),
+          )
+          .first,
+    );
+
+    expect(box.contains(grab.center), isTrue, reason: '손잡이가 팝업 상자 안에 있어야 한다');
+    expect(grab.top, closeTo(box.top, .01), reason: '팝업 위쪽에 붙어야 한다');
+    expect(grab.width, closeTo(box.width, .01), reason: '상자 너비만큼 잡을 수 있어야 한다');
+  });
+
+  testWidgets('팝업 밖(가림막)을 끌어도 팝업은 안 움직인다', (tester) async {
+    // 표면 전체를 먹어 버리면 가림막을 눌러 닫지도 못한다.
+    await openDialog(tester);
+
+    final before = tester.getCenter(find.byType(AlertDialog));
+    await tester.dragFrom(const Offset(10, 10), const Offset(120, 90));
+    await tester.pumpAndSettle();
+
+    expect(tester.getCenter(find.byType(AlertDialog)), before);
+  });
+
+  testWidgets('안의 목록은 그대로 스크롤된다', (tester) async {
+    // 팝업 이동이 안쪽 스크롤을 빼앗으면 긴 내용을 읽을 수 없다.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showMovableDialog<void>(
+              context: context,
+              builder: (_) => AlertDialog(
+                content: SizedBox(
+                  width: 300,
+                  height: 200,
+                  child: ListView(
+                    children: [
+                      for (var i = 0; i < 40; i++)
+                        SizedBox(height: 40, child: Text('줄 $i')),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            child: const Text('열기'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('열기'));
+    await tester.pumpAndSettle();
+
+    final dialogBefore = tester.getCenter(find.byType(AlertDialog));
+    await tester.drag(find.text('줄 1'), const Offset(0, -200));
+    await tester.pumpAndSettle();
+
+    expect(find.text('줄 0'), findsNothing, reason: '목록이 스크롤되어야 한다');
+    expect(
+      tester.getCenter(find.byType(AlertDialog)),
+      dialogBefore,
+      reason: '스크롤이 팝업을 끌고 다니면 안 된다',
+    );
+  });
+
   testWidgets('옮길 수 있어도 안의 버튼은 그대로 눌린다', (tester) async {
     var taps = 0;
     await openDialog(tester, onPressed: () => taps++);

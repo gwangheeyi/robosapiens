@@ -163,10 +163,52 @@ double occupancyResolutionFor({
   return math.min(byRobot, floorShorterSide / 120).clamp(.01, .05);
 }
 
+/// 격자를 [targetWidth]×[targetHeight] 칸 상자에 넣는 해상도.
+///
+/// Nav2 의 `resolution:` 은 숫자 하나이므로 칸은 정사각이어야 한다. 그래서 두 축
+/// 중 **더 빡빡한 쪽**에 맞춘다 — 그러지 않으면 한쪽이 상자를 넘는다. 건물 비율이
+/// 상자 비율과 다르면 남는 쪽이 생기고, 실제 칸 수는 상자보다 작게 나온다.
+///
+/// **칸 수를 고정하면 해상도가 건물 크기에 따라 정해진다.** 큰 창고에서는 한 칸이
+/// 로봇만 해질 수 있으므로, 부르는 쪽이 [occupancyResolutionTooCoarse] 로 확인해
+/// 사람에게 알려야 한다.
+double occupancyResolutionForTarget({
+  required double widthMeters,
+  required double heightMeters,
+  required int targetWidth,
+  required int targetHeight,
+}) {
+  if (targetWidth <= 0 || targetHeight <= 0) return 0;
+  if (widthMeters <= 0 || heightMeters <= 0) return 0;
+  return math.max(widthMeters / targetWidth, heightMeters / targetHeight);
+}
+
+/// 이 해상도가 로봇에게 너무 거친가.
+///
+/// 한 칸이 로봇 몸의 1/6 보다 크면 좁은 통로가 통째로 막힌 것으로 보인다.
+/// costmap 이 쓰는 0.05m 보다 거친 것도 같이 본다 — 지도가 costmap 보다 거칠면
+/// 벽이 뭉개진 채로 계획에 들어간다.
+/// 딱 경계인 값은 통과시킨다. `0.6 / 6` 이 `0.09999999999999999` 로 나오는 탓에,
+/// 그대로 비교하면 `한 칸 0.1m · 로봇 0.6m`(정확히 6칸)이 경고에 걸린다.
+bool occupancyResolutionTooCoarse({
+  required double resolution,
+  required double robotWidth,
+  double costmapResolution = .05,
+}) {
+  const slack = 1e-9;
+  return resolution > robotWidth / 6 + slack ||
+      resolution > costmapResolution + slack;
+}
+
 /// 바닥 다각형과 벽 선분에서 점유격자를 만든다.
 ///
 /// [floorOutline] 안이 다닐 수 있는 곳, [walls] 근처가 벽, 나머지는 모르는 곳이
 /// 된다. 좌표는 전부 RMF 월드(m)다.
+///
+/// [padToWidth]·[padToHeight] 를 주면 그 칸 수가 되도록 **바깥을 `모름` 으로
+/// 채운다.** 기하는 그대로고 빈 자리만 늘어난다. 격자 크기를 정확히 맞추고 싶을
+/// 때 쓴다 — 정사각 칸을 지키면 건물 비율 때문에 상자를 꽉 채울 수 없기 때문이다.
+/// 필요한 칸 수보다 작게 주면 무시한다(기하를 잘라 내지 않는다).
 ///
 /// [margin] 은 바닥 바깥으로 얼마나 더 담을지다. 벽 바깥까지 담아야 라이다가
 /// 벽을 맞히고 costmap 이 벽 너머를 `모름` 으로 둔다.
@@ -180,6 +222,8 @@ OccupancyGrid? buildOccupancyGrid({
   double wallThickness = rmfWallThickness,
   double margin = .5,
   int maxCells = 25000000,
+  int? padToWidth,
+  int? padToHeight,
 }) {
   if (resolution <= 0) return null;
   final all = <GridPoint>[
@@ -205,8 +249,23 @@ OccupancyGrid? buildOccupancyGrid({
   minY -= pad;
   maxY += pad;
 
-  final width = math.max(1, ((maxX - minX) / resolution).ceil());
-  final height = math.max(1, ((maxY - minY) / resolution).ceil());
+  var width = math.max(1, ((maxX - minX) / resolution).ceil());
+  var height = math.max(1, ((maxY - minY) / resolution).ceil());
+
+  // 상자에 맞춰 바깥을 `모름` 으로 채운다. 기하는 건드리지 않고 범위만 넓히므로
+  // 남는 자리를 양쪽에 반씩 나눠 건물이 가운데 온다.
+  if (padToWidth != null && padToWidth > width) {
+    final extra = (padToWidth - width) * resolution;
+    minX -= extra / 2;
+    maxX += extra / 2;
+    width = padToWidth;
+  }
+  if (padToHeight != null && padToHeight > height) {
+    final extra = (padToHeight - height) * resolution;
+    minY -= extra / 2;
+    maxY += extra / 2;
+    height = padToHeight;
+  }
   if (width * height > maxCells) return null;
 
   final cells = Uint8List(width * height)

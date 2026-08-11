@@ -447,13 +447,22 @@ void main() {
       );
     });
 
-    test('다리는 관절 상태만 잇는다', () {
+    test('설치 로봇에는 다리를 아예 놓지 않는다', () {
+      // 예전에는 joint_states 다리를 놓았는데, 옮길 gz 토픽이 애초에 없었다.
+      // OpenMANIPULATOR 의 Gazebo 플러그인은 gz_ros2_control 하나뿐이라
+      // `gz::sim::systems::JointStatePublisher` 가 없다. 그래서 값은 영영
+      // 안 오면서 같은 ROS 토픽에 발행자만 둘이 되었다 — 조용한 다리 하나와
+      // 진짜 값을 내는 joint_state_broadcaster 하나.
       final yaml = buildProjectGzBridgeYaml(mapName: 'gwanghee', robots: mixed);
-      expect(yaml, contains('ros_topic_name: "/omx_01/joint_states"'));
+      expect(yaml, isNot(contains('ros_topic_name: "/omx_01/joint_states"')));
       // 바퀴도 LiDAR 도 없다. 있지도 않은 토픽에 다리를 놓으면 조용히 놀고 있다.
-      expect(yaml, isNot(contains('/omx_01/odom')));
-      expect(yaml, isNot(contains('/omx_01/cmd_vel')));
-      expect(yaml, isNot(contains('/omx_01/scan')));
+      expect(yaml, isNot(contains('ros_topic_name: "/omx_01/odom"')));
+      expect(yaml, isNot(contains('ros_topic_name: "/omx_01/cmd_vel"')));
+      expect(yaml, isNot(contains('ros_topic_name: "/omx_01/scan"')));
+      // 대신 어디로 오가는지 파일에 적어 둔다. 다리가 없는 것과 빠뜨린 것은
+      // 다르고, 이 파일만 보는 사람이 그 차이를 알 수 있어야 한다.
+      expect(yaml, contains('gz_ros2_control'));
+      expect(yaml, contains('joint_state_broadcaster'));
       // 이동 로봇은 그대로 다 잇는다.
       expect(yaml, contains('ros_topic_name: "/pinky_01/odom"'));
     });

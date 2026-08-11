@@ -286,6 +286,10 @@ class RmfFleetSettings {
 
   RmfFleetSettings copyWith({
     String? fleetName,
+    double? linearVelocity,
+    double? linearAcceleration,
+    double? angularVelocity,
+    double? angularAcceleration,
     double? footprintRadius,
     double? vicinityRadius,
     double? goalToleranceMeters,
@@ -295,10 +299,10 @@ class RmfFleetSettings {
         ? null
         : goalToleranceMeters ?? this.goalToleranceMeters,
     fleetName: fleetName ?? this.fleetName,
-    linearVelocity: linearVelocity,
-    linearAcceleration: linearAcceleration,
-    angularVelocity: angularVelocity,
-    angularAcceleration: angularAcceleration,
+    linearVelocity: linearVelocity ?? this.linearVelocity,
+    linearAcceleration: linearAcceleration ?? this.linearAcceleration,
+    angularVelocity: angularVelocity ?? this.angularVelocity,
+    angularAcceleration: angularAcceleration ?? this.angularAcceleration,
     footprintRadius: footprintRadius ?? this.footprintRadius,
     vicinityRadius: vicinityRadius ?? this.vicinityRadius,
     reversible: reversible,
@@ -709,17 +713,28 @@ String buildProjectGzBridgeYaml({
     buffer.writeln(
       '# ${robot.robotId} · ${robot.displayName} (${robot.kind.label})',
     );
-    // 설치 로봇은 바퀴도 LiDAR 도 없다. 관절 상태만 오간다. 나머지는
-    // ros2_control 이 컨트롤러 인터페이스로 직접 주고받는다.
+    // 설치 로봇에는 다리를 놓지 않는다.
+    //
+    // 여기에 `joint_states` 다리를 놓아 두었었는데, 옮길 gz 토픽이 애초에
+    // 없었다. 이동 로봇의 URDF 에는 `gz::sim::systems::JointStatePublisher` 가
+    // 있어 gz 쪽에 그 이름이 생긴다. OpenMANIPULATOR 의 Gazebo 플러그인은
+    // `gz_ros2_control` 하나뿐이라 gz 토픽을 아무것도 내지 않는다.
+    //
+    // 그 대신 `gz_ros2_control` 이 Gazebo 프로세스 **안에서**
+    // controller_manager 를 띄우고 ROS 2 로 직접 말한다 —
+    // `joint_state_broadcaster` 가 같은 이름의 ROS 토픽을 내고, 팔은
+    // `arm_controller`·`gripper_controller` 의 액션으로 움직인다. 다리를
+    // 거치지 않는다.
+    //
+    // 그래서 다리를 놓으면 값은 영영 오지 않으면서 같은 토픽에 발행자만 둘이
+    // 된다 — 조용한 다리 하나와 진짜 값을 내는 broadcaster 하나. "다리는
+    // 걸려 있는데 값이 안 온다" 로 보이던 것이 이것이다.
     if (!robot.isMobile) {
-      entry(
-        buffer,
-        ros: '$ns/joint_states',
-        gz: '$ns/joint_states',
-        rosType: 'sensor_msgs/msg/JointState',
-        gzType: 'gz.msgs.Model',
-        direction: 'GZ_TO_ROS',
-      );
+      buffer
+        ..writeln('#   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.')
+        ..writeln('#   관절 상태: joint_state_broadcaster 가 $ns/joint_states 로 낸다.')
+        ..writeln('#   팔 명령: $ns/arm_controller · $ns/gripper_controller 액션.')
+        ..writeln();
       continue;
     }
     entry(
@@ -2070,12 +2085,22 @@ if __name__ == '__main__':
 /// 붙인다. 로봇들은 `map` 프레임을 함께 쓰고 `<로봇>/odom` 만 서로 다르다.
 /// [warnings] 는 파라미터를 다시 쓰면서 손대지 못한 것이다. 여기 주석으로
 /// 적어 둔다 — 이 launch 가 안 뜰 때 사람이 제일 먼저 여는 파일이다.
+/// [mapYamlName] 은 `nav2_map/` 안에서 `map_server` 가 띄울 파일 이름이다.
+///
+/// 기본은 도면에서 만든 `<맵>.yaml` 이다. 실물 건물에서 SLAM 으로 뜬 지도를
+/// 올려 그것을 쓰기로 골랐으면 `<맵>_slam.yaml` 이 들어온다. 이 값을 못박아
+/// 두었더니 SLAM 지도를 올려도 `map_server` 는 계속 도면 지도를 띄웠다.
 String buildProjectNav2LaunchXml({
   required String mapName,
   required List<RmfProjectRobot> robots,
   String? fleetName,
+  String? mapYamlName,
   List<String> warnings = const [],
 }) {
+  final mapYaml = (mapYamlName == null || mapYamlName.trim().isEmpty)
+      ? '$mapName.yaml'
+      : mapYamlName.trim();
+  final usingSlam = mapYaml != '$mapName.yaml';
   final navigating = robots
       .where((robot) => robot.isMobile && robot.runsInGazebo)
       .toList();
@@ -2090,8 +2115,15 @@ String buildProjectNav2LaunchXml({
     ..writeln('  그래서 한 TF 트리에 map → pinky_01/odom, map → pinky_02/odom')
     ..writeln('  이 나란히 선다.')
     ..writeln('')
-    ..writeln('  지도는 nav2_map/ 에 있다. 도면에서 만든 것이라 원점이 RMF')
-    ..writeln('  월드에 정확히 맞는다.')
+    ..writeln('  지도는 nav2_map/$mapYaml 이다.');
+  if (usingSlam) {
+    buffer
+      ..writeln('  로봇이 SLAM 으로 뜬 지도다. 원점을 사람이 RMF 월드에 맞춰')
+      ..writeln('  두었다 — 그 값이 틀리면 로봇이 엉뚱한 데로 간다.');
+  } else {
+    buffer.writeln('  도면에서 만든 것이라 원점이 RMF 월드에 정확히 맞는다.');
+  }
+  buffer
     ..writeln('')
     ..writeln('  아직 RMF 와 이어지지 않았다. 지금은 Nav2 만 따로 돈다.');
   if (warnings.isNotEmpty) {
@@ -2119,7 +2151,7 @@ String buildProjectNav2LaunchXml({
     ..writeln('        name="map_server" output="screen">')
     ..writeln(
       '    <param name="yaml_filename" '
-      'value="\$(var map_dir)/nav2_map/$mapName.yaml"/>',
+      'value="\$(var map_dir)/nav2_map/$mapYaml"/>',
     )
     ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
     // `/map` 은 RMF 의 building_map_server 가 이미 쓴다. 같이 쓰면 한 토픽에

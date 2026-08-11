@@ -22,10 +22,19 @@ cd /home/gyi/robosapiens/rmf_control_ui
 flutter run -d linux
 ```
 
-창고 맵은 **지도 이름으로 구분되는 프로젝트 단위**로 MySQL `robosapiens`
+창고 맵은 **사람이 정한 프로젝트 이름으로 구분되는 단위**로 MySQL `robosapiens`
 데이터베이스에 저장됩니다(`map_projects`, `map_project_waypoints`,
-`map_project_lanes`). 프로젝트가 다르면 Waypoint·Lane·축척이 전부 별개이며,
-같은 이름으로 저장하려 하면 덮어쓸지 다른 이름을 쓸지 먼저 확인합니다.
+`map_project_lanes`). 프로젝트가 다르면 Waypoint·Lane·축척·도면이 전부 별개이며,
+디스크 산출물도 `rmf_maps/<프로젝트이름>/` 으로 갈립니다.
+
+**프로젝트 이름은 도면 파일 이름과 무관합니다.** `새 프로젝트`로 이름을 먼저
+정하고 도면을 올리므로, 같은 `warehouse.png`로 `2층창고_v2`와 `2층창고_v3`처럼
+서로 다른 프로젝트를 만들 수 있습니다. 도면은 올리는 즉시 열린 프로젝트에
+저장됩니다(`map_projects.drawing_bytes`와 프로젝트 디렉터리에 한 장씩).
+
+이름을 먼저 정하지 않고 도면부터 올리면 도면 파일 이름을 임시로 쓰고, `프로젝트
+저장`에서 이름을 확정합니다. 그때 남의 프로젝트와 이름이 겹치면 덮어쓸지 다른
+이름을 쓸지 먼저 확인합니다(열려 있는 내 프로젝트에 저장할 때는 묻지 않습니다).
 자세한 내용은 [맵 작성 및 배포 가이드](docs/MAP_AUTHORING_AND_DEPLOYMENT.md)의
 `맵 프로젝트 저장` 절을 참고하세요.
 

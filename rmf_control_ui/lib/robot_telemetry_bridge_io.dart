@@ -34,6 +34,14 @@ String _withRosEnvironment(String command) {
       '$command';
 }
 
+/// 이 로봇에서 살아 있는지 확인할 토픽.
+///
+/// 이동 로봇은 `/odom` 이다. 설치 로봇은 바퀴가 없어 `/odom` 이 아예 없다 —
+/// 그런데도 `/odom` 을 읽으러 가서, 등록도 Gazebo 도 멀쩡한 OpenMANIPULATOR 가
+/// 앱에서는 영영 Mock 으로만 보였다. 팔이 내는 것은 관절 상태다.
+String _liveTopicFor(RmfProjectRobot robot) =>
+    robot.isMobile ? '/${robot.gzName}/odom' : '/${robot.gzName}/joint_states';
+
 /// 로봇 한 대의 위치 토픽을 읽는 자식 프로세스.
 class _RobotFeed {
   _RobotFeed({
@@ -149,7 +157,7 @@ class RobotTelemetryBridge {
           // 영영 아무 값도 못 받는다 — 등록도 토픽도 멀쩡한데 화면만
           // 조용한 것이 그 증상이었다.
           feed.process != null &&
-          '/${robot.gzName}/odom' == feed.topic &&
+          _liveTopicFor(robot) == feed.topic &&
           robot.spawnX == feed.spawnX &&
           robot.spawnY == feed.spawnY &&
           robot.spawnHeading == feed.spawnHeading) {
@@ -192,7 +200,12 @@ class RobotTelemetryBridge {
   }
 
   Future<void> _open(String robotId, RmfProjectRobot robot) async {
-    final topic = '/${robot.gzName}/odom';
+    final topic = _liveTopicFor(robot);
+    // 설치 로봇은 제자리에 붙어 있다. 자세를 풀어낼 것이 없으므로 관절 이름만
+    // 받아 살아 있는지만 본다 — 값이 온다는 것이 곧 Gazebo 에 올라와 있고
+    // 컨트롤러가 돌고 있다는 뜻이다. 자리는 등록에서 정한 spawn 그대로다.
+    final stationary = !robot.isMobile;
+    final field = stationary ? 'name' : 'pose.pose';
     final feed = _RobotFeed(
       robotId: robotId,
       topic: topic,
@@ -204,13 +217,27 @@ class RobotTelemetryBridge {
     try {
       final process = await Process.start('bash', [
         '-lc',
-        _withRosEnvironment('exec ros2 topic echo $topic --field pose.pose --csv'),
+        _withRosEnvironment('exec ros2 topic echo $topic --field $field --csv'),
       ]);
       feed.process = process;
       feed.lines = process.stdout
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
+            if (stationary) {
+              // 한 줄이라도 오면 살아 있는 것이다. 관절 이름을 파싱하지는
+              // 않는다 — 팔이 어느 각도인지는 앱 지도에 그릴 것이 없다.
+              if (line.trim().isEmpty) return;
+              feed.pose = RobotPose(
+                x: feed.spawnX ?? 0,
+                y: feed.spawnY ?? 0,
+                heading: feed.spawnHeading,
+                at: DateTime.now(),
+              );
+              feed.error = null;
+              _controller.add(status);
+              return;
+            }
             final pose = RobotPose.parseCsv(line, DateTime.now());
             if (pose == null) return;
             // odom 은 올린 자리가 원점이다. 그대로 두면 홈1 에 세운 로봇이

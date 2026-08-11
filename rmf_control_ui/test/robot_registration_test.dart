@@ -4,6 +4,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/main.dart';
 
+/// `static const _menuXxx = N;` 에서 N 을 읽는다.
+int _menuSlot(String source, String name) {
+  final match = RegExp('static const $name = (\\d+);').firstMatch(source);
+  if (match == null) throw StateError('$name 선언이 없다');
+  return int.parse(match.group(1)!);
+}
+
+/// 상단 제목 목록을 차례대로 읽는다. 자리 번호로 바로 찾을 수 있게 한다.
+List<String> _menuTitles(String source) {
+  final start = source.indexOf('title: const [');
+  final end = source.indexOf('][_selectedMenu]', start);
+  return RegExp("'([^']+)'")
+      .allMatches(source.substring(start, end))
+      .map((m) => m.group(1)!)
+      .toList();
+}
+
 /// 로봇 메뉴에서 로봇을 등록하고, 등록한 로봇만 스폰되는지 확인한다.
 ///
 /// 등록은 원래 맵 관리의 RMF 설정 창 안에만 있었다. 로봇을 다루러 온 사람이
@@ -280,13 +297,108 @@ void main() {
       expect(titles.indexOf('설정 파일'), lessThan(titles.indexOf('작업')));
     });
 
-    test('작업 화면 번호가 제목 차례와 맞는다', () {
+    test('메뉴 자리마다 이름이 있다', () {
+      // 예전에는 화면 번호가 날숫자로 흩어져 있어, 메뉴를 가운데 하나 끼울 때
+      // 뒤의 숫자를 전부 밀어야 했다. 한 군데만 놓치면 설정 파일을 눌렀는데
+      // 작업이 열린다. 이름을 붙여 그 실수를 없앤다.
+      final source = File('lib/main.dart').readAsStringSync();
+      expect(source, isNot(contains('_selectedMenu == 0')));
+      expect(source, contains('static const _menuDashboard = 0;'));
+      expect(source, contains('static const _menuGrid = 2;'));
+    });
+
+    test('화면 번호가 제목 차례와 맞는다', () {
       // 번호와 제목이 어긋나 설정 파일을 눌렀는데 작업이 열린 적이 있다.
       final source = File('lib/main.dart').readAsStringSync();
-      final tasks = source.indexOf('_selectedMenu == 4');
-      final files = source.indexOf('_selectedMenu == 3');
-      expect(source.substring(tasks, tasks + 80), contains('_TaskManagementPage'));
-      expect(source.substring(files, files + 80), contains('_ProjectFilesPage'));
+      final titles = _menuTitles(source);
+      // 자리 이름 → 그 자리에 떠야 하는 제목과 화면 위젯.
+      const expected = {
+        '_menuDashboard': ('대시보드', '_MainDashboard'),
+        '_menuGrid': ('그리드맵', '_GridMapPage'),
+        '_menuRobots': ('로봇', '_RobotManagementPage'),
+        '_menuFiles': ('설정 파일', '_ProjectFilesPage'),
+        '_menuTasks': ('작업', '_TaskManagementPage'),
+        '_menuLog': ('로그 분석', '_ProjectLogPage'),
+        '_menuAnalytics': ('운영 분석', '_OperationsAnalyticsPage'),
+      };
+      for (final entry in expected.entries) {
+        final slot = _menuSlot(source, entry.key);
+        expect(
+          titles[slot],
+          entry.value.$1,
+          reason: '${entry.key}($slot) 자리의 제목이 어긋났다',
+        );
+        final branch = source.indexOf('_selectedMenu == ${entry.key}');
+        expect(branch, greaterThan(-1), reason: '${entry.key} 분기가 없다');
+        expect(
+          source.substring(branch, branch + 90),
+          contains(entry.value.$2),
+          reason: '${entry.key} 자리에 다른 화면이 붙었다',
+        );
+      }
+    });
+
+    test('넘치는 번호로도 터지지 않는다', () {
+      // 폴백이 메뉴보다 짧은 목록을 인덱스로 훑어, 메뉴를 하나 늘리면 범위
+      // 넘침으로 터졌다.
+      final source = File('lib/main.dart').readAsStringSync();
+      expect(source, contains('_ComingSoonPage(title:'));
+      expect(
+        source.substring(source.indexOf('_ComingSoonPage(title:')),
+        isNot(startsWith('_ComingSoonPage(title: const [')),
+      );
+    });
+  });
+
+  group('그리드맵 메뉴', () {
+    test('맵 관리 바로 뒤에 온다', () {
+      // 도면에서 파생되는 산출물이라 맵 다음이 제자리다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final menu = source.substring(
+        source.indexOf("(Icons.grid_view_rounded, '대시보드')"),
+        source.indexOf("(Icons.analytics_outlined, '운영 분석')"),
+      );
+      expect(menu.indexOf('맵 관리'), lessThan(menu.indexOf('그리드맵')));
+      expect(menu.indexOf('그리드맵'), lessThan(menu.indexOf('로봇')));
+    });
+
+    testWidgets('왼쪽 메뉴에서 바로 열린다', (tester) async {
+      // 맵 관리 패널 안에도 같은 단추가 있지만, 도면을 고친 뒤 지도만 다시
+      // 굽는 일이 잦아 찾아 들어가지 않아도 되게 꺼내 두었다.
+      tester.view.physicalSize = const Size(1600, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(const RmfControlApp());
+      await tester.pumpAndSettle();
+
+      expect(find.text('그리드맵'), findsOneWidget);
+      await tester.tap(find.text('그리드맵'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('그리드맵 작성'), findsOneWidget);
+      // 아무것도 없는 상태에서는 무엇이 모자란지 적어 준다.
+      expect(find.text('아직 만들 수 없습니다'), findsOneWidget);
+      expect(find.textContaining('도면을 올리세요'), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, '그리드맵 만들기'),
+      );
+      expect(
+        button.onPressed,
+        isNull,
+        reason: '준비가 안 된 채로 누르면 실패 팝업만 뜬다',
+      );
+    });
+
+    test('못 만들 때는 흐린 단추만 두지 않고 이유를 적는다', () {
+      // 흐린 단추만 있으면 왜 안 되는지 알 수 없어, 사람이 배포를 처음부터
+      // 다시 돌린다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final page = source.substring(source.indexOf('class _GridMapPage'));
+      expect(page, contains('아직 만들 수 없습니다'));
+      expect(page, contains('도면을 올리세요'));
+      expect(page, contains('Measurement 로 축척을 잡으세요'));
+      expect(page, contains('Floor 자동 생성을 하세요'));
     });
   });
 
@@ -300,14 +412,11 @@ void main() {
       expect(menu.indexOf('작업'), lessThan(menu.indexOf('로그 분석')));
     });
 
-    test('화면 번호가 제목과 맞는다', () {
+    test('작업 다음 자리다', () {
       final source = File('lib/main.dart').readAsStringSync();
-      final logs = source.indexOf('_selectedMenu == 5');
-      final analytics = source.indexOf('_selectedMenu == 6');
-      expect(source.substring(logs, logs + 70), contains('_ProjectLogPage'));
       expect(
-        source.substring(analytics, analytics + 80),
-        contains('_OperationsAnalyticsPage'),
+        _menuSlot(source, '_menuLog'),
+        _menuSlot(source, '_menuTasks') + 1,
       );
     });
   });

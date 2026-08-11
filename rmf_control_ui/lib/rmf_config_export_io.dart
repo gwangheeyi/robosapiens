@@ -8,6 +8,7 @@
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'map_project_models.dart';
 
@@ -66,6 +67,32 @@ String? safeExportRelativePath(String fileName) {
   if (segments.isEmpty) return null;
   if (segments.any((segment) => segment == '.' || segment == '..')) return null;
   return segments.join('/');
+}
+
+/// 도면 이미지를 `rmf_maps/<프로젝트이름>/` 아래에 쓴다.
+///
+/// 원장은 MySQL 의 `drawing_bytes` 다. 그런데도 디스크에 한 장 남기는 이유는
+/// 셋이다. 배포 스크립트가 파일 경로로 이미지를 받고, `building.yaml` 의
+/// `drawing.filename` 이 이 파일을 가리키고, 프로젝트 디렉터리만 열어 봐도
+/// 어느 도면으로 만든 창고인지 알 수 있어야 한다.
+///
+/// 같은 도면으로 만든 다른 프로젝트는 디렉터리가 다르므로 서로 덮어쓰지 않는다.
+Future<String?> exportProjectDrawing({
+  required String mapName,
+  required String fileName,
+  required Uint8List bytes,
+}) async {
+  final safeName = safeExportRelativePath(fileName);
+  if (safeName == null) return null;
+  final root = _findProjectRoot();
+  if (root == null) return null;
+  final target = Directory(
+    '${root.path}/rmf_maps/${safeMapDirectoryName(mapName)}',
+  );
+  await target.create(recursive: true);
+  final file = File('${target.path}/$safeName');
+  await file.writeAsBytes(bytes, flush: true);
+  return file.path;
 }
 
 /// [files] 를 `rmf_maps/<맵이름>/` 아래에 쓴다.

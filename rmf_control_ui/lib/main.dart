@@ -16,6 +16,7 @@ import 'map_geometry.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'nav2_params.dart';
+import 'nav2_speed_limits.dart';
 import 'nav2_vendor_params.dart';
 import 'occupancy_grid.dart';
 import 'project_log.dart';
@@ -31,6 +32,8 @@ import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
+import 'slam_map.dart';
+import 'slam_map_store.dart';
 import 'rmf_project_runner.dart';
 import 'rmf_task_bridge.dart';
 import 'rmf_task_request.dart';
@@ -462,10 +465,70 @@ class ControlDashboard extends StatefulWidget {
   State<ControlDashboard> createState() => _ControlDashboardState();
 }
 
+/// 격자 한 칸을 무엇으로 정할지.
+enum _GridResolutionMode {
+  /// 로봇 몸 6칸·바닥 짧은 쪽 120칸으로 앱이 정한다.
+  auto,
+
+  /// 정해진 칸 수 상자에 맞춘다. 기본이다.
+  target,
+
+  /// 사람이 미터로 직접 넣는다.
+  manual,
+}
+
 class _ControlDashboardState extends State<ControlDashboard> {
   final TransformationController _mapTransform = TransformationController();
   UploadedDrawing? _drawing;
-  String? _mapNameOverride;
+
+  /// 그리드맵을 굽고 있는 중인가. 커서와 단추가 이걸 보고 바뀐다.
+  bool _isGeneratingGrid = false;
+
+  /// 격자 한 칸을 무엇으로 정할지.
+  ///
+  /// 기본은 `target` — 800×600 칸 상자에 맞춘다. 파일 크기가 예측 가능해지고,
+  /// gwanghee·project1 규모에서는 자동 계산식보다 13배 촘촘해진다.
+  ///
+  /// 다만 칸 수를 고정하면 **해상도가 건물 크기에 따라 정해진다.** 큰 창고에서는
+  /// 한 칸이 로봇만 해질 수 있어서 화면이 그때 경고한다.
+  _GridResolutionMode _gridResolutionMode = _GridResolutionMode.target;
+  int _gridTargetWidth = 800;
+  int _gridTargetHeight = 600;
+
+  /// 상자를 `모름` 으로 채워 정확히 그 칸 수를 만들지.
+  ///
+  /// 정사각 칸을 지키면 건물 비율 때문에 상자를 꽉 채울 수 없다. 800×600 이라는
+  /// 숫자를 그대로 얻으려면 남는 쪽을 채워야 한다.
+  bool _gridPadToTarget = true;
+
+  /// `manual` 모드에서 쓸 한 칸 크기(m).
+  double _gridManualResolution = .02;
+
+  /// Nav2 가 도면 지도 대신 SLAM 지도를 띄울지.
+  ///
+  /// launch 가 지도 경로를 못박고 있어서, 이 선택이 없으면 SLAM 지도를 올려도
+  /// `map_server` 는 계속 도면 지도를 띄운다.
+  bool _useSlamMap = false;
+
+  /// 이 프로젝트에 넣어 둔 SLAM 지도. 없으면 아직 안 올렸다.
+  SlamMap? _slamMap;
+  ui.Image? _slamPreview;
+  bool _isReadingSlamMap = false;
+
+  /// 마지막으로 구운 그리드맵. 화면에 그림으로 보여 준다.
+  ui.Image? _gridPreview;
+  OccupancyGrid? _gridPreviewGrid;
+  String? _gridPreviewDirectory;
+
+  /// 사람이 정한 프로젝트 이름. 정해져 있으면 도면 파일 이름을 이기고, 도면을
+  /// 갈아 끼워도 그대로다.
+  ///
+  /// 예전에는 이 값이 없으면 도면 파일 이름이 곧 프로젝트 이름이었고, 도면을
+  /// 올릴 때마다 여기를 null 로 되돌렸다. 그래서 같은 `warehouse.png` 로는
+  /// 늘 `warehouse` 프로젝트가 되어, 같은 도면으로 다른 버전을 만들려면 저장
+  /// 단계에서 이름 충돌 팝업을 거쳐야 했다. 이름을 먼저 정하는 길(`새
+  /// 프로젝트`)을 두고, 도면 올리기가 이 값을 건드리지 않게 했다.
+  String? _projectName;
   String? _projectFileName;
   MapStage _stage = MapStage.upload;
   bool _isPicking = false;
@@ -510,7 +573,23 @@ class _ControlDashboardState extends State<ControlDashboard> {
   bool _showVertexLabels = true;
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
-  int _selectedMenu = 0;
+
+  /// 왼쪽 메뉴에서 지금 보고 있는 화면.
+  ///
+  /// 자리마다 이름을 둔다. 숫자를 그냥 흩어 두면 메뉴를 가운데 하나 끼울 때
+  /// 뒤의 숫자를 전부 같이 밀어야 하고, 한 군데만 놓치면 엉뚱한 화면이 열린다.
+  /// 순서는 일하는 차례다 — 맵을 만들고, 그 도면에서 지도를 굽고, 로봇을
+  /// 올리고, 설정을 내보내고, 작업을 시킨다.
+  static const _menuDashboard = 0;
+  static const _menuMap = 1;
+  static const _menuGrid = 2;
+  static const _menuRobots = 3;
+  static const _menuFiles = 4;
+  static const _menuTasks = 5;
+  static const _menuLog = 6;
+  static const _menuAnalytics = 7;
+
+  int _selectedMenu = _menuDashboard;
 
   AppLifecycleListener? _exitListener;
 
@@ -643,8 +722,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
       // 갈 곳 없는 목적지를 들고 있는 작업이 화면에 남는다.
       _mockTasks.clear();
       _homeReservations.clear();
+      // SLAM 지도도 프로젝트에 딸린다. 앞 프로젝트의 지도를 남겨 두면 다른
+      // 창고의 지도를 보며 원점을 맞추게 된다.
+      _slamPreview?.dispose();
+      _slamPreview = null;
+      _slamMap = null;
     });
     if (mapName == null) return;
+    // 넣어 둔 SLAM 지도가 있으면 올려 준다. 없으면 조용히 지나간다.
+    unawaited(_loadStoredSlam(mapName));
     await _loadMockTasks();
     if (!mounted) return;
     await _pollPendingOrders();
@@ -1448,10 +1534,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     return;
                   }
                 }
-                Navigator.pop(
-                  dialogContext,
-                  (width!, radius!, margin!, tolerance),
-                );
+                Navigator.pop(dialogContext, (
+                  width!,
+                  radius!,
+                  margin!,
+                  tolerance,
+                ));
               },
               child: const Text('기준 저장'),
             ),
@@ -3118,7 +3206,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _fitMapToScreen();
       _recordUndo();
       setState(() {
-        _mapNameOverride = null;
+        // 도면을 갈아 끼워도 프로젝트는 그대로다. 예전에는 여기서
+        // 이름을 지워 도면 파일 이름으로 되돌렸다.
         _projectFileName = null;
         _mapScenarioSummary = null;
         _drawing = UploadedDrawing(
@@ -3158,9 +3247,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _activeLaneEndpoint = null;
         _isWaypointMode = false;
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('${file.name} 도면을 불러왔습니다.')));
+      // 열린 프로젝트가 있으면 도면을 그 프로젝트에 바로 넣는다. 저장을
+      // 미루면 앱이 죽었을 때 어떤 도면으로 시작했는지가 사라지고, 무엇보다
+      // 프로젝트 목록에 도면 이름이 안 떠서 어느 창고인지 알 수 없다.
+      final project = _openProjectName;
+      var stored = false;
+      if (project != null) {
+        try {
+          await _writeMapProject(project);
+          stored = true;
+        } catch (error) {
+          if (!mounted) return;
+          // 도면은 화면에 이미 올라와 있다. 저장만 못 했으니 그것만 알린다.
+          _showProcessingWarning('도면을 프로젝트에 저장', error);
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            stored
+                ? '${file.name} 도면을 `$project` 프로젝트에 저장했습니다.'
+                : '${file.name} 도면을 불러왔습니다.',
+          ),
+        ),
+      );
     } catch (error) {
       if (!mounted) return;
       _showProcessingWarning('도면 불러오기', error);
@@ -3176,8 +3287,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (_drawing == null) return;
     _recordUndo();
     _fitMapToScreen();
+    _clearMapWorkspace();
+  }
+
+  /// 도면과 그 도면에서 나온 것을 전부 비운다.
+  ///
+  /// 프로젝트 이름은 건드리지 않는다. 도면을 지우는 것과 프로젝트에서 나가는
+  /// 것은 다른 일이다. `새 프로젝트` 도 이 초기화를 쓴다 — 이름만 새로 받고
+  /// 화면은 같은 백지에서 시작해야 하므로.
+  void _clearMapWorkspace() {
     setState(() {
-      _mapNameOverride = null;
       _projectFileName = null;
       _mapScenarioSummary = null;
       _drawing = null;
@@ -4296,6 +4415,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return (x: world.x, y: world.y);
     }
 
+    final padToTarget =
+        _gridResolutionMode == _GridResolutionMode.target && _gridPadToTarget;
     return buildOccupancyGrid(
       floorOutline: [for (final point in _floorOutline()) toWorld(point)],
       walls: [
@@ -4303,11 +4424,49 @@ class _ControlDashboardState extends State<ControlDashboard> {
           (toWorld(wall.$1), toWorld(wall.$2)),
       ],
       resolution: _occupancyResolution(),
+      // 정사각 칸을 지키면 건물 비율 때문에 상자를 꽉 채울 수 없다. 800×600
+      // 이라는 숫자를 그대로 얻으려면 남는 쪽을 `모름` 으로 채운다.
+      padToWidth: padToTarget ? _gridTargetWidth : null,
+      padToHeight: padToTarget ? _gridTargetHeight : null,
+    );
+  }
+
+  /// 격자가 덮을 범위(m). 바닥 바깥 여백까지 더한 값이다.
+  ///
+  /// `buildOccupancyGrid` 이 같은 여백을 붙이므로 여기서도 같이 붙여야 상자에
+  /// 맞춘 칸 수가 실제와 맞는다.
+  ({double width, double height})? _occupancyExtent() {
+    final bounds = _floorBounds;
+    if (bounds == null) return null;
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return null;
+    // 벽은 선분 한가운데를 지나므로 두께의 절반이 바깥으로 나간다.
+    const pad = .5 + rmfWallThickness / 2;
+    return (
+      width: (bounds.maxX - bounds.minX) + 2 * pad,
+      height: (bounds.maxY - bounds.minY) + 2 * pad,
     );
   }
 
   double _occupancyResolution() {
     final bounds = _floorBounds;
+    switch (_gridResolutionMode) {
+      case _GridResolutionMode.manual:
+        // 0 이면 격자를 못 만든다. 사람이 지우다 만 값을 그대로 쓰지 않는다.
+        return _gridManualResolution > 0 ? _gridManualResolution : .02;
+      case _GridResolutionMode.target:
+        final extent = _occupancyExtent();
+        if (extent == null) break; // 바닥이 없으면 자동으로 떨어진다
+        final byTarget = occupancyResolutionForTarget(
+          widthMeters: extent.width,
+          heightMeters: extent.height,
+          targetWidth: _gridTargetWidth,
+          targetHeight: _gridTargetHeight,
+        );
+        if (byTarget > 0) return byTarget;
+      case _GridResolutionMode.auto:
+        break;
+    }
     return occupancyResolutionFor(
       robotWidth: _robotWidthMeters,
       floorShorterSide: bounds == null
@@ -4316,15 +4475,59 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 격자를 화면에 보여 줄 그림으로 만든다.
+  ///
+  /// 셀 값이 그대로 회색조다 — 벽 0(검정), 바닥 254(흰), 모름 205(회색). 그래서
+  /// 값 하나를 R·G·B 에 그대로 넣으면 `map_server` 가 읽는 PGM 과 같은 그림이
+  /// 된다. 사람이 보는 것과 로봇이 보는 것이 어긋나면 안 된다.
+  Future<ui.Image> _occupancyGridImage(OccupancyGrid grid) {
+    final rgba = Uint8List(grid.width * grid.height * 4);
+    for (var i = 0; i < grid.cells.length; i++) {
+      final value = grid.cells[i];
+      final at = i * 4;
+      rgba[at] = value;
+      rgba[at + 1] = value;
+      rgba[at + 2] = value;
+      rgba[at + 3] = 0xFF;
+    }
+    final completer = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      rgba,
+      grid.width,
+      grid.height,
+      ui.PixelFormat.rgba8888,
+      completer.complete,
+    );
+    return completer.future;
+  }
+
   /// 만든 격자를 맵 디렉터리에 쓴다. 조용히 한다.
   ///
   /// 도면에서 파생되는 산출물이라 `.world` 처럼 프로젝트를 내보낼 때마다 다시
   /// 만든다. 실패해도 하려던 일(띄우기·내리기)은 계속한다.
+  ///
+  /// [prebuilt] 를 주면 격자를 다시 만들지 않는다. 그리드맵 화면은 만든 격자를
+  /// 그림으로도 보여 주므로, 같은 것을 두 번 굽지 않기 위해서다.
   Future<OccupancyGridExportResult?> _exportOccupancyGrid(
-    String mapName,
-  ) async {
-    final grid = _buildOccupancyGrid();
-    if (grid == null) return null;
+    String mapName, {
+    OccupancyGrid? prebuilt,
+  }) async {
+    final grid = prebuilt ?? _buildOccupancyGrid();
+    if (grid == null) {
+      // 축척이 없으면 격자를 만들 수 없다. 예전에는 여기서 조용히 돌아섰는데,
+      // 그러면 nav2_map 이 없는 채로 배포가 끝난다. 그 결과가 한참 뒤에
+      // 엉뚱한 얼굴로 나타났다 — map_server 가 unconfigured 로 멈추고, AMCL 이
+      // "Waiting for map" 만 되풀이하고, 위치를 모르니 fleet adapter 가 로봇을
+      // 등록하지 못해, 결국 "RMF 가 답하지 않습니다" 로 보였다.
+      return const OccupancyGridExportResult(
+        success: false,
+        directory: '',
+        written: [],
+        message:
+            '축척이 없어 Nav2 지도를 만들지 못했습니다. '
+            '맵의 로봇 안전 기준에서 축척을 먼저 정하세요.',
+      );
+    }
     try {
       return await exportOccupancyGrid(
         mapName: mapName,
@@ -4335,9 +4538,259 @@ class _ControlDashboardState extends State<ControlDashboard> {
             '좌표는 RMF 월드 — 원점은 도면 왼쪽 위, 건물 안은 y 가 음수다.\n'
             '벽 두께는 RMF 와 같은 ${rmfWallThickness}m 다.',
       );
-    } catch (_) {
-      return null;
+    } catch (error) {
+      return OccupancyGridExportResult(
+        success: false,
+        directory: '',
+        written: const [],
+        message: 'Nav2 지도를 쓰지 못했습니다: $error',
+      );
     }
+  }
+
+  /// 지금 도면에서 Nav2 그리드맵(점유격자)을 만든다.
+  ///
+  /// 배포하기 안에도 같은 일이 들어 있다. 그런데도 따로 부를 수 있어야 하는
+  /// 이유는, 이것만 없어도 로봇이 아예 못 움직이는데 그 사실이 화면에
+  /// 드러나지 않기 때문이다. 지도가 없으면 `map_server` 가 unconfigured 에서
+  /// 멈추고, AMCL 은 "Waiting for map" 만 되풀이하고, 위치를 모르니 fleet
+  /// adapter 가 로봇을 등록하지 못한다. 그때 사람이 보는 말은 "RMF 가 답하지
+  /// 않습니다. fleet adapter 가 떠 있는지 확인하세요" 라서 원인에서 네 단계
+  /// 떨어져 있다. 도면을 고친 뒤 이 단추 하나로 지도만 다시 만들 수 있어야
+  /// 한다.
+  Future<void> _generateGridMap() async {
+    final project = _openProjectName;
+    if (project == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: '그리드맵 작성',
+        message:
+            '열린 맵 프로젝트가 없습니다.\n\n'
+            '그리드맵은 도면에서 만들어지므로 맵 프로젝트가 있어야 합니다. '
+            '맵 관리에서 `프로젝트 열기` 로 불러오거나 `프로젝트 저장` 으로 '
+            '먼저 등록하세요.',
+      );
+      return;
+    }
+    if (_isGeneratingGrid) return;
+    setState(() {
+      _isGeneratingGrid = true;
+      // 이전 그림은 지운다. 남겨 두면 새로 굽는 동안 옛 지도를 보며
+      // 다 됐다고 여긴다.
+      _gridPreview?.dispose();
+      _gridPreview = null;
+      _gridPreviewGrid = null;
+      _gridPreviewDirectory = null;
+    });
+    // 격자 굽기는 UI 스레드에서 돈다. 한 프레임 내주지 않으면 `작성 중` 커서와
+    // 글자가 그려지기 전에 화면이 멈춰 버려, 정작 기다리는 동안 아무 표시가
+    // 없다.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+
+    OccupancyGridExportResult? result;
+    OccupancyGrid? grid;
+    ui.Image? image;
+    try {
+      grid = _buildOccupancyGrid();
+      result = await _exportOccupancyGrid(project, prebuilt: grid);
+      if (grid != null && result != null && result.success) {
+        image = await _occupancyGridImage(grid);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGeneratingGrid = false;
+          _gridPreview = image;
+          _gridPreviewGrid = image == null ? null : grid;
+          _gridPreviewDirectory = image == null ? null : result?.directory;
+        });
+      } else {
+        image?.dispose();
+      }
+    }
+    if (!mounted) return;
+    if (result == null || !result.success) {
+      await showWaypointErrorDialog(
+        context,
+        title: '그리드맵 작성 실패',
+        message:
+            '${result?.message ?? '그리드맵을 만들지 못했습니다.'}\n\n'
+            '이 지도가 없으면 map_server 가 뜨지 못하고, AMCL 이 위치를 잡지 '
+            '못해 로봇이 배차를 받지 못합니다.',
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '그리드맵을 만들었습니다 · ${result.written.join(', ')}\n'
+          '${result.directory}',
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
+  /// 회색조 셀을 화면에 보여 줄 그림으로 만든다.
+  Future<ui.Image> _grayCellsImage(Uint8List cells, int width, int height) {
+    final rgba = Uint8List(width * height * 4);
+    for (var i = 0; i < cells.length; i++) {
+      final value = cells[i];
+      final at = i * 4;
+      rgba[at] = value;
+      rgba[at + 1] = value;
+      rgba[at + 2] = value;
+      rgba[at + 3] = 0xFF;
+    }
+    final completer = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      rgba,
+      width,
+      height,
+      ui.PixelFormat.rgba8888,
+      completer.complete,
+    );
+    return completer.future;
+  }
+
+  /// 이 프로젝트에 넣어 둔 SLAM 지도를 읽어 화면에 올린다.
+  Future<void> _loadStoredSlam(String mapName) async {
+    final stored = await loadStoredSlamMap(mapName);
+    if (!mounted) return;
+    if (stored == null) {
+      setState(() {
+        _slamPreview?.dispose();
+        _slamPreview = null;
+        _slamMap = null;
+      });
+      return;
+    }
+    final image = await _grayCellsImage(
+      stored.cells,
+      stored.width,
+      stored.height,
+    );
+    if (!mounted) {
+      image.dispose();
+      return;
+    }
+    setState(() {
+      _slamPreview?.dispose();
+      _slamPreview = image;
+      _slamMap = stored;
+    });
+  }
+
+  /// 로봇이 SLAM 으로 뜬 지도를 골라 이 프로젝트에 넣는다.
+  ///
+  /// `map_saver` 는 `.yaml` 과 `.pgm` 을 함께 낸다. yaml 을 고르게 하고 그 옆의
+  /// 그림을 따라간다 — 사람이 둘을 각각 고르게 하면 짝이 안 맞는 조합이 들어온다.
+  ///
+  /// **원점은 여기서 손대지 않는다.** 올린 그대로 넣고, 화면에서 도면 격자와
+  /// 겹쳐 보며 맞추게 한다. SLAM 지도의 원점은 로봇이 SLAM 을 시작한 자리여서
+  /// RMF 원점과 아무 관계가 없다.
+  Future<void> _uploadSlamMap() async {
+    final project = _openProjectName;
+    if (project == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: 'SLAM 지도 올리기',
+        message:
+            '열린 맵 프로젝트가 없습니다.\n\n'
+            'SLAM 지도는 프로젝트에 딸립니다. `새 프로젝트` 로 만들거나 '
+            '`프로젝트 열기` 로 먼저 여세요.',
+      );
+      return;
+    }
+    if (_isReadingSlamMap) return;
+    final picked = await FilePicker.platform.pickFiles(
+      dialogTitle: 'map_saver 가 낸 .yaml 을 고르세요',
+      type: FileType.custom,
+      allowedExtensions: const ['yaml', 'yml'],
+    );
+    final path = picked?.files.singleOrNull?.path;
+    if (path == null || !mounted) return;
+
+    setState(() => _isReadingSlamMap = true);
+    try {
+      final read = await readSlamMapFrom(path);
+      if (!mounted) return;
+      final map = read.map;
+      if (!read.success || map == null) {
+        await showWaypointErrorDialog(
+          context,
+          title: 'SLAM 지도를 읽지 못했습니다',
+          message: read.message,
+        );
+        return;
+      }
+      final written = await writeSlamMap(
+        mapName: project,
+        map: map,
+        note:
+            'rmf_control_ui 가 넣은 SLAM 지도. 로봇이 뜬 것이다.\n'
+            '원점은 아직 SLAM 을 시작한 자리 기준이다 — 그리드맵 화면에서 '
+            'RMF 월드에 맞춰야 한다.',
+      );
+      if (!mounted) return;
+      if (!written.success) {
+        await showWaypointErrorDialog(
+          context,
+          title: 'SLAM 지도를 넣지 못했습니다',
+          message: written.message,
+        );
+        return;
+      }
+      await _loadStoredSlam(project);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'SLAM 지도를 넣었습니다 · ${written.written.join(', ')}\n'
+            '원점을 RMF 월드에 맞춰 주세요.',
+          ),
+          duration: const Duration(seconds: 6),
+          showCloseIcon: true,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isReadingSlamMap = false);
+    }
+  }
+
+  /// 사람이 맞춘 원점을 SLAM 지도 yaml 에 쓴다.
+  Future<void> _saveSlamOrigin(double x, double y) async {
+    final project = _openProjectName;
+    final map = _slamMap;
+    if (project == null || map == null) return;
+    final written = await writeSlamMap(
+      mapName: project,
+      map: map.withOrigin(x, y),
+      note:
+          'rmf_control_ui 가 넣은 SLAM 지도. 원점을 사람이 RMF 월드에 맞췄다.\n'
+          '틀리면 로봇이 `픽업1로 가라`는 명령을 받고 엉뚱한 데로 간다.',
+    );
+    if (!mounted) return;
+    if (!written.success) {
+      await showWaypointErrorDialog(
+        context,
+        title: '원점을 저장하지 못했습니다',
+        message: written.message,
+      );
+      return;
+    }
+    await _loadStoredSlam(project);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '원점을 ${x.toStringAsFixed(6)}, ${y.toStringAsFixed(6)} 으로 '
+          '맞췄습니다.',
+        ),
+      ),
+    );
   }
 
   /// 자리 맞추기 창을 연다.
@@ -4626,13 +5079,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<List<RmfProjectRobot>> _fleetRobotsForDeploy(String mapName) async {
     try {
       final stored = await loadMapProjectFleet(mapName);
-      final rows = (stored?['robots'] as List<dynamic>? ?? const [])
-          .cast<Map<String, dynamic>>()
-          .toList()
-        ..sort(
-          (a, b) =>
-              ((a['seq'] as num?) ?? 0).compareTo((b['seq'] as num?) ?? 0),
-        );
+      final rows =
+          (stored?['robots'] as List<dynamic>? ?? const [])
+              .cast<Map<String, dynamic>>()
+              .toList()
+            ..sort(
+              (a, b) =>
+                  ((a['seq'] as num?) ?? 0).compareTo((b['seq'] as num?) ?? 0),
+            );
       if (rows.isEmpty) return _fleetRobots;
       return _withMapSpawnPoints([
         for (final row in rows)
@@ -4716,17 +5170,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return showMovableDialog<void>(
       context: context,
       builder: (_) => _TaskDetailDialog(
-      task: task,
-      robotOf: (id) => _mockRobots.where((robot) => robot.id == id).firstOrNull,
-      toFloor: _floorCoordinate,
-      metersPerPixel: _metersPerPixel,
-      waypointLabel: _waypointLabel,
-      // 출처는 로봇마다 다르다. 등록에 적힌 것을 그대로 쓴다.
-      dataSource: registered?.dataSource ?? RobotDataSource.mock,
-      // 실제로 값이 들어오고 있을 때만 참이다. 구독을 걸어 두기만 하고 값이
-      // 안 오는 것과 오는 것은 다르다.
-      topicsConnected: registered != null && _telemetry.isLive(registered.robotId),
-      registeredRobot: registered,
+        task: task,
+        robotOf: (id) =>
+            _mockRobots.where((robot) => robot.id == id).firstOrNull,
+        toFloor: _floorCoordinate,
+        metersPerPixel: _metersPerPixel,
+        waypointLabel: _waypointLabel,
+        // 출처는 로봇마다 다르다. 등록에 적힌 것을 그대로 쓴다.
+        dataSource: registered?.dataSource ?? RobotDataSource.mock,
+        // 실제로 값이 들어오고 있을 때만 참이다. 구독을 걸어 두기만 하고 값이
+        // 안 오는 것과 오는 것은 다르다.
+        topicsConnected:
+            registered != null && _telemetry.isLive(registered.robotId),
+        registeredRobot: registered,
       ),
     );
   }
@@ -4973,10 +5429,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (converted.isEmpty) {
       return RmfTaskSubmission(
         accepted: false,
-        message: [
-          'RMF 에 넘길 단계가 하나도 없습니다.',
-          ...converted.skipped,
-        ].join('\n'),
+        message: ['RMF 에 넘길 단계가 하나도 없습니다.', ...converted.skipped].join('\n'),
       );
     }
     final request = buildRmfTaskRequest(
@@ -5378,8 +5831,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           ? _RobotKind.mockHumanoid
                           : _kindForRobot(registered!);
                       controller.text =
-                          registered?.robotId ??
-                          '사람-${_mockRobots.length + 1}';
+                          registered?.robotId ?? '사람-${_mockRobots.length + 1}';
                       start =
                           chargerPoint(registered) ??
                           candidatesFor(kind).firstOrNull ??
@@ -5592,9 +6044,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 // 그때도 지도 위의 Waypoint 이기만 하면 올려 준다. 예전처럼
                 // 아무 말 없이 버튼이 먹지 않으면 왜인지 알 길이 없다.
                 if (name.isEmpty) {
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    const SnackBar(content: Text('이름을 입력해 주세요.')),
-                  );
+                  ScaffoldMessenger.of(
+                    dialogContext,
+                  ).showSnackBar(const SnackBar(content: Text('이름을 입력해 주세요.')));
                   return;
                 }
                 if (!runtimeWaypoints.contains(start)) {
@@ -5748,7 +6200,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
       if (action == 'map') await _loadMapForRobots();
-      if (action == 'robots' && mounted) setState(() => _selectedMenu = 2);
+      if (action == 'robots' && mounted) {
+        setState(() => _selectedMenu = _menuRobots);
+      }
       return;
     }
     final result = await showMovableDialog<_TaskEditorResult>(
@@ -6260,6 +6714,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _exitListener?.dispose();
     _mockRobotTimer?.cancel();
     _orderDispatchTimer?.cancel();
+    // 그리드맵·SLAM 미리보기는 GPU 쪽 자원이라 놔두면 안 돌아온다.
+    _gridPreview?.dispose();
+    _slamPreview?.dispose();
     // 구독을 남기면 `ros2 topic echo` 가 앱보다 오래 산다.
     unawaited(_telemetrySubscription?.cancel());
     unawaited(RobotTelemetryBridge.instance.stop());
@@ -6768,9 +7225,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
+  /// 지금 프로젝트의 이름. 맵 디렉터리·building.yaml·플릿 이름이 다 여기서 나온다.
+  ///
+  /// 사람이 정한 이름이 있으면 그것이다. 없을 때만 도면 파일 이름으로 흘러가는데,
+  /// 그건 `새 프로젝트` 없이 도면부터 올린 경우의 임시 이름이다 — 저장할 때
+  /// 이름을 물으므로 그대로 굳지 않는다.
   String get _mapName {
-    final override = _mapNameOverride?.trim();
-    if (override != null && override.isNotEmpty) return override;
+    final chosen = _projectName?.trim();
+    if (chosen != null && chosen.isNotEmpty) return chosen;
     final name = _drawing?.name.split('.').first.trim() ?? 'warehouse';
     return name.isEmpty ? 'warehouse' : name;
   }
@@ -6867,6 +7329,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
       'version': 2,
       'mapName': mapName ?? _mapName,
       'mapScenarioSummary': _mapScenarioSummary,
+      // Nav2 가 도면 지도 대신 SLAM 지도를 띄울지. 프로젝트에 딸린 선택이다 —
+      // 같은 창고라도 시뮬레이션은 도면 지도로, 실물은 SLAM 지도로 돈다.
+      'useSlamMap': _useSlamMap,
+      // 격자 해상도를 무엇으로 정했는지도 프로젝트에 딸린다. 작은 아레나와 큰
+      // 창고가 같은 설정을 쓸 수 없다.
+      'gridResolution': {
+        'mode': _gridResolutionMode.name,
+        'targetWidth': _gridTargetWidth,
+        'targetHeight': _gridTargetHeight,
+        'padToTarget': _gridPadToTarget,
+        'manualMeters': _gridManualResolution,
+      },
       'robotSafety': {
         'widthMeters': _robotWidthMeters,
         'turningRadiusMeters': _turningRadiusMeters,
@@ -7011,7 +7485,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     if (!saved || !mounted) return;
     setState(() {
-      _mapNameOverride = newName;
+      _projectName = newName;
       _isDeployed = false;
     });
   }
@@ -7236,6 +7710,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
       buildingYamlName: buildingYaml == null ? null : _yamlFileNameFor(mapName),
     );
 
+    // 도면을 이 프로젝트 디렉터리에도 한 장 남긴다. 원장은 MySQL 이지만
+    // 배포 스크립트와 building.yaml 의 `drawing.filename` 은 파일을 본다.
+    // 실패해도 저장 자체는 이어 간다 — 원장은 이미 들어갔다.
+    final drawing = _drawing;
+    if (drawing != null && drawing.bytes != null) {
+      try {
+        await exportProjectDrawing(
+          mapName: mapName,
+          fileName: drawing.name,
+          bytes: drawing.bytes!,
+        );
+      } catch (_) {
+        // 디스크가 막혔을 뿐이다. 다음 배포에서 다시 쓴다.
+      }
+    }
+
     // 플릿 설정과 그로부터 만든 설정 파일을 함께 남긴다. 프로젝트 하나만 열면
     // 배포와 실행에 필요한 것이 다 있어야 한다.
     final fleet = _fleetSettingsFor(mapName);
@@ -7338,6 +7828,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapName: mapName,
           robots: deployRobots,
           fleetName: fleet.fleetName,
+          // SLAM 지도를 쓰기로 골랐으면 map_server 가 그것을 띄운다. 이걸
+          // 넘기지 않으면 지도를 올려도 계속 도면 지도가 뜬다.
+          mapYamlName: _useSlamMap ? slamYamlName(mapName) : null,
           warnings: nav2.warnings,
         ),
         generatedAt: now,
@@ -7350,10 +7843,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             '앱에는 rclpy 가 없고 카메라 영상은 ros2 topic echo 로 읽기에 '
             '너무 크다 — 1280×720 한 장이 YAML 로 2.7MB 다.',
         executable: true,
-        content: buildSensorRelayScript(
-          mapName: mapName,
-          robots: deployRobots,
-        ),
+        content: buildSensorRelayScript(mapName: mapName, robots: deployRobots),
         generatedAt: now,
       ),
       MapProjectFile(
@@ -7477,8 +7967,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         MapProjectFile(
           fileName: '${robotDirectoryName(robot)}/README.md',
           kind: 'robot',
-          description:
-              '${robot.robotId} 디렉터리 설명. 무엇이고 어디서 고치는지.',
+          description: '${robot.robotId} 디렉터리 설명. 무엇이고 어디서 고치는지.',
           content: buildRobotReadme(robot, mapName),
           generatedAt: now,
         ),
@@ -7549,9 +8038,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
               .cast<Map<String, dynamic>>()
               .toList()
             ..sort(
-              (a, b) => ((a['seq'] as num?) ?? 0).compareTo(
-                (b['seq'] as num?) ?? 0,
-              ),
+              (a, b) =>
+                  ((a['seq'] as num?) ?? 0).compareTo((b['seq'] as num?) ?? 0),
             );
       // 예전 판이 잘못된 좌표계로 저장해 둔 자리를 지금 지도 기준으로 고친다.
       _fleetRobots = _withMapSpawnPoints([
@@ -7697,6 +8185,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return robots;
   }
 
+  /// 속도 한계 입력 칸 하나.
+  ///
+  /// 벤더 값을 helperText 로 늘 보여 준다. 불러오기 단추를 누르지 않아도 지금
+  /// 값이 로봇의 실제 성능과 얼마나 다른지 눈에 보여야 한다 — 이 두 값이 조용히
+  /// 어긋나 있던 것이 이 칸을 만든 이유다.
+  Widget _limitField({
+    required TextEditingController controller,
+    required String label,
+    required String unit,
+    required double? vendor,
+  }) => TextField(
+    controller: controller,
+    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+    decoration: InputDecoration(
+      labelText: label,
+      suffixText: unit,
+      helperText: vendor == null
+          ? '벤더 값 없음'
+          : '벤더 ${vendor.toStringAsFixed(2)}',
+      helperMaxLines: 2,
+      isDense: true,
+      border: const OutlineInputBorder(),
+    ),
+  );
+
   /// 로봇 한 대를 추가하거나 고친다. 취소하면 null.
   Future<RmfProjectRobot?> _editFleetRobot(RmfProjectRobot? existing) async {
     final index = _fleetRobots.length + 1;
@@ -7711,6 +8224,25 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     final gzController = TextEditingController(
       text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
+    );
+    // 속도 한계는 플릿 단위다. RMF 의 `rmf_fleet.limits` 가 그렇게 생겼고,
+    // 로봇별로는 `charger` 만 받는다. 그래도 여기서 고치게 두는 것은, 이 값의
+    // 근거가 로봇의 벤더 Nav2 파일이라 로봇을 보면서 정해야 맞기 때문이다.
+    final vendorSource = readVendorNav2Params();
+    final vendorLimits = vendorSource == null
+        ? const VendorSpeedLimits()
+        : parseVendorSpeedLimits(vendorSource);
+    final linearVelocityController = TextEditingController(
+      text: _fleetSettings.linearVelocity.toStringAsFixed(2),
+    );
+    final linearAccelerationController = TextEditingController(
+      text: _fleetSettings.linearAcceleration.toStringAsFixed(2),
+    );
+    final angularVelocityController = TextEditingController(
+      text: _fleetSettings.angularVelocity.toStringAsFixed(2),
+    );
+    final angularAccelerationController = TextEditingController(
+      text: _fleetSettings.angularAcceleration.toStringAsFixed(2),
     );
     var kind = existing?.kind ?? RmfRobotKind.mobile;
     var dataSource = existing?.dataSource ?? RobotDataSource.mock;
@@ -7733,7 +8265,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
           final isMobile = kind == RmfRobotKind.mobile;
           return AlertDialog(
             icon: Icon(
-              isMobile ? Icons.smart_toy_outlined : Icons.precision_manufacturing,
+              isMobile
+                  ? Icons.smart_toy_outlined
+                  : Icons.precision_manufacturing,
               size: 32,
             ),
             title: Text(existing == null ? '로봇 등록' : '로봇 수정'),
@@ -7968,6 +8502,120 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           ),
                         ),
                       ),
+                    // 설치 로봇은 배차를 받지 않으므로 속도 한계가 쓰이지 않는다.
+                    if (isMobile) ...[
+                      const SizedBox(height: 18),
+                      const Divider(height: 1),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'RMF 속도 한계',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: vendorLimits.isEmpty
+                                ? null
+                                : () => setDialogState(() {
+                                    void fill(
+                                      TextEditingController controller,
+                                      double? value,
+                                    ) {
+                                      if (value == null) return;
+                                      controller.text = value.toStringAsFixed(
+                                        2,
+                                      );
+                                    }
+
+                                    fill(
+                                      linearVelocityController,
+                                      vendorLimits.linearVelocity,
+                                    );
+                                    fill(
+                                      linearAccelerationController,
+                                      vendorLimits.linearAcceleration,
+                                    );
+                                    fill(
+                                      angularVelocityController,
+                                      vendorLimits.angularVelocity,
+                                    );
+                                    fill(
+                                      angularAccelerationController,
+                                      vendorLimits.angularAcceleration,
+                                    );
+                                  }),
+                            icon: const Icon(Icons.download_outlined, size: 18),
+                            label: const Text('벤더 값 불러오기'),
+                          ),
+                        ],
+                      ),
+                      Text(
+                        vendorLimits.isEmpty
+                            ? '벤더 Nav2 파일을 찾지 못해 불러올 값이 없습니다. '
+                                  '$nav2ParamsEnvironmentKey 환경 변수로 자리를 알려 주세요.'
+                            : 'RMF 가 도착 시각을 계산할 때 쓰는 값입니다. 로봇을 실제로 '
+                                  '움직이는 것은 Nav2 이고 그 값은 벤더 파일에 있습니다. 둘이 '
+                                  '어긋나면 RMF 가 멀쩡히 가는 로봇을 지연으로 보고 경로를 다시 '
+                                  '짭니다. 플릿 전체에 적용됩니다.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: vendorLimits.isEmpty
+                              ? const Color(0xFFB45309)
+                              : const Color(0xFF64748B),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: _limitField(
+                              controller: linearVelocityController,
+                              label: '직진 속도',
+                              unit: 'm/s',
+                              vendor: vendorLimits.linearVelocity,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _limitField(
+                              controller: linearAccelerationController,
+                              label: '직진 가속도',
+                              unit: 'm/s²',
+                              vendor: vendorLimits.linearAcceleration,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: _limitField(
+                              controller: angularVelocityController,
+                              label: '회전 속도',
+                              unit: 'rad/s',
+                              vendor: vendorLimits.angularVelocity,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _limitField(
+                              controller: angularAccelerationController,
+                              label: '회전 가속도',
+                              unit: 'rad/s²',
+                              vendor: vendorLimits.angularAcceleration,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -7999,6 +8647,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   final spawn = source == null
                       ? null
                       : _rmfMetersFromPixel(source);
+                  // 속도 한계는 플릿 설정이라 로봇과 함께 돌려보낼 수 없다.
+                  // 여기서 바로 반영하고, 부르는 쪽의 저장이 함께 기록한다.
+                  //
+                  // 빈 칸이나 못 읽는 값은 지금 값을 그대로 둔다. 0 으로 떨어지면
+                  // RMF 가 로봇을 멈춰 있는 것으로 보고 배차를 안 한다.
+                  if (isMobile) {
+                    double? read(TextEditingController controller) {
+                      final value = double.tryParse(controller.text.trim());
+                      return value != null && value > 0 ? value : null;
+                    }
+
+                    _fleetSettings = _fleetSettings.copyWith(
+                      linearVelocity: read(linearVelocityController),
+                      linearAcceleration: read(linearAccelerationController),
+                      angularVelocity: read(angularVelocityController),
+                      angularAcceleration: read(angularAccelerationController),
+                    );
+                  }
                   Navigator.pop(
                     dialogContext,
                     RmfProjectRobot(
@@ -8037,6 +8703,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
         nameController.dispose();
         modelController.dispose();
         gzController.dispose();
+        linearVelocityController.dispose();
+        linearAccelerationController.dispose();
+        angularVelocityController.dispose();
+        angularAccelerationController.dispose();
       }),
     );
     return saved;
@@ -8422,7 +9092,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (_drawing != null) await _writeMapProject(project);
       // Nav2 지도도 도면에서 파생되는 산출물이다. 도면이 바뀌었는데 예전 격자를
       // 그대로 두면 AMCL 이 없는 벽을 보고 헤맨다.
-      await _exportOccupancyGrid(project);
+      //
+      // 실패를 삼키지 않는다. 지도가 없으면 로봇은 배차를 아예 못 받는데,
+      // 그때 화면에 뜨는 말은 "fleet adapter 가 떠 있는지 확인하세요" 라서
+      // 원인에서 한참 떨어져 있다. 여기서 바로 말해 주는 편이 낫다.
+      final gridExport = await _exportOccupancyGrid(project);
+      if (gridExport != null && !gridExport.success) {
+        _showProcessingWarning('Nav2 지도 내보내기', gridExport.message);
+      }
       final files = await loadMapProjectFiles(project);
       if (files.isEmpty) return;
       await exportProjectConfigFiles(mapName: project, files: files);
@@ -8581,46 +9258,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
     required String confirmLabel,
     String? helperText,
   }) async {
-    final controller = TextEditingController(text: initialName);
-    final name = await showMovableDialog<String>(
+    return showMovableDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        icon: const Icon(Icons.drive_file_rename_outline, size: 36),
-        title: Text(title),
-        content: SizedBox(
-          width: 390,
-          child: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: InputDecoration(
-              labelText: '지도 이름',
-              helperText: helperText ?? '이 이름이 프로젝트 구분자가 됩니다.',
-              helperMaxLines: 3,
-              border: const OutlineInputBorder(),
-            ),
-            onSubmitted: (value) {
-              final trimmed = value.trim();
-              if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final trimmed = controller.text.trim();
-              if (trimmed.isNotEmpty) Navigator.pop(dialogContext, trimmed);
-            },
-            child: Text(confirmLabel),
-          ),
-        ],
+      builder: (dialogContext) => _ProjectNameDialog(
+        title: title,
+        initialName: initialName,
+        confirmLabel: confirmLabel,
+        helperText: helperText,
       ),
     );
-    controller.dispose();
-    return name;
   }
 
   /// 같은 지도 이름의 프로젝트가 이미 있을 때 어떻게 할지 묻는다.
@@ -8686,6 +9332,68 @@ class _ControlDashboardState extends State<ControlDashboard> {
       '${at.hour.toString().padLeft(2, '0')}:'
       '${at.minute.toString().padLeft(2, '0')}';
 
+  /// 이름을 먼저 받아 빈 프로젝트를 만든다.
+  ///
+  /// 이름이 프로젝트의 정체다. 도면 파일 이름이 아니다. 그래서 같은
+  /// `warehouse.png` 로도 `2층창고_v2`, `2층창고_v3` 처럼 서로 다른 프로젝트를
+  /// 만들 수 있고, 각자 제 디렉터리에 제 데이터를 담는다.
+  ///
+  /// 만든 즉시 저장소에 쓴다. 이름만 화면에 들고 있으면, 다른 데서 같은 이름을
+  /// 저장해 버려도 알 수 없고, 작업하다 앱이 죽으면 이름부터 다시 정해야 한다.
+  Future<void> _createNewProject() async {
+    final name = await _askMapProjectName(
+      title: '새 프로젝트',
+      initialName: '',
+      confirmLabel: '만들기',
+      helperText: '같은 도면으로도 이름이 다르면 별개의 프로젝트가 됩니다.',
+    );
+    if (name == null || !mounted) return;
+    try {
+      if (await mapProjectExists(name)) {
+        if (!mounted) return;
+        await showWaypointErrorDialog(
+          context,
+          title: '이미 있는 이름입니다',
+          message:
+              '`$name` 프로젝트가 이미 있습니다.\n\n'
+              '그 프로젝트를 이어서 작업하려면 `프로젝트 열기` 로 여세요. '
+              '새로 만들려면 다른 이름을 쓰세요 — 뒤에 버전을 붙이는 것이 '
+              '나중에 구분하기 쉽습니다(`$name v2`).',
+        );
+        return;
+      }
+      // 백지에서 시작한다. 앞 프로젝트의 벽·Waypoint 가 남아 있으면 새
+      // 프로젝트에 그대로 저장돼 버린다.
+      _recordUndo();
+      _fitMapToScreen();
+      _clearMapWorkspace();
+      if (!mounted) return;
+      setState(() {
+        _projectName = name;
+        _isDeployed = false;
+        // 로봇도 프로젝트에 딸린다. 앞 프로젝트의 로봇을 물려받으면 없는
+        // 충전소를 가리킨다.
+        //
+        // `clear()` 를 부르면 안 된다. 이 리스트는 `const []` 로 시작해서 늘
+        // 통째로 갈아 끼우는 방식이고, 손대면 `Cannot clear an unmodifiable
+        // list` 로 죽는다.
+        _fleetRobots = const [];
+        _fleetSettings = RmfFleetSettings(fleetName: _fleetNameFor(name));
+      });
+      await _writeMapProject(name);
+      if (!mounted) return;
+      await _switchOpenProject(name);
+      if (!mounted) return;
+      setState(() => _projectFileName = name);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('`$name` 프로젝트를 만들었습니다. 도면을 올리세요.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('새 프로젝트', error);
+    }
+  }
+
   /// 지금 작업을 MySQL 맵 프로젝트 저장소에 저장한다.
   ///
   /// 지도 이름이 곧 프로젝트 구분자다. 같은 이름이 이미 있으면 덮어쓸지 다른
@@ -8706,6 +9414,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapName = asked;
           continue;
         }
+        // 지금 열려 있는 프로젝트에 저장하는 것은 덮어쓰기가 아니라 그냥
+        // 저장이다. 여기서 묻지 않아야 한다 — `새 프로젝트` 는 이름을 받는
+        // 즉시 레코드를 만들므로, 묻게 두면 첫 저장부터 "이미 있는
+        // 이름입니다" 가 떠서 제 프로젝트를 덮어쓸지 고르게 된다.
+        if (mapName == _openProjectName) break;
         if (!await mapProjectExists(mapName)) break;
         if (!mounted) return;
         final existing = (await listMapProjects())
@@ -8728,7 +9441,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       await _writeMapProject(mapName);
       if (!mounted) return;
       setState(() {
-        _mapNameOverride = mapName;
+        _projectName = mapName;
         _projectFileName = mapName;
       });
       // 저장한 프로젝트가 곧 열린 프로젝트가 된다. 다른 이름으로 저장했다면
@@ -8943,11 +9656,29 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _recordUndo();
       _fitMapToScreen();
       setState(() {
-        _mapNameOverride = loadedMapName?.isNotEmpty == true
+        _projectName = loadedMapName?.isNotEmpty == true
             ? loadedMapName
             : fallbackMapName;
         _projectFileName = sourceName;
         _mapScenarioSummary = data['mapScenarioSummary'] as String?;
+        // 어느 지도를 쓰기로 했는지도 프로젝트에 딸린다. 안 되살리면 다음
+        // 저장에서 도면 지도로 조용히 돌아간다.
+        _useSlamMap = data['useSlamMap'] as bool? ?? false;
+        final gridSettings = data['gridResolution'] as Map<String, dynamic>?;
+        if (gridSettings != null) {
+          _gridResolutionMode =
+              _GridResolutionMode.values
+                  .where((mode) => mode.name == gridSettings['mode'])
+                  .firstOrNull ??
+              _GridResolutionMode.target;
+          _gridTargetWidth =
+              (gridSettings['targetWidth'] as num?)?.toInt() ?? 800;
+          _gridTargetHeight =
+              (gridSettings['targetHeight'] as num?)?.toInt() ?? 600;
+          _gridPadToTarget = gridSettings['padToTarget'] as bool? ?? true;
+          _gridManualResolution =
+              (gridSettings['manualMeters'] as num?)?.toDouble() ?? .02;
+        }
         _robotWidthMeters =
             (safetyData?['widthMeters'] as num?)?.toDouble() ?? .6;
         _turningRadiusMeters =
@@ -9739,6 +10470,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       title: const [
                         '대시보드',
                         '맵 관리',
+                        '그리드맵',
                         '로봇',
                         '설정 파일',
                         '작업',
@@ -9747,7 +10479,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       ][_selectedMenu],
                     ),
                     Expanded(
-                      child: _selectedMenu == 0
+                      child: _selectedMenu == _menuDashboard
                           ? _MainDashboard(
                               drawing: _robotRuntimeDrawing,
                               mapName:
@@ -9771,16 +10503,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               tasks: _mockTasks,
                               warning: _processingWarning,
                               onOpenMap: () =>
-                                  setState(() => _selectedMenu = 1),
+                                  setState(() => _selectedMenu = _menuMap),
                               onOpenRobots: () =>
-                                  setState(() => _selectedMenu = 2),
+                                  setState(() => _selectedMenu = _menuRobots),
                               onOpenTasks: () =>
-                                  setState(() => _selectedMenu = 4),
+                                  setState(() => _selectedMenu = _menuTasks),
                               onLoadMap: _loadMapForRobots,
                               onSpawn: _spawnMockRobot,
                               onCreateTask: _createMockTask,
                             )
-                          : _selectedMenu == 1
+                          : _selectedMenu == _menuMap
                           ? SingleChildScrollView(
                               padding: const EdgeInsets.fromLTRB(
                                 32,
@@ -9816,6 +10548,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                             _saveProjectToDatabase,
                                         onOpenFromDatabase:
                                             _openProjectFromDatabase,
+                                        onNewProject: _createNewProject,
                                         onRmfConfig: _showRmfConfigDialog,
                                       ),
                                       const SizedBox(height: 14),
@@ -10020,6 +10753,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                                       ),
                                                   isDeployed: _isDeployed,
                                                   onDeploy: _deployMap,
+                                                  onGenerateGrid:
+                                                      _generateGridMap,
                                                   onStageChanged: (value) =>
                                                       setState(
                                                         () => _stage = value,
@@ -10167,6 +10902,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                                       ),
                                                   isDeployed: _isDeployed,
                                                   onDeploy: _deployMap,
+                                                  onGenerateGrid:
+                                                      _generateGridMap,
                                                   onStageChanged: (value) =>
                                                       setState(
                                                         () => _stage = value,
@@ -10189,7 +10926,57 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                 ),
                               ),
                             )
-                          : _selectedMenu == 2
+                          : _selectedMenu == _menuGrid
+                          ? _GridMapPage(
+                              projectName: _openProjectName,
+                              mapName: _mapName,
+                              hasDrawing: _drawing != null,
+                              calibrated: _metersPerPixel != null,
+                              floorGenerated: _floorGenerated,
+                              resolution: _occupancyResolution(),
+                              mapDirectory: _mapDirectoryFor(
+                                _openProjectName ?? _mapName,
+                              ),
+                              onGenerate: _generateGridMap,
+                              onOpenMap: () =>
+                                  setState(() => _selectedMenu = _menuMap),
+                              generating: _isGeneratingGrid,
+                              preview: _gridPreview,
+                              previewGrid: _gridPreviewGrid,
+                              previewDirectory: _gridPreviewDirectory,
+                              slamMap: _slamMap,
+                              slamPreview: _slamPreview,
+                              readingSlam: _isReadingSlamMap,
+                              useSlamMap: _useSlamMap,
+                              onUploadSlam: _uploadSlamMap,
+                              onSaveSlamOrigin: _saveSlamOrigin,
+                              onUseSlamMapChanged: (value) =>
+                                  setState(() => _useSlamMap = value),
+                              resolutionMode: _gridResolutionMode,
+                              targetWidth: _gridTargetWidth,
+                              targetHeight: _gridTargetHeight,
+                              padToTarget: _gridPadToTarget,
+                              manualResolution: _gridManualResolution,
+                              extent: _occupancyExtent(),
+                              robotWidth: _robotWidthMeters,
+                              drawingScale: _metersPerPixel,
+                              onResolutionChanged:
+                                  (mode, width, height, pad, manual) =>
+                                      setState(() {
+                                        _gridResolutionMode = mode;
+                                        // 0 이나 음수가 들어오면 격자를 못
+                                        // 만든다. 앞 값을 지킨다.
+                                        if (width > 0) _gridTargetWidth = width;
+                                        if (height > 0) {
+                                          _gridTargetHeight = height;
+                                        }
+                                        _gridPadToTarget = pad;
+                                        if (manual > 0) {
+                                          _gridManualResolution = manual;
+                                        }
+                                      }),
+                            )
+                          : _selectedMenu == _menuRobots
                           ? _RobotManagementPage(
                               drawing: _robotRuntimeDrawing,
                               activeMapSourceName: _activeMapSourceName,
@@ -10225,14 +11012,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   unawaited(_unregisterFleetRobot(robot)),
                               onRegisterFromChargers: () =>
                                   unawaited(_registerRobotsFromChargers()),
-                              onCheckSpawns: () =>
-                                  unawaited(_showSpawnCheck()),
+                              onCheckSpawns: () => unawaited(_showSpawnCheck()),
                               spawnChecks: _spawnChecks,
                               onStartBackend: _startBackendForOpenProject,
                               onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
                             )
-                          : _selectedMenu == 4
+                          : _selectedMenu == _menuTasks
                           ? _TaskManagementPage(
                               tasks: _mockTasks,
                               robots: _mockRobots,
@@ -10260,7 +11046,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                       .isNotEmpty,
                               onLoadMap: _loadMapForRobots,
                               onOpenRobots: () =>
-                                  setState(() => _selectedMenu = 2),
+                                  setState(() => _selectedMenu = _menuRobots),
                               onCreate: _createMockTask,
                               onReturnRobots: _returnRobotsToSpawn,
                               onShowDetail: _showTaskDetail,
@@ -10269,7 +11055,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onDelete: _deleteMockTask,
                               onCancel: _cancelMockTask,
                             )
-                          : _selectedMenu == 3
+                          : _selectedMenu == _menuFiles
                           ? _ProjectFilesPage(
                               projectName: _openProjectName,
                               mapName: _mapName,
@@ -10279,29 +11065,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                 _openProjectName ?? _mapName,
                               ),
                               onOpenMap: () =>
-                                  setState(() => _selectedMenu = 1),
+                                  setState(() => _selectedMenu = _menuMap),
                               onExport: _exportRmfConfig,
                               onRun: _runProjectScript,
                               onStop: _stopProjectScript,
                             )
-                          : _selectedMenu == 5
+                          : _selectedMenu == _menuLog
                           ? _ProjectLogPage(
                               mapDirectory: _deployedMapDirectory,
                               mapName:
                                   _robotDeployedMap?.summary.name ?? _mapName,
                             )
-                          : _selectedMenu == 6
+                          : _selectedMenu == _menuAnalytics
                           ? const _OperationsAnalyticsPage()
-                          : _ComingSoonPage(
-                              title: const [
-                                '대시보드',
-                                '맵 관리',
-                                '로봇',
-                                '작업',
-                                '설정 파일',
-                                '운영 분석',
-                              ][_selectedMenu],
-                            ),
+                          // 여기까지 왔으면 아직 안 만든 화면이다. 예전에는
+                          // 항목 수가 메뉴보다 적고 순서도 달라, 메뉴를 하나
+                          // 늘리면 범위 넘침으로 터졌다. 메뉴 이름을 그대로
+                          // 쓴다.
+                          : const _ComingSoonPage(title: '준비 중'),
                     ),
                   ],
                 ),
@@ -10312,6 +11093,76 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ),
     );
   }
+}
+
+/// 프로젝트 이름을 받는 팝업.
+///
+/// 컨트롤러를 이 위젯이 들고 있어야 한다. 부르는 쪽에서 만들고 `await` 뒤에
+/// dispose 하면, 팝업이 닫히는 애니메이션이 남아 있는 동안 이미 버린 컨트롤러로
+/// 다시 그리게 되어 `A TextEditingController was used after being disposed` 로
+/// 터진다. `showMovableDialog` 는 라우트가 pop 되는 순간 돌아오고, 사라지는
+/// 그림은 그 뒤에 몇 프레임 더 그려진다.
+class _ProjectNameDialog extends StatefulWidget {
+  const _ProjectNameDialog({
+    required this.title,
+    required this.initialName,
+    required this.confirmLabel,
+    this.helperText,
+  });
+
+  final String title;
+  final String initialName;
+  final String confirmLabel;
+  final String? helperText;
+
+  @override
+  State<_ProjectNameDialog> createState() => _ProjectNameDialogState();
+}
+
+class _ProjectNameDialogState extends State<_ProjectNameDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialName,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final trimmed = _controller.text.trim();
+    if (trimmed.isNotEmpty) Navigator.pop(context, trimmed);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    icon: const Icon(Icons.drive_file_rename_outline, size: 36),
+    title: Text(widget.title),
+    content: SizedBox(
+      width: 390,
+      child: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: InputDecoration(
+          // 도면 이름이 아니라 프로젝트 이름이다. 같은 도면으로도 이름이
+          // 다르면 별개의 프로젝트가 된다.
+          labelText: '프로젝트 이름',
+          helperText: widget.helperText ?? '이 이름이 프로젝트 구분자가 됩니다.',
+          helperMaxLines: 3,
+          border: const OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('취소'),
+      ),
+      FilledButton(onPressed: _submit, child: Text(widget.confirmLabel)),
+    ],
+  );
 }
 
 class _SequentialTaskEditorDialog extends StatefulWidget {
@@ -12079,6 +12930,1043 @@ class _ComingSoonPage extends StatelessWidget {
       Center(child: Text('$title 화면은 준비 중입니다.'));
 }
 
+/// Nav2 그리드맵(점유격자)을 굽는 화면.
+///
+/// 맵 관리 패널 안에도 같은 단추가 있다. 그런데도 왼쪽 메뉴로 꺼내 둔 이유는,
+/// 이 지도가 없을 때 사람이 보는 증상이 원인에서 네 단계나 떨어져 있기
+/// 때문이다 — `map_server` 가 unconfigured 에서 멈추고, AMCL 은 "Waiting for
+/// map" 만 되풀이하고, 위치를 모르니 fleet adapter 가 로봇을 등록하지 못하고,
+/// 화면에는 "RMF 가 답하지 않습니다" 가 뜬다. 도면을 고친 뒤 지도만 다시 굽는
+/// 일이 잦으므로 찾아 들어가지 않아도 되게 한다.
+///
+/// **못 만드는 경우에는 이유를 먼저 보여 준다.** 흐린 단추만 두면 왜 안 되는지
+/// 알 수 없어, 사람이 배포를 처음부터 다시 돌리게 된다.
+class _GridMapPage extends StatelessWidget {
+  const _GridMapPage({
+    required this.projectName,
+    required this.mapName,
+    required this.hasDrawing,
+    required this.calibrated,
+    required this.floorGenerated,
+    required this.resolution,
+    required this.mapDirectory,
+    required this.onGenerate,
+    required this.onOpenMap,
+    required this.generating,
+    required this.preview,
+    required this.previewGrid,
+    required this.previewDirectory,
+    required this.slamMap,
+    required this.slamPreview,
+    required this.readingSlam,
+    required this.useSlamMap,
+    required this.onUploadSlam,
+    required this.onSaveSlamOrigin,
+    required this.onUseSlamMapChanged,
+    required this.resolutionMode,
+    required this.targetWidth,
+    required this.targetHeight,
+    required this.padToTarget,
+    required this.manualResolution,
+    required this.extent,
+    required this.robotWidth,
+    required this.drawingScale,
+    required this.onResolutionChanged,
+  });
+
+  final String? projectName;
+  final String mapName;
+
+  /// 도면이 올라와 있나.
+  final bool hasDrawing;
+
+  /// 축척(Measurement)이 잡혀 있나. 없으면 격자를 만들 수 없다.
+  final bool calibrated;
+  final bool floorGenerated;
+
+  /// 격자 한 칸이 몇 미터인가.
+  final double resolution;
+  final String mapDirectory;
+  final VoidCallback onGenerate;
+  final VoidCallback onOpenMap;
+
+  /// 지금 굽고 있는가. 커서와 단추가 이걸 보고 바뀐다.
+  final bool generating;
+
+  /// 다 구운 그림. 없으면 아직 안 구웠거나 실패했다.
+  final ui.Image? preview;
+  final OccupancyGrid? previewGrid;
+  final String? previewDirectory;
+
+  /// 이 프로젝트에 넣어 둔 SLAM 지도. 없으면 아직 안 올렸다.
+  final SlamMap? slamMap;
+  final ui.Image? slamPreview;
+  final bool readingSlam;
+
+  /// Nav2 가 SLAM 지도를 띄울지.
+  final bool useSlamMap;
+  final VoidCallback onUploadSlam;
+  final void Function(double x, double y) onSaveSlamOrigin;
+  final ValueChanged<bool> onUseSlamMapChanged;
+
+  /// 격자 한 칸을 무엇으로 정할지.
+  final _GridResolutionMode resolutionMode;
+  final int targetWidth;
+  final int targetHeight;
+  final bool padToTarget;
+  final double manualResolution;
+
+  /// 격자가 덮을 범위(m). 바닥이 없으면 null.
+  final ({double width, double height})? extent;
+  final double robotWidth;
+
+  /// 도면 해상도(m/px). 참고로 보여 준다.
+  final double? drawingScale;
+  final void Function(
+    _GridResolutionMode mode,
+    int targetWidth,
+    int targetHeight,
+    bool padToTarget,
+    double manualResolution,
+  )
+  onResolutionChanged;
+
+  /// 지금 설정으로 나올 칸 수. 바닥이 없으면 null.
+  ({int width, int height})? get gridCells {
+    final size = extent;
+    if (size == null || resolution <= 0) return null;
+    var width = (size.width / resolution).ceil();
+    var height = (size.height / resolution).ceil();
+    if (resolutionMode == _GridResolutionMode.target && padToTarget) {
+      width = math.max(width, targetWidth);
+      height = math.max(height, targetHeight);
+    }
+    return (width: width, height: height);
+  }
+
+  /// 아직 안 된 것들. 비어 있으면 구울 수 있다.
+  List<String> get _missing => [
+    if (projectName == null) '맵 프로젝트를 열거나 저장하세요',
+    if (!hasDrawing) '도면을 올리세요',
+    if (!calibrated) 'Measurement 로 축척을 잡으세요',
+    if (!floorGenerated) 'Floor 자동 생성을 하세요',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final missing = _missing;
+    final ready = missing.isEmpty;
+    final body = SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(32, 26, 32, 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '그리드맵 작성',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'AMCL·Nav2 가 쓰는 점유격자를 지금 도면에서 만듭니다. '
+            'RMF 는 nav graph 만으로 길을 찾지만, 로봇이 제 위치를 알고 '
+            '장애물을 피하려면 이 격자가 있어야 합니다.',
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.6,
+              color: Color(0xFF475569),
+            ),
+          ),
+          const SizedBox(height: 22),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _GridMapFact(
+                  label: '맵 프로젝트',
+                  value: projectName ?? '열린 프로젝트 없음',
+                  dim: projectName == null,
+                ),
+                _GridMapFact(label: '맵 이름', value: mapName),
+                _GridMapFact(
+                  label: '격자 한 칸',
+                  value:
+                      '${resolution.toStringAsFixed(6)} m'
+                      '${gridCells == null ? '' : ' · ${gridCells!.width} × '
+                                '${gridCells!.height} 칸'}',
+                ),
+                _GridMapFact(label: '나갈 곳', value: '$mapDirectory/nav2_map/'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          _GridResolutionSettings(
+            mode: resolutionMode,
+            targetWidth: targetWidth,
+            targetHeight: targetHeight,
+            padToTarget: padToTarget,
+            manualResolution: manualResolution,
+            resolution: resolution,
+            extent: extent,
+            robotWidth: robotWidth,
+            drawingScale: drawingScale,
+            onChanged: onResolutionChanged,
+          ),
+          const SizedBox(height: 18),
+          if (!ready)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 15),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFFBEB),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(color: const Color(0xFFFCD34D)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '아직 만들 수 없습니다',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF92400E),
+                    ),
+                  ),
+                  const SizedBox(height: 9),
+                  for (final step in missing)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Text(
+                        '· $step',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          height: 1.5,
+                          color: Color(0xFF92400E),
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 4),
+                  TextButton.icon(
+                    onPressed: onOpenMap,
+                    icon: const Icon(Icons.map_outlined, size: 17),
+                    label: const Text('맵 관리로 가기'),
+                    style: TextButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      minimumSize: const Size(0, 32),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (ready)
+            const Text(
+              '도면과 축척, Floor 가 모두 준비되었습니다. 도면의 벽을 고쳤다면 '
+              '다시 구워야 로봇이 새 벽을 봅니다.',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.6,
+                color: Color(0xFF475569),
+              ),
+            ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              FilledButton.icon(
+                onPressed: ready && !generating ? onGenerate : null,
+                icon: generating
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.2),
+                      )
+                    : const Icon(Icons.grid_on_outlined, size: 18),
+                label: Text(generating ? '그리드 이미지 작성 중…' : '그리드맵 만들기'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                ),
+              ),
+              if (generating) ...[
+                const SizedBox(width: 16),
+                const Expanded(
+                  child: Text(
+                    '도면의 벽과 바닥을 칸으로 옮기고 있습니다. 맵이 넓으면 '
+                    '몇 초 걸립니다.',
+                    style: TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          if (preview != null) ...[
+            const SizedBox(height: 26),
+            _GridMapPreview(
+              image: preview!,
+              grid: previewGrid,
+              directory: previewDirectory,
+            ),
+          ],
+
+          // ── 로봇이 뜬 지도 ────────────────────────────────────
+          const SizedBox(height: 30),
+          const Divider(height: 1, color: Color(0xFFE2E8F0)),
+          const SizedBox(height: 22),
+          const Text(
+            '로봇이 뜬 지도 (SLAM)',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            '실제 건물에서는 도면이 아니라 로봇이 돌아다니며 지도를 뜹니다'
+            '(`map_saver`). 그 지도의 원점은 로봇이 SLAM 을 시작한 자리라서 '
+            'RMF 원점(도면 왼쪽 위)과 아무 관계가 없습니다. 그래서 올린 뒤에 '
+            '원점을 맞춰 주어야 합니다.',
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.6,
+              color: Color(0xFF475569),
+            ),
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: readingSlam ? null : onUploadSlam,
+            icon: readingSlam
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2.2),
+                  )
+                : const Icon(Icons.upload_file_outlined, size: 18),
+            label: Text(readingSlam ? '읽는 중…' : 'SLAM 지도 올리기'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+            ),
+          ),
+          if (slamMap != null) ...[
+            const SizedBox(height: 22),
+            _SlamMapPanel(
+              map: slamMap!,
+              image: slamPreview,
+              referenceGrid: previewGrid,
+              useSlamMap: useSlamMap,
+              onSaveOrigin: onSaveSlamOrigin,
+              onUseSlamMapChanged: onUseSlamMapChanged,
+            ),
+          ],
+        ],
+      ),
+    );
+    // 굽는 동안은 커서로도 알린다. 화면이 멈춘 것과 일하고 있는 것을 사람이
+    // 구분할 수 있어야 한다.
+    return generating
+        ? MouseRegion(
+            cursor: SystemMouseCursors.progress,
+            child: AbsorbPointer(child: body),
+          )
+        : body;
+  }
+}
+
+/// 격자 한 칸을 무엇으로 정할지 고르는 칸.
+///
+/// 기본은 800×600 상자에 맞추기다. 파일 크기가 예측 가능해지고, 작은 아레나에서는
+/// 자동 계산식보다 훨씬 촘촘해진다.
+///
+/// **칸 수를 고정하면 해상도가 건물 크기에 따라 정해진다.** 100×60m 창고를
+/// 800×600 에 넣으면 한 칸이 0.126m 가 되어 로봇 몸이 4.7칸밖에 안 걸친다. 그러면
+/// 좁은 통로가 통째로 막힌 것으로 보인다. 그래서 그 자리에서 경고한다.
+class _GridResolutionSettings extends StatefulWidget {
+  const _GridResolutionSettings({
+    required this.mode,
+    required this.targetWidth,
+    required this.targetHeight,
+    required this.padToTarget,
+    required this.manualResolution,
+    required this.resolution,
+    required this.extent,
+    required this.robotWidth,
+    required this.drawingScale,
+    required this.onChanged,
+  });
+
+  final _GridResolutionMode mode;
+  final int targetWidth;
+  final int targetHeight;
+  final bool padToTarget;
+  final double manualResolution;
+
+  /// 지금 설정으로 나온 한 칸 크기.
+  final double resolution;
+  final ({double width, double height})? extent;
+  final double robotWidth;
+  final double? drawingScale;
+  final void Function(
+    _GridResolutionMode mode,
+    int targetWidth,
+    int targetHeight,
+    bool padToTarget,
+    double manualResolution,
+  )
+  onChanged;
+
+  @override
+  State<_GridResolutionSettings> createState() =>
+      _GridResolutionSettingsState();
+}
+
+class _GridResolutionSettingsState extends State<_GridResolutionSettings> {
+  late final TextEditingController _width = TextEditingController(
+    text: '${widget.targetWidth}',
+  );
+  late final TextEditingController _height = TextEditingController(
+    text: '${widget.targetHeight}',
+  );
+  late final TextEditingController _manual = TextEditingController(
+    text: widget.manualResolution.toStringAsFixed(4),
+  );
+
+  @override
+  void dispose() {
+    _width.dispose();
+    _height.dispose();
+    _manual.dispose();
+    super.dispose();
+  }
+
+  void _push(_GridResolutionMode mode, {bool? pad}) {
+    widget.onChanged(
+      mode,
+      int.tryParse(_width.text.trim()) ?? widget.targetWidth,
+      int.tryParse(_height.text.trim()) ?? widget.targetHeight,
+      pad ?? widget.padToTarget,
+      double.tryParse(_manual.text.trim()) ?? widget.manualResolution,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cells = widget.extent == null
+        ? null
+        : (
+            width: (widget.extent!.width / widget.resolution).ceil(),
+            height: (widget.extent!.height / widget.resolution).ceil(),
+          );
+    final coarse = occupancyResolutionTooCoarse(
+      resolution: widget.resolution,
+      robotWidth: widget.robotWidth,
+    );
+    final span = widget.resolution <= 0
+        ? 0.0
+        : widget.robotWidth / widget.resolution;
+    // ListTile 류는 가장 가까운 Material 에 배경과 잉크를 그린다. 배경색 있는
+    // Container 안에 그냥 두면 그 효과가 가려져 프레임워크가 경고한다.
+    return Material(
+      color: const Color(0xFFF8FAFC),
+      borderRadius: BorderRadius.circular(11),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(18, 15, 18, 16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '격자 한 칸을 무엇으로 정할까',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            RadioGroup<_GridResolutionMode>(
+              groupValue: widget.mode,
+              onChanged: (value) {
+                if (value != null) _push(value);
+              },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const RadioListTile<_GridResolutionMode>(
+                    value: _GridResolutionMode.target,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('크기 맞추기 (기본)'),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 34, bottom: 8),
+                    child: Wrap(
+                      spacing: 10,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _numberField(_width, '가로 칸'),
+                        const Text('×'),
+                        _numberField(_height, '세로 칸'),
+                        FilledButton.tonal(
+                          onPressed: () => _push(_GridResolutionMode.target),
+                          child: const Text('적용'),
+                        ),
+                        SizedBox(
+                          width: 300,
+                          child: CheckboxListTile(
+                            value: widget.padToTarget,
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            title: const Text(
+                              '남는 쪽을 `모름` 으로 채워 정확히 맞추기',
+                              style: TextStyle(fontSize: 12.5),
+                            ),
+                            onChanged: (value) => _push(
+                              _GridResolutionMode.target,
+                              pad: value ?? false,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const RadioListTile<_GridResolutionMode>(
+                    value: _GridResolutionMode.auto,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('자동'),
+                    subtitle: Text('로봇 몸 6칸 · 바닥 짧은 쪽 120칸으로 앱이 정합니다.'),
+                  ),
+                  const RadioListTile<_GridResolutionMode>(
+                    value: _GridResolutionMode.manual,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('직접 지정'),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 34),
+                    child: Wrap(
+                      spacing: 10,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _numberField(_manual, 'm/칸', width: 110),
+                        FilledButton.tonal(
+                          onPressed: () => _push(_GridResolutionMode.manual),
+                          child: const Text('적용'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: Color(0xFFE2E8F0)),
+            const SizedBox(height: 10),
+            Text(
+              '지금 설정  ${widget.resolution.toStringAsFixed(6)} m/칸'
+              '${cells == null ? '' : '  →  ${cells.width} × ${cells.height} 칸'}'
+              '${span <= 0 ? '' : '  ·  로봇 몸이 ${span.toStringAsFixed(1)}칸'}',
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF334155),
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              '참고  costmap 0.050000 m/칸'
+              '${widget.drawingScale == null ? '' : '  ·  도면 해상도 '
+                        '${widget.drawingScale!.toStringAsFixed(6)} m/px'}',
+              style: const TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8)),
+            ),
+            if (coarse) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(13, 10, 13, 11),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: const Color(0xFFFCA5A5)),
+                ),
+                child: Text(
+                  '한 칸이 너무 큽니다. 로봇 몸(${widget.robotWidth}m)이 '
+                  '${span.toStringAsFixed(1)}칸에 걸치는데, 여섯 칸은 되어야 좁은 '
+                  '통로가 통째로 막힌 것으로 보이지 않습니다. costmap 이 쓰는 '
+                  '0.05 m/칸보다 거칠면 벽이 뭉개진 채로 계획에 들어갑니다.\n'
+                  '칸 수를 늘리거나 `자동` 으로 두세요.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.55,
+                    color: Color(0xFF991B1B),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _numberField(
+    TextEditingController controller,
+    String label, {
+    double width = 92,
+  }) => SizedBox(
+    width: width,
+    child: TextField(
+      controller: controller,
+      decoration: InputDecoration(
+        labelText: label,
+        isDense: true,
+        border: const OutlineInputBorder(),
+      ),
+    ),
+  );
+}
+
+/// 구운 그리드맵을 그림으로 보여 준다.
+///
+/// `map_server` 가 읽는 PGM 과 같은 픽셀이다. 벽은 검고 바닥은 희고 모르는 곳은
+/// 회색이다. 눈으로 벽이 끊긴 데가 보이면 그게 AMCL 이 헷갈리는 자리다.
+class _GridMapPreview extends StatelessWidget {
+  const _GridMapPreview({
+    required this.image,
+    required this.grid,
+    required this.directory,
+  });
+
+  final ui.Image image;
+  final OccupancyGrid? grid;
+  final String? directory;
+
+  @override
+  Widget build(BuildContext context) {
+    final g = grid;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.check_circle, size: 18, color: Color(0xFF16A34A)),
+            const SizedBox(width: 8),
+            const Text(
+              '만든 그리드맵',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            ),
+            if (g != null) ...[
+              const SizedBox(width: 12),
+              Text(
+                '${g.width} × ${g.height} 칸 · 한 칸 '
+                '${g.resolution.toStringAsFixed(3)} m',
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  color: Color(0xFF64748B),
+                ),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            // 바닥이 흰색이라 흰 카드 위에 놓으면 지도의 범위가 안 보인다.
+            color: const Color(0xFFE2E8F0),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFCBD5E1)),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420, maxWidth: 720),
+            child: FittedBox(
+              child: RawImage(
+                image: image,
+                // 칸이 뭉개지면 벽이 이어져 보인다. 있는 그대로 키운다.
+                filterQuality: FilterQuality.none,
+              ),
+            ),
+          ),
+        ),
+        if (g != null) ...[
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 20,
+            runSpacing: 6,
+            children: [
+              _GridLegend(
+                color: const Color(0xFF000000),
+                label: '벽 ${g.occupiedCells}칸',
+              ),
+              _GridLegend(
+                color: const Color(0xFFFEFEFE),
+                label: '바닥 ${g.freeCells}칸',
+              ),
+              _GridLegend(
+                color: const Color(0xFFCDCDCD),
+                label: '모름 ${g.unknownCells}칸',
+              ),
+            ],
+          ),
+        ],
+        if (directory != null && directory!.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          SelectableText(
+            '$directory/nav2_map/',
+            style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// 올린 SLAM 지도 — 그림, 원점 맞추기, 어느 지도를 쓸지.
+///
+/// 원점을 손으로 넣게 하는 이유는, 자동으로 맞출 방법이 아직 없기 때문이다.
+/// 로봇을 아는 자리에 세우고 그 포즈로 계산하는 방법이 있지만 실물 로봇이
+/// 있어야 한다. 그때까지는 **범위를 맞춘 제안값**에서 시작해 사람이 겹쳐 보며
+/// 잡는 것이 가장 빠르다.
+class _SlamMapPanel extends StatefulWidget {
+  const _SlamMapPanel({
+    required this.map,
+    required this.image,
+    required this.referenceGrid,
+    required this.useSlamMap,
+    required this.onSaveOrigin,
+    required this.onUseSlamMapChanged,
+  });
+
+  final SlamMap map;
+  final ui.Image? image;
+
+  /// 도면에서 만든 격자. 제안값을 계산할 기준이다.
+  final OccupancyGrid? referenceGrid;
+  final bool useSlamMap;
+  final void Function(double x, double y) onSaveOrigin;
+  final ValueChanged<bool> onUseSlamMapChanged;
+
+  @override
+  State<_SlamMapPanel> createState() => _SlamMapPanelState();
+}
+
+class _SlamMapPanelState extends State<_SlamMapPanel> {
+  late final TextEditingController _x = TextEditingController(
+    text: widget.map.originX.toStringAsFixed(6),
+  );
+  late final TextEditingController _y = TextEditingController(
+    text: widget.map.originY.toStringAsFixed(6),
+  );
+
+  @override
+  void didUpdateWidget(_SlamMapPanel old) {
+    super.didUpdateWidget(old);
+    // 저장하고 다시 읽어 오면 칸을 새 값으로 맞춘다.
+    if (old.map.originX != widget.map.originX) {
+      _x.text = widget.map.originX.toStringAsFixed(6);
+    }
+    if (old.map.originY != widget.map.originY) {
+      _y.text = widget.map.originY.toStringAsFixed(6);
+    }
+  }
+
+  @override
+  void dispose() {
+    _x.dispose();
+    _y.dispose();
+    super.dispose();
+  }
+
+  /// 도면 격자와 덮는 범위의 가운데를 맞춘 제안값.
+  ({double x, double y})? get _suggestion {
+    final reference = widget.referenceGrid;
+    if (reference == null) return null;
+    final bounds = reference.bounds;
+    return suggestSlamOrigin(
+      slamWidth: widget.map.width,
+      slamHeight: widget.map.height,
+      slamResolution: widget.map.resolution,
+      referenceMinX: bounds.minX,
+      referenceMinY: bounds.minY,
+      referenceWidthMeters: bounds.maxX - bounds.minX,
+      referenceHeightMeters: bounds.maxY - bounds.minY,
+    );
+  }
+
+  void _save() {
+    final x = double.tryParse(_x.text.trim());
+    final y = double.tryParse(_y.text.trim());
+    if (x == null || y == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('원점은 숫자여야 합니다.')));
+      return;
+    }
+    widget.onSaveOrigin(x, y);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final map = widget.map;
+    final bounds = map.bounds;
+    final suggestion = _suggestion;
+    // RadioListTile 이 들어 있다. 배경색 있는 Container 안에 그냥 두면 잉크가
+    // 가려져 프레임워크가 경고한다.
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${map.width} × ${map.height} 칸 · 한 칸 '
+              '${map.resolution.toStringAsFixed(3)} m',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '덮는 범위  x ${bounds.minX.toStringAsFixed(3)} ~ '
+              '${bounds.maxX.toStringAsFixed(3)} m · '
+              'y ${bounds.minY.toStringAsFixed(3)} ~ '
+              '${bounds.maxY.toStringAsFixed(3)} m',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            if (widget.image != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE2E8F0),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFCBD5E1)),
+                ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    maxHeight: 300,
+                    maxWidth: 520,
+                  ),
+                  child: FittedBox(
+                    child: RawImage(
+                      image: widget.image,
+                      filterQuality: FilterQuality.none,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            const Text(
+              '원점 맞추기',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '그림의 왼쪽 아래 모서리가 RMF 월드에서 어디인가입니다. '
+              '두 지도를 겹쳐 보고 벽이 맞으면 맞은 것입니다.',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: Color(0xFF64748B),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                SizedBox(
+                  width: 150,
+                  child: TextField(
+                    controller: _x,
+                    decoration: const InputDecoration(
+                      labelText: 'origin x (m)',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 150,
+                  child: TextField(
+                    controller: _y,
+                    decoration: const InputDecoration(
+                      labelText: 'origin y (m)',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton(onPressed: _save, child: const Text('원점 저장')),
+              ],
+            ),
+            if (suggestion != null) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    '제안 ${suggestion.x.toStringAsFixed(6)}, '
+                    '${suggestion.y.toStringAsFixed(6)}',
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      color: Color(0xFF475569),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      _x.text = suggestion.x.toStringAsFixed(6);
+                      _y.text = suggestion.y.toStringAsFixed(6);
+                    },
+                    icon: const Icon(Icons.auto_fix_high_outlined, size: 16),
+                    label: const Text('제안값 넣기'),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 32),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                  const Text(
+                    '— 도면 지도와 덮는 범위의 가운데를 맞춘 값입니다. '
+                    '정답이 아니라 출발점입니다.',
+                    style: TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8)),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 20),
+            const Divider(height: 1, color: Color(0xFFE2E8F0)),
+            const SizedBox(height: 14),
+            const Text(
+              'Nav2 가 띄울 지도',
+              style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 6),
+            RadioGroup<bool>(
+              groupValue: widget.useSlamMap,
+              onChanged: (value) {
+                if (value != null) widget.onUseSlamMapChanged(value);
+              },
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  RadioListTile<bool>(
+                    value: false,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('도면에서 만든 지도'),
+                    subtitle: Text('원점이 계산으로 맞습니다. 시뮬레이션에 씁니다.'),
+                  ),
+                  RadioListTile<bool>(
+                    value: true,
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('SLAM 지도'),
+                    subtitle: Text('실제 건물에 씁니다. 원점을 맞춘 뒤에 고르세요.'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '고른 지도는 프로젝트에 저장됩니다. `프로젝트 저장` 을 누르면 '
+              'Nav2 launch 가 그 지도를 가리키게 다시 만들어집니다.',
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.5,
+                color: Color(0xFF94A3B8),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _GridLegend extends StatelessWidget {
+  const _GridLegend({required this.color, required this.label});
+
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 13,
+        height: 13,
+        decoration: BoxDecoration(
+          color: color,
+          border: Border.all(color: const Color(0xFF94A3B8)),
+          borderRadius: BorderRadius.circular(3),
+        ),
+      ),
+      const SizedBox(width: 7),
+      Text(
+        label,
+        style: const TextStyle(fontSize: 12.5, color: Color(0xFF475569)),
+      ),
+    ],
+  );
+}
+
+class _GridMapFact extends StatelessWidget {
+  const _GridMapFact({
+    required this.label,
+    required this.value,
+    this.dim = false,
+  });
+
+  final String label;
+  final String value;
+  final bool dim;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 11),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 108,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
+          ),
+        ),
+        Expanded(
+          child: SelectableText(
+            value,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: dim ? FontWeight.w400 : FontWeight.w700,
+              color: dim ? const Color(0xFF94A3B8) : const Color(0xFF0F172A),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class _MapFileStatus extends StatelessWidget {
   const _MapFileStatus({
     required this.sourceLabel,
@@ -12172,11 +14060,7 @@ class _RegistrationBadge extends StatelessWidget {
     ),
     child: Text(
       label,
-      style: TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.w700,
-        color: color,
-      ),
+      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: color),
     ),
   );
 }
@@ -12667,95 +14551,93 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                     onTap: () => widget.onOpenRobot(robot.robotId),
                     borderRadius: BorderRadius.circular(10),
                     child: Container(
-                    width: 320,
-                    padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Flexible(
-                                    child: Text(
-                                      '${robot.robotId} · ${robot.displayName}',
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w700,
+                      width: 320,
+                      padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        '${robot.robotId} · ${robot.displayName}',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                        ),
                                       ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  // 토픽이 실제로 들어오는지가 배치 여부보다
-                                  // 중요하다. 출처를 Gazebo 로 골라 놓고 값이
-                                  // 안 오면 화면 숫자는 앱이 계산한 것이다.
-                                  if (widget.telemetry.isLive(robot.robotId))
-                                    const _RegistrationBadge(
-                                      label: '토픽 수신',
-                                      color: Color(0xFFEA580C),
-                                    )
-                                  else if (robot.runsInGazebo)
-                                    const _RegistrationBadge(
-                                      label: '토픽 없음',
-                                      color: Color(0xFFDC2626),
-                                    )
-                                  else if (spawnedIds.contains(robot.robotId))
-                                    const _RegistrationBadge(
-                                      label: '배치됨',
-                                      color: Color(0xFF16A34A),
-                                    )
-                                  else
-                                    const _RegistrationBadge(
-                                      label: '대기',
-                                      color: Color(0xFF94A3B8),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                '${robot.dataSource.label} · '
-                                '${robot.kind.label} · ${robot.model}\n'
-                                '${robot.isMobile ? '충전' : '설비'} '
-                                '${robot.chargerWaypoint ?? '미지정'}'
-                                '${robot.spawnX == null
-                                    ? ''
-                                    : ' · spawn '
-                                          '${robot.spawnX!.toStringAsFixed(2)}, '
-                                          '${robot.spawnY!.toStringAsFixed(2)}'}',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF64748B),
-                                  height: 1.4,
+                                    const SizedBox(width: 6),
+                                    // 토픽이 실제로 들어오는지가 배치 여부보다
+                                    // 중요하다. 출처를 Gazebo 로 골라 놓고 값이
+                                    // 안 오면 화면 숫자는 앱이 계산한 것이다.
+                                    if (widget.telemetry.isLive(robot.robotId))
+                                      const _RegistrationBadge(
+                                        label: '토픽 수신',
+                                        color: Color(0xFFEA580C),
+                                      )
+                                    else if (robot.runsInGazebo)
+                                      const _RegistrationBadge(
+                                        label: '토픽 없음',
+                                        color: Color(0xFFDC2626),
+                                      )
+                                    else if (spawnedIds.contains(robot.robotId))
+                                      const _RegistrationBadge(
+                                        label: '배치됨',
+                                        color: Color(0xFF16A34A),
+                                      )
+                                    else
+                                      const _RegistrationBadge(
+                                        label: '대기',
+                                        color: Color(0xFF94A3B8),
+                                      ),
+                                  ],
                                 ),
-                              ),
-                            ],
+                                const SizedBox(height: 3),
+                                Text(
+                                  '${robot.dataSource.label} · '
+                                  '${robot.kind.label} · ${robot.model}\n'
+                                  '${robot.isMobile ? '충전' : '설비'} '
+                                  '${robot.chargerWaypoint ?? '미지정'}'
+                                  '${robot.spawnX == null ? '' : ' · spawn '
+                                            '${robot.spawnX!.toStringAsFixed(2)}, '
+                                            '${robot.spawnY!.toStringAsFixed(2)}'}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF64748B),
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          tooltip: '수정',
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () =>
-                              widget.onEditRegisteredRobot(robot),
-                          icon: const Icon(Icons.edit_outlined, size: 17),
-                        ),
-                        IconButton(
-                          tooltip: '등록 해제',
-                          visualDensity: VisualDensity.compact,
-                          onPressed: () => widget.onUnregisterRobot(robot),
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            size: 17,
-                            color: Color(0xFFDC2626),
+                          IconButton(
+                            tooltip: '수정',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () =>
+                                widget.onEditRegisteredRobot(robot),
+                            icon: const Icon(Icons.edit_outlined, size: 17),
                           ),
-                        ),
-                      ],
-                    ),
+                          IconButton(
+                            tooltip: '등록 해제',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => widget.onUnregisterRobot(robot),
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              size: 17,
+                              color: Color(0xFFDC2626),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
               ],
@@ -13357,9 +15239,12 @@ class _NavigationRail extends StatelessWidget {
     // 일하는 차례대로 둔다. 맵을 만들고 → 로봇을 등록하고 → 설정을 내보내고
     // → 백엔드를 띄우고 → 로봇을 올리고 → 작업을 시킨다. 가운데 셋은 로봇
     // 화면 안에 있으므로, 큰 차례는 맵 → 로봇 → 설정 → 작업이 된다.
+    // 그리드맵은 맵 바로 뒤에 둔다. 도면에서 파생되는 산출물이고, 이것이
+    // 없으면 뒤의 로봇·작업이 아예 돌지 않는다.
     const items = [
       (Icons.grid_view_rounded, '대시보드'),
       (Icons.map_outlined, '맵 관리'),
+      (Icons.grid_on_outlined, '그리드맵'),
       (Icons.smart_toy_outlined, '로봇'),
       (Icons.description_outlined, '설정 파일'),
       (Icons.assignment_outlined, '작업'),
@@ -13984,6 +15869,7 @@ class _PageHeading extends StatelessWidget {
     required this.onLoadProject,
     required this.onSaveToDatabase,
     required this.onOpenFromDatabase,
+    required this.onNewProject,
     required this.onRmfConfig,
   });
   final VoidCallback onHelp;
@@ -13998,6 +15884,9 @@ class _PageHeading extends StatelessWidget {
   final VoidCallback onLoadProject;
   final VoidCallback onSaveToDatabase;
   final VoidCallback onOpenFromDatabase;
+
+  /// 이름을 먼저 받아 빈 프로젝트를 만든다.
+  final VoidCallback onNewProject;
 
   /// 프로젝트별 RMF 플릿 설정과 생성된 설정 파일을 본다.
   final VoidCallback onRmfConfig;
@@ -14039,9 +15928,24 @@ class _PageHeading extends StatelessWidget {
                 ),
               ),
             ),
-            // 맵 프로젝트의 원장은 MySQL이다. 지도 이름으로 프로젝트를 구분해 담으므로
-            // 이 두 버튼이 여러 창고를 오가는 기본 경로다. 파일 저장·불러오기는 다른
+            // 맵 프로젝트의 원장은 MySQL이다. 프로젝트 이름으로 구분해 담으므로
+            // 이 세 버튼이 여러 창고를 오가는 기본 경로다. 파일 저장·불러오기는 다른
             // PC로 옮기거나 백업할 때 쓰는 보조 수단으로 남겨 둔다.
+            //
+            // `새 프로젝트` 가 맨 앞이다. 이름을 먼저 정하고 도면을 올리는 것이
+            // 제 차례다 — 도면부터 올리면 그 파일 이름이 프로젝트 이름으로
+            // 굳어 버리는 것이 예전 문제였다.
+            OutlinedButton.icon(
+              onPressed: onNewProject,
+              icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+              label: const Text('새 프로젝트'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
             FilledButton.icon(
               onPressed: onOpenFromDatabase,
               icon: const Icon(Icons.storage_outlined, size: 18),
@@ -17105,6 +19009,7 @@ class _SetupPanel extends StatelessWidget {
     required this.onFloorColorChanged,
     required this.isDeployed,
     required this.onDeploy,
+    required this.onGenerateGrid,
     required this.onStageChanged,
   });
   final UploadedDrawing? drawing;
@@ -17127,6 +19032,9 @@ class _SetupPanel extends StatelessWidget {
   final ValueChanged<Color> onFloorColorChanged;
   final bool isDeployed;
   final VoidCallback onDeploy;
+
+  /// 그리드맵만 다시 만든다. 배포 전체를 돌리지 않고 지도만 고칠 때 쓴다.
+  final VoidCallback onGenerateGrid;
   final ValueChanged<MapStage> onStageChanged;
   @override
   Widget build(BuildContext context) {
@@ -17290,6 +19198,16 @@ class _SetupPanel extends StatelessWidget {
             enabled: enabled,
             checked: stage.index >= MapStage.stations.index,
             onTap: () => onStageChanged(MapStage.stations),
+          ),
+          // 배포하기 안에도 들어 있지만 따로 둔다. 도면의 벽을 고친 뒤 지도만
+          // 다시 만들고 싶을 때가 잦고, 이것이 빠지면 로봇이 아예 안 움직인다.
+          _SettingTile(
+            icon: Icons.grid_on_outlined,
+            title: '그리드맵 작성',
+            subtitle: 'AMCL·Nav2 가 쓰는 점유격자를 도면에서 만듭니다',
+            enabled: enabled && floorGenerated,
+            checked: false,
+            onTap: onGenerateGrid,
           ),
           const SizedBox(height: 20),
           SizedBox(
@@ -18428,8 +20346,11 @@ class _OperationsAnalyticsPageState extends State<_OperationsAnalyticsPage> {
                     children: [
                       Row(
                         children: [
-                          Icon(_icons[entry.kind], size: 15,
-                              color: _colors[entry.kind]),
+                          Icon(
+                            _icons[entry.kind],
+                            size: 15,
+                            color: _colors[entry.kind],
+                          ),
                           const SizedBox(width: 6),
                           Flexible(
                             child: SelectableText(
@@ -18824,8 +20745,7 @@ class _SpawnCheckDialogState extends State<_SpawnCheckDialog> {
           ),
           _summaryLine('저장', _meters(check.stored)),
           if (check.fromMap != null &&
-              (check.stored == null ||
-                  check.issue != SpawnIssue.ok))
+              (check.stored == null || check.issue != SpawnIssue.ok))
             _summaryLine('지도', '${_meters(check.fromMap)}  ← 맞추면 이 값이 됩니다'),
           const SizedBox(height: 4),
           SelectableText(
@@ -18984,9 +20904,7 @@ class _SpawnCheckDialogState extends State<_SpawnCheckDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.auto_fix_high, size: 18),
-          label: Text(
-            fixable == 0 ? '맞출 것이 없습니다' : '지도 기준으로 맞추기 · $fixable대',
-          ),
+          label: Text(fixable == 0 ? '맞출 것이 없습니다' : '지도 기준으로 맞추기 · $fixable대'),
         ),
         TextButton(
           onPressed: () => Navigator.pop(context),
@@ -19415,7 +21333,9 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   /// 정작 봐야 할 때 눈에 안 들어온다.
   List<Widget> _diagnosisSection() {
     final registered = _registered;
-    if (registered == null || !registered.dataSource.usesTopics) return const [];
+    if (registered == null || !registered.dataSource.usesTopics) {
+      return const [];
+    }
     final links = _links;
     final broken = firstBrokenLink(links);
     if (broken == null && !_mismatch && _fixMessage == null) {
@@ -19619,10 +21539,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
               ),
               Text(
                 '${topic.type} · ${topic.what}',
-                style: const TextStyle(
-                  color: Color(0xFF64748B),
-                  fontSize: 12,
-                ),
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
               ),
             ],
           ),
@@ -19849,8 +21766,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       '[로봇] ${widget.robotId}'
           '${registered == null ? '' : ' · ${registered.displayName}'}',
       '[출처] ${_source.label} — ${_source.summary}',
-      if (_mismatch)
-        '  주의 등록은 ${registered!.dataSource.label} 인데 토픽이 오지 않습니다.',
+      if (_mismatch) '  주의 등록은 ${registered!.dataSource.label} 인데 토픽이 오지 않습니다.',
       '',
       if (registered != null) ...[
         '종류 ${registered.kind.label}',
@@ -19943,10 +21859,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                       ? 'fleet adapter 에 들어감'
                       : '들어가지 않음 (앱이 직접 굴림)',
                 ),
-                _row(
-                  'Gazebo',
-                  registered.runsInGazebo ? '올라감' : '올리지 않음',
-                ),
+                _row('Gazebo', registered.runsInGazebo ? '올라감' : '올리지 않음'),
               ],
               _heading('지금 상태'),
               if (robot == null)
@@ -19969,7 +21882,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                 _row(
                   '토픽 위치',
                   '${pose.x.toStringAsFixed(3)}, ${pose.y.toStringAsFixed(3)} m'
-                  ' · 방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
+                      ' · 방향 ${(pose.heading * 180 / math.pi).toStringAsFixed(1)}°',
                   color: _sourceColors[_source],
                 ),
               ..._diagnosisSection(),
@@ -19998,7 +21911,9 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                           },
                           size: 16,
                           color: switch (task.status) {
-                            _MockTaskStatus.completed => const Color(0xFF15803D),
+                            _MockTaskStatus.completed => const Color(
+                              0xFF15803D,
+                            ),
                             _MockTaskStatus.active => const Color(0xFF2563EB),
                             _MockTaskStatus.failed => const Color(0xFFDC2626),
                             _ => const Color(0xFF94A3B8),
@@ -20026,9 +21941,9 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
           onPressed: () async {
             await Clipboard.setData(ClipboardData(text: _asText()));
             if (!context.mounted) return;
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('로봇 상세를 복사했습니다.')),
-            );
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(const SnackBar(content: Text('로봇 상세를 복사했습니다.')));
           },
           icon: const Icon(Icons.copy_outlined, size: 18),
           label: const Text('복사'),
@@ -20263,9 +22178,7 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
                   ? Center(
                       child: Text(
                         tail.message ??
-                            (_errorsOnly
-                                ? '오류나 경고가 없습니다.'
-                                : '아직 아무것도 없습니다.'),
+                            (_errorsOnly ? '오류나 경고가 없습니다.' : '아직 아무것도 없습니다.'),
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                           color: Color(0xFF94A3B8),
