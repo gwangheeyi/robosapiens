@@ -139,4 +139,28 @@ sweep_rmf_core() {
 
 sweep_rmf_core
 
+# Gazebo 다리를 쓸어낸다.
+#
+# `parameter_bridge` 는 인자에 맵 경로가 있는 것도 있지만, `/clock` 하나만 잇는
+# 것은 인자가 `/clock@rosgraph_msgs...` 뿐이라 위 그물에 하나도 안 걸린다.
+# 부모마저 systemd 로 바뀌면 프로세스 그룹으로도 못 잡는다.
+#
+# 그러면 다음 실행에서 **/clock 을 두 곳이 낸다.** 두 시계가 번갈아 나오니
+# 시각이 앞뒤로 튀고, tf2 가 `Detected jump back in time` 으로 버퍼를 통째로
+# 비운다. AMCL 은 위치추정을 잃고 Nav2 는 명령을 멈춘다 — 로봇은 멀쩡한데
+# 가만히 서 있고, 그 원인이 한 시간 전에 남은 프로세스라는 것은 어디에도
+# 안 보인다. 실제로 그렇게 39번 튀었다.
+sweep_bridges() {
+  mapfile -t pids < <(
+    pgrep -u "$(id -u)" -f "ros_gz_bridge/parameter_bridge" 2>/dev/null || true
+  )
+  if ((${#pids[@]} == 0)); then
+    echo "Gazebo 다리: 남은 것 없음"
+    return
+  fi
+  stop_pids "Gazebo 다리" "${pids[@]}"
+}
+
+sweep_bridges
+
 echo "project1 프로젝트 프로세스를 정리했습니다."

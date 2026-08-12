@@ -23,6 +23,8 @@ class VendorSpeedLimits {
     this.linearAcceleration,
     this.angularVelocity,
     this.angularAcceleration,
+    this.progressAllowanceSeconds,
+    this.progressRadiusMeters,
   });
 
   /// `desired_linear_vel` — 컨트롤러가 노리는 직진 속도 [m/s].
@@ -39,6 +41,15 @@ class VendorSpeedLimits {
 
   /// `max_angular_accel` [rad/s²].
   final double? angularAcceleration;
+
+  /// `movement_time_allowance` — 끼었나 판정에 쓰는 여유 시간 [s].
+  ///
+  /// 속도와 함께 봐야 뜻이 생긴다. 이 시간 동안 [progressRadiusMeters] 를 못
+  /// 벗어나면 Nav2 가 로봇을 끼었다고 보고 제자리 회전·후진을 시킨다.
+  final double? progressAllowanceSeconds;
+
+  /// `required_movement_radius` — 그동안 벗어나야 하는 거리 [m].
+  final double? progressRadiusMeters;
 
   /// 하나도 못 찾았는가. 벤더 파일이 크게 바뀌면 이렇게 된다.
   bool get isEmpty =>
@@ -89,6 +100,8 @@ VendorSpeedLimits parseVendorSpeedLimits(String yaml) {
   double? linearAcceleration;
   double? angularVelocity;
   double? angularAcceleration;
+  double? progressAllowanceSeconds;
+  double? progressRadiusMeters;
 
   for (final line in yaml.split('\n')) {
     final match = _entry.firstMatch(line);
@@ -104,6 +117,10 @@ VendorSpeedLimits parseVendorSpeedLimits(String yaml) {
         angularVelocity ??= double.tryParse(value);
       case 'max_angular_accel':
         angularAcceleration ??= double.tryParse(value);
+      case 'movement_time_allowance':
+        progressAllowanceSeconds ??= double.tryParse(value);
+      case 'required_movement_radius':
+        progressRadiusMeters ??= double.tryParse(value);
     }
   }
 
@@ -112,5 +129,7 @@ VendorSpeedLimits parseVendorSpeedLimits(String yaml) {
     linearAcceleration: linearAcceleration,
     angularVelocity: angularVelocity,
     angularAcceleration: angularAcceleration,
+    progressAllowanceSeconds: progressAllowanceSeconds,
+    progressRadiusMeters: progressRadiusMeters,
   );
 }

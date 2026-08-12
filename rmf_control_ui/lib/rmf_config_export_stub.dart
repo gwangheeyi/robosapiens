@@ -36,3 +36,5 @@ Future<String?> exportProjectDrawing({
   required String fileName,
   required Uint8List bytes,
 }) async => null;
+
+bool projectRunScriptExists(String mapDirectory, String mapName) => false;

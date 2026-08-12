@@ -47,9 +47,29 @@
   </group>
 
   <!-- RMF 와 Nav2 를 잇는다. 이것이 없으면 RMF 가 배차해도
-       로봇이 안 움직인다. -->
+       로봇이 안 움직인다.
+
+       RViz 도 이것에 매달려 있다. 경로(Lane·Waypoint)를 그리는
+       /nav_graphs 와 로봇을 그리는 /fleet_states 를 내는 것이
+       RMF 안에서 이 어댑터(FleetUpdateHandle) 하나뿐이다.
+       이것이 죽으면 RViz 는 도면만 남고 텅 빈다.
+
+       respawn 을 켠 이유 — Nav2 20여 개 노드와 같이 뜨는
+       중에 add_easy_fleet 안에서 SIGSEGV 로 죽는 일이 있다.
+       한가할 때 같은 명령을 다시 돌리면 멀쩡히 뜬다. 부하가
+       걸린 순간에만 나는 rmf_adapter 쪽 경합이라 우리가 고칠
+       수 없다. 대신 다시 띄운다 — 죽은 채로 두면 오류 한 줄
+       없이 RViz 만 비어 보인다. -->
   <executable output="screen"
+              respawn="true" respawn_delay="5.0"
+              respawn_max_retries="5"
               cmd="python3 $(var map_dir)/project1_nav2_adapter.py -c $(var map_dir)/project1_pinky_config.yaml -n $(var map_dir)/nav_graphs/0.yaml -s"/>
+
+  <!-- 설비 로봇을 RMF 워크셀로 잇는다. 이것이 없으면 로봇이
+       픽업 자리에 닿아도 RMF 가 답을 못 받아 영원히
+       기다린다 — 오류는 안 나고 작업만 멈춘다. -->
+  <executable output="screen"
+              cmd="python3 $(var map_dir)/project1_workcell.py"/>
 
   <!-- 라이다·카메라를 앱이 읽을 수 있게 파일로 내려 준다. -->
   <executable output="screen"

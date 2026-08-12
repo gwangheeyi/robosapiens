@@ -56,6 +56,8 @@
        샌다. 안 감쌌더니 아래 headless 가 true 로 덮여 RViz 가
        아예 안 떴다 — 오류는 한 줄도 안 났다. -->
   <group>
+    <set_parameter name="project1_pinky_radius"
+                   value="0.050"/>
     <include file="$(find-pkg-share rmf_visualization)/visualization.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="map_name" value="$(var initial_map)"/>

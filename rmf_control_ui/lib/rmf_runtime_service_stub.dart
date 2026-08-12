@@ -18,3 +18,17 @@ Future<List<String>> gazeboRunningProjects() async => const [];
 
 Future<String> sweepOrphanBackends(String rootPath) async =>
     '웹 빌드에서는 프로세스를 쓸어낼 수 없습니다.';
+
+Future<RmfFleetSnapshot> probeFleetStates({
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 8),
+}) async => const RmfFleetSnapshot(
+  reachable: false,
+  robots: {},
+  message: '웹 빌드에서는 ROS 토픽을 읽을 수 없습니다.',
+);
+
+Future<int?> probeClockPublishers({
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 12),
+}) async => null;

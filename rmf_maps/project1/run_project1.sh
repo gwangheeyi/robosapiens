@@ -364,6 +364,9 @@ sleep 12
 # 죽은 일이 있다. RMF 가 `rmf/dynamic_event/begin/<플릿>/<로봇>` 토픽을 만드는데
 # ROS 2 토픽 이름에는 하이픈을 못 쓰기 때문이다.
 ADAPTER_WAIT="${ADAPTER_WAIT:-90}"
+# launch 의 respawn_delay 보다 넉넉해야 한다. 짧으면 다시 뜨는 중인 것을 두고
+# 죽었다고 알린다.
+ADAPTER_RESPAWN_WAIT="${ADAPTER_RESPAWN_WAIT:-30}"
 watch_fleet_adapter() {
   local pattern="$MAP_DIR/project1_nav2_adapter.py"
   local deadline=$((SECONDS + ADAPTER_WAIT))
@@ -380,12 +383,35 @@ watch_fleet_adapter() {
   fi
   echo "RMF↔Nav2 어댑터가 떴습니다."
   # 뜬 다음 죽는 것이 진짜 문제다. 계속 지켜본다.
-  while pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; do
-    sleep 5
+  #
+  # 다만 launch 가 respawn 으로 다시 띄운다. 사라진 그 순간에 죽었다고 알리면
+  # 5초 뒤 멀쩡히 살아난 것을 두고 사람을 뛰게 만든다. 돌아오기를 기다렸다가,
+  # 정말 안 돌아올 때만 알린다.
+  while :; do
+    if pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; then
+      sleep 5
+      continue
+    fi
+    local back=$((SECONDS + ADAPTER_RESPAWN_WAIT))
+    local revived=0
+    while ((SECONDS < back)); do
+      sleep 2
+      if pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; then
+        revived=1
+        break
+      fi
+    done
+    if ((revived)); then
+      echo "RMF↔Nav2 어댑터가 죽었다가 다시 떴습니다." >&2
+      continue
+    fi
+    break
   done
   echo "" >&2
-  echo "RMF↔Nav2 어댑터가 죽었습니다. 이제 RMF 가 주문을 받지 못합니다." >&2
-  echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다 — 그래서 겉으로는" >&2
+  echo "RMF↔Nav2 어댑터가 죽었고 다시 뜨지도 않았습니다." >&2
+  echo "이제 RMF 는 주문을 받지 못하고, RViz 에서는 경로와 로봇이 사라집니다 —" >&2
+  echo "그 둘을 내는 /nav_graphs · /fleet_states 가 이 어댑터에서만 나옵니다." >&2
+  echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다. 그래서 겉으로는" >&2
   echo "멀쩡해 보입니다." >&2
   echo "" >&2
   echo "가장 흔한 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2

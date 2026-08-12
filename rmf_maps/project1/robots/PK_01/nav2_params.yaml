@@ -84,7 +84,7 @@
       stateful: true                         # 플러그인이 이전 상태를 기억할지 여부
 
       # 기본 주행 및 속도
-      desired_linear_vel: 0.2                # [m/s] 목표 기본 직진 속도
+      desired_linear_vel: 0.200 # [m/s] 목표 기본 직진 속도
       allow_reversing: false                 # 후진 허용 여부 (false: 무조건 전진/제자리 회전으로 해결)
       max_angular_accel: 3.2                 # [rad/s^2] 최대 각가속도 (회전할 때 얼마나 빨리 가속할지)
 
@@ -171,7 +171,7 @@
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       movement_time_allowance: 10.0              # [s] 이 시간 동안 아래 거리만큼 못 움직이면 끼인 것으로 판단
-      required_movement_radius: 0.5              # [m] 위 시간 동안 최소 0.5m 반경은 벗어나야 함 (못 벗어나면 Recovery 실행)
+      required_movement_radius: 0.500 # [m] 위 시간 동안 최소 0.5m 반경은 벗어나야 함 (못 벗어나면 Recovery 실행)
 
 
 /pinky_01/local_costmap:
@@ -333,7 +333,7 @@
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.25, 0.0, 1.5]
+    max_velocity: [0.250, 0.0, 1.5]
     min_velocity: [-0.25, 0.0, -1.5]
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]

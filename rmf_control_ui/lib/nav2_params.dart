@@ -12,6 +12,8 @@
 /// 파일의 주석은 왜 그 값인지를 적어 둔 것이라 잃으면 손해다.
 library;
 
+import 'nav2_progress_checker.dart';
+
 /// 다시 쓴 결과.
 class Nav2ParamsRewrite {
   const Nav2ParamsRewrite({
@@ -69,6 +71,37 @@ const Set<String> _topicKeys = {
 
 /// 로봇별로 가르면 **안 되는** 토픽. 월드에 하나뿐인 것들이다.
 const Set<String> _sharedTopics = {'/map', '/tf', '/tf_static', '/clock'};
+
+/// 파일 전체에서 `키: 숫자` 를 찾는다. 처음 것만 쓴다. 없으면 null.
+///
+/// 벤더 파일에서 이 이름들이 유일해서 어느 블록에 있는지 따질 필요가 없다.
+double? _numberOf(String yaml, String key) {
+  final pattern = RegExp('^\\s*$key:\\s*(.*)\$', multiLine: true);
+  final match = pattern.firstMatch(yaml);
+  if (match == null) return null;
+  final raw = match.group(1)!;
+  final hash = raw.indexOf('#');
+  return double.tryParse((hash >= 0 ? raw.substring(0, hash) : raw).trim());
+}
+
+/// `[0.25, 0.0, 1.5]` 의 첫 항. 그 모양이 아니면 null.
+///
+/// Nav2 의 속도 벡터는 `[x, y, theta]` 다. 차동 구동이라 y 는 늘 0 이고, 직진
+/// 속도는 첫 항이다.
+double? _firstOfVector(String value) {
+  final text = value.trim();
+  if (!text.startsWith('[') || !text.endsWith(']')) return null;
+  final items = text.substring(1, text.length - 1).split(',');
+  if (items.isEmpty) return null;
+  return double.tryParse(items.first.trim());
+}
+
+/// 첫 항만 갈아 끼운 벡터. 나머지 항은 글자 그대로 둔다.
+String _withFirst(String value, String first) {
+  final text = value.trim();
+  final items = text.substring(1, text.length - 1).split(',');
+  return '[$first, ${items.skip(1).map((item) => item.trim()).join(', ')}]';
+}
 
 final RegExp _topLevelKey = RegExp(r'^([A-Za-z_][A-Za-z_0-9]*):\s*$');
 final RegExp _setting = RegExp(r'^(\s*)([A-Za-z_][A-Za-z_0-9]*):\s*(.*)$');
@@ -149,11 +182,20 @@ Nav2ParamsRewrite rewriteNav2Params({
   double? initialY,
   double? initialYaw,
   double? goalTolerance,
+  // 목표 직진 속도 [m/s]. 주면 벤더 값을 덮어쓴다. RMF 쪽 한계와 같은 값을
+  // 넣어야 배차 계산과 실제 주행이 어긋나지 않는다.
+  double? linearVelocity,
 }) {
   final ns = namespace.startsWith('/') ? namespace.substring(1) : namespace;
   final changes = <String>[];
   final warnings = <String>[];
   final out = <String>[];
+
+  // 끼었나 판정에 쓰는 여유 시간. `required_movement_radius` 보다 먼저 나오지만
+  // 그 순서에 기대지 않고 미리 훑는다 — 벤더 파일이 바뀌어 순서가 뒤집히면
+  // 조용히 옛 값으로 계산하게 된다.
+  final allowance = _numberOf(source, 'movement_time_allowance');
+  final vendorRadius = _numberOf(source, 'required_movement_radius');
 
   /// 상대 이름이든 절대 이름이든 이 로봇 것으로 만든다.
   String namespaced(String name) {
@@ -243,6 +285,89 @@ Nav2ParamsRewrite rewriteNav2Params({
         );
       }
       continue;
+    }
+
+    // ③-2 주행 속도. 로봇을 실제로 움직이는 것은 이 값이다.
+    //
+    // RMF 쪽 한계(`rmf_fleet.limits`)는 **배차 시간 계산에만** 쓰인다. 거기에
+    // 1.0 m/s 를 적어도 로봇은 벤더 파일의 0.2 m/s 로 간다. 둘이 어긋나면
+    // RMF 는 멀쩡히 가는 로봇을 5배 늦었다고 보고 경로를 다시 짠다.
+    //
+    // 그래서 앱의 속도 하나로 양쪽을 다 쓴다. 벤더 파일은 그대로 두고 이
+    // 로봇의 복사본만 고친다 — 어차피 프레임과 토픽도 이미 갈라 놓았다.
+    if (linearVelocity != null) {
+      // 두 곳을 함께 고쳐야 한다. desired_linear_vel 만 올리고
+      // velocity_smoother 의 상한을 두면, 스무더가 그 위에서 잘라 버려 아무
+      // 것도 안 빨라진다. 실제로 0.2 를 올려도 0.25 에서 막혔다.
+      if (key == 'desired_linear_vel') {
+        final after = linearVelocity.toStringAsFixed(3);
+        out.add(
+          '$indent$key: $after'
+          '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+        );
+        changes.add('desired_linear_vel: ${parts.value.trim()} → $after');
+        continue;
+      }
+      if (key == 'max_velocity') {
+        final vector = _firstOfVector(parts.value);
+        if (vector != null) {
+          // 상한은 목표보다 살짝 위여야 한다. 딱 같게 두면 스무더가 목표에
+          // 닿기 직전에 늘 걸린다.
+          final ceiling = (linearVelocity * 1.25).toStringAsFixed(3);
+          final replaced = _withFirst(parts.value, ceiling);
+          out.add(
+            '$indent$key: $replaced'
+            '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+          );
+          changes.add(
+            'velocity_smoother max_velocity: ${parts.value.trim()} → $replaced '
+            '(목표 속도의 1.25배 상한)',
+          );
+          continue;
+        }
+        warnings.add(
+          'velocity_smoother 의 max_velocity 가 `[x, y, theta]` 모양이 아니라 '
+          '건드리지 않았습니다. 이 값이 목표 속도보다 낮으면 여기서 잘립니다.',
+        );
+      }
+
+      // ③-3 "끼었나" 판정. 속도를 낮추면 이것도 같이 낮춰야 한다.
+      //
+      // SimpleProgressChecker 는 movement_time_allowance 초 동안
+      // required_movement_radius 를 못 벗어나면 끼었다고 보고 제자리 회전과
+      // 후진을 시킨다. 벤더 값 10초·0.5m 는 0.05m/s 이상을 전제한다.
+      //
+      // 속도만 낮추고 이것을 그대로 두면 **정상 주행이 실패로 판정된다.**
+      // 0.02m/s 로 내렸더니 10초에 0.2m 밖에 못 가는데 0.5m 를 요구받아, 로봇이
+      // 목적지로 가다 말고 되돌아오기를 되풀이했다. 그 헛회전이 odom 에 쌓여
+      // AMCL 보정이 46도까지 벌어졌고, 화면마다 위치가 달라 보였다.
+      if (key == 'required_movement_radius' &&
+          allowance != null &&
+          vendorRadius != null) {
+        final radius = progressCheckerRadius(
+          linearVelocity: linearVelocity,
+          allowanceSeconds: allowance,
+          vendorRadius: vendorRadius,
+        );
+        final after = radius.toStringAsFixed(3);
+        out.add(
+          '$indent$key: $after'
+          '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+        );
+        if ((radius - vendorRadius).abs() > 1e-9) {
+          changes.add(
+            'required_movement_radius: ${parts.value.trim()} → $after '
+            '(직진 속도 ${linearVelocity.toStringAsFixed(3)}m/s 에 맞춤)',
+          );
+        }
+        final problem = progressCheckerWarning(
+          linearVelocity: linearVelocity,
+          allowanceSeconds: allowance,
+          vendorRadius: vendorRadius,
+        );
+        if (problem != null) warnings.add(problem);
+        continue;
+      }
     }
 
     // ④ TF 프레임. 로봇마다 갈라야 한다.

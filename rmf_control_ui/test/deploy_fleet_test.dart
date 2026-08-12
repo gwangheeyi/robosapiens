@@ -13,6 +13,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rmf_control_ui/rmf_project_config.dart';
 
 void main() {
   late final String script = File(
@@ -73,6 +74,34 @@ void main() {
       expect(script, contains('뜰 때 읽은 nav graph 를 그대로 씁니다'));
       expect(script, contains(r'stop_$MAP_NAME.sh'));
       expect(script, contains(r'run_$MAP_NAME.sh'));
+    });
+  });
+
+  group('중지가 남은 토픽 다리를 쓸어낸다', () {
+    // `/clock` 하나만 잇는 parameter_bridge 는 인자에 맵 경로가 없어 다른
+    // 그물에 하나도 안 걸린다. 부모마저 systemd 로 바뀌면 프로세스 그룹으로도
+    // 못 잡는다. 남으면 다음 실행에서 /clock 을 두 곳이 내고, 시각이 앞뒤로
+    // 튀어 AMCL 이 위치추정을 잃는다 — 로봇은 멀쩡한데 가만히 선다.
+    final stopScript = buildProjectStopScript(
+      mapName: 'project1',
+      mapDirectory: '/maps/project1',
+    );
+
+    test('parameter_bridge 를 이름으로 찾는다', () {
+      expect(stopScript, contains('sweep_bridges'));
+      expect(stopScript, contains('ros_gz_bridge/parameter_bridge'));
+    });
+
+    test('실제로 부른다', () {
+      // 함수만 있고 안 부르면 아무 일도 안 일어난다.
+      expect(
+        RegExp(r'^sweep_bridges\s*$', multiLine: true).hasMatch(stopScript),
+        isTrue,
+      );
+    });
+
+    test('왜 잡아야 하는지 남긴다', () {
+      expect(stopScript, contains('jump back in time'));
     });
   });
 }

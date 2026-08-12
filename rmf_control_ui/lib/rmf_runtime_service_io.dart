@@ -437,3 +437,96 @@ Future<RmfStopResult> stopRmfBackend({String? mapName}) async {
 
   return RmfStopResult(success: success, output: buffer.toString().trim());
 }
+
+/// `/fleet_states` 를 한 번 읽어 RMF 에 붙은 로봇을 본다.
+///
+/// 이 토픽을 내는 것은 fleet adapter(`FleetUpdateHandle`) 하나뿐이다. 그래서 이
+/// 한 번의 확인이 두 가지를 함께 알려 준다 — 어댑터가 살아 있는가, 그리고 어느
+/// 로봇이 실제로 플릿에 붙었는가.
+///
+/// [rosDomainId] 를 반드시 넘긴다. 앱은 ROS 를 source 하지 않은 셸에서 도는데,
+/// 도메인이 다르면 토픽이 있어도 하나도 안 보인다 — 오류는 안 난다.
+///
+/// 못 읽으면 [RmfFleetSnapshot.reachable] 이 false 다. 빈 목록을 "로봇이 하나도
+/// 안 붙었다" 로 읽으면 안 된다. 모른다는 뜻이다.
+Future<RmfFleetSnapshot> probeFleetStates({
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 8),
+}) async {
+  // 발행자가 없으면 `topic echo` 는 영원히 기다린다. Process.run 의 timeout 은
+  // 프로세스를 죽이지 않으므로 셸의 timeout 으로 끊는다.
+  final seconds = timeout.inSeconds.clamp(2, 60);
+  try {
+    final result = await Process.run('bash', [
+      '-lc',
+      _withRosEnvironment(
+        // `--field robots` 를 쓰지 않는다. 그렇게 부르면 ros2 가 YAML 이 아니라
+        // **파이썬 repr** 을 한 줄로 뱉는다 —
+        //
+        //   [rmf_fleet_msgs.msg.RobotState(name='PK_01', model=..., ...)]
+        //
+        // 그 안의 `level_name='L1'` 까지 이름처럼 보여서 골라내기도 위험하다.
+        // 통째로 받으면 제대로 된 YAML 이라 목록 항목이 `- name:` 로 온다.
+        'export ROS_DOMAIN_ID=$rosDomainId; '
+        'timeout $seconds ros2 topic echo /fleet_states --once',
+      ),
+    ]).timeout(timeout + const Duration(seconds: 4));
+    if (result.exitCode != 0) {
+      return const RmfFleetSnapshot(
+        reachable: false,
+        robots: {},
+        message: '/fleet_states 를 읽지 못했습니다.',
+      );
+    }
+    return RmfFleetSnapshot(
+      reachable: true,
+      robots: parseFleetStateRobots(result.stdout.toString()),
+    );
+  } catch (error) {
+    return RmfFleetSnapshot(
+      reachable: false,
+      robots: const {},
+      message: '$error',
+    );
+  }
+}
+
+/// `/clock` 을 내는 곳이 몇 군데인지 센다. 못 세면 null.
+///
+/// **하나여야 한다.** 둘이면 언제나 잘못된 상태다 — 이전 실행에서 남은
+/// `parameter_bridge` 가 살아 있다는 뜻이고, 두 시계가 번갈아 나오니 시각이
+/// 앞뒤로 튄다. tf2 가 `Detected jump back in time` 으로 버퍼를 비우고, AMCL 은
+/// 위치추정을 잃고, Nav2 는 명령을 멈춘다.
+///
+/// 로봇은 멀쩡한데 가만히 서 있고, 원인이 한 시간 전에 남은 프로세스라는 것은
+/// 어디에도 안 보인다. 실제로 그렇게 39번 튀었다.
+Future<int?> probeClockPublishers({
+  required int rosDomainId,
+  // 탐색에 3초를 쓰므로 그보다 넉넉해야 한다.
+  Duration timeout = const Duration(seconds: 15),
+}) async {
+  final seconds = timeout.inSeconds.clamp(2, 60);
+  try {
+    final result = await Process.run('bash', [
+      '-lc',
+      _withRosEnvironment(
+        // `--no-daemon` 을 쓴다. 데몬은 CLI 가 빠르라고 두는 **캐시**라, 죽은
+        // 발행자를 한동안 살아 있다고 답한다. 유령 다리를 죽인 직후에도
+        // "2곳" 이 남아 확인표가 거짓말을 한다.
+        //
+        // 대신 탐색 시간을 늘려야 한다. 기본값으로 그냥 부르면 멀쩡히 도는
+        // Gazebo 를 못 보고 0 을 돌려준다 — 실측: spin-time 1 → 0, 3 → 1,
+        // 5 → 1. 0 은 `Gazebo 가 죽었다` 로 읽히므로 낡은 값보다 나쁘다.
+        'export ROS_DOMAIN_ID=$rosDomainId; '
+        'timeout $seconds ros2 topic info /clock --no-daemon --spin-time 3',
+      ),
+    ]).timeout(timeout + const Duration(seconds: 4));
+    if (result.exitCode != 0) return null;
+    final match = RegExp(
+      r'Publisher count:\s*(\d+)',
+    ).firstMatch(result.stdout.toString());
+    return match == null ? null : int.tryParse(match.group(1)!);
+  } catch (_) {
+    return null;
+  }
+}

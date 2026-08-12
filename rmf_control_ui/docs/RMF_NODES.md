@@ -12,7 +12,7 @@
 [로봇 등록과 디렉터리 구조](ROBOT_REGISTRATION.md) ·
 [한 월드에 로봇 여러 대](MULTI_ROBOT_NAMESPACES.md) ·
 [값이 오는 곳 셋](THREE_SOURCES.md) · [좌표계](COORDINATE_FRAMES.md) ·
-[Nav2 길](NAV2_PATH.md)
+[Nav2 길](NAV2_PATH.md) · [시뮬레이션 시간 (RTF)](SIMULATION_TIME.md)
 
 ## 2. 무엇이 무엇을 띄우나
 
@@ -242,7 +242,10 @@ ros2 topic info /fleet_states
 ```
 
 어댑터는 Nav2 20여 개 노드와 같이 뜨는 중에 `add_easy_fleet` 안에서
-SIGSEGV(-11) 로 죽은 적이 있습니다. 한가할 때 같은 명령을 손으로 돌리면 멀쩡히
+SIGSEGV(-11) 로 죽은 적이 있습니다. 그 부하의 뿌리는 시뮬레이션이 느린 것이라
+[SIMULATION_TIME.md](SIMULATION_TIME.md) 도 함께 보세요 — RTF 가 낮으면
+`map_server` 가 lifecycle 응답 시간 초과로 `inactive` 에 멈춰, 어댑터가 멀쩡해도
+로봇이 RMF 에 안 붙습니다. 한가할 때 같은 명령을 손으로 돌리면 멀쩡히
 뜹니다. 부하가 걸린 순간에만 나는 rmf_adapter 쪽 경합이라 고칠 수 없어서,
 `<맵>_nav2.launch.xml` 에서 `respawn="true"` (5초 간격, 최대 5회)로 다시
 띄웁니다.

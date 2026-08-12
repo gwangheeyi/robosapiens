@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'rmf_project_config.dart';
+import 'rmf_runtime_models.dart';
 import 'robot_telemetry_models.dart';
 
 /// ROS 환경을 읽어 들인 뒤 [command] 를 실행하는 셸 한 줄.
@@ -115,10 +116,26 @@ class RobotTelemetryBridge {
 
   bool get subscribing => _feeds.isNotEmpty;
 
+  /// `/fleet_states` 를 읽는 프로세스. RMF 가 아는 map 좌표가 여기서 온다.
+  Process? _fleetProcess;
+  StreamSubscription<String>? _fleetLines;
+
+  /// RMF 가 알려 준 로봇 자세. odom 으로 계산한 것보다 이쪽이 옳다.
+  final Map<String, RobotPose> _fleetPoses = {};
+
   /// 지금까지 받은 자세.
+  ///
+  /// **RMF 가 아는 자리를 먼저 쓴다.** odom 은 로봇을 올린 자리를 원점으로
+  /// 삼고 거기서 바퀴 회전을 더해 나가는 값이라, AMCL 이 보정을 시작하면
+  /// 실제와 벌어진다. 실제로 복구 회전이 되풀이되며 `map→odom` 이 46도까지
+  /// 틀어져, 앱 화면과 RViz 의 로봇 위치가 1m 넘게 달랐다.
+  ///
+  /// RMF 에 안 붙은 로봇은 여전히 odom 으로 그린다 — 틀릴 수 있어도 아무것도
+  /// 안 그리는 것보다는 낫다.
   Map<String, RobotPose> get poses => {
     for (final feed in _feeds.values)
       if (feed.pose != null) feed.robotId: feed.pose!,
+    ..._fleetPoses,
   };
 
   RobotTelemetryStatus get status {
@@ -172,8 +189,63 @@ class RobotTelemetryBridge {
     _wanted
       ..clear()
       ..addAll(wanted);
+    await _openFleetStates();
     _startHealer();
     _controller.add(status);
+  }
+
+  /// RMF 가 내는 `/fleet_states` 를 읽기 시작한다. 이미 읽고 있으면 둔다.
+  ///
+  /// 로봇마다 하나씩이 아니라 **하나만** 띄운다. 한 토픽에 플릿 전체가 담겨
+  /// 있어서 그것으로 충분하다.
+  Future<void> _openFleetStates() async {
+    if (_fleetProcess != null) return;
+    if (_wanted.isEmpty) return;
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+    try {
+      final process = await Process.start('bash', [
+        '-lc',
+        _withRosEnvironment('exec ros2 topic echo /fleet_states'),
+      ]);
+      _fleetProcess = process;
+      // 메시지 하나가 여러 줄이다. `---` 가 나올 때까지 모았다가 한 번에 푼다.
+      final block = StringBuffer();
+      _fleetLines = process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            if (!line.startsWith('---')) {
+              block.writeln(line);
+              return;
+            }
+            final parsed = parseFleetStatePoses(block.toString());
+            block.clear();
+            if (parsed.isEmpty) return;
+            final at = DateTime.now();
+            for (final entry in parsed.entries) {
+              _fleetPoses[entry.key] = RobotPose(
+                x: entry.value.x,
+                y: entry.value.y,
+                heading: entry.value.yaw,
+                at: at,
+              );
+            }
+            _controller.add(status);
+          });
+      unawaited(
+        process.exitCode.then((_) {
+          if (_fleetProcess != process) return;
+          _fleetProcess = null;
+          // 값을 지운다. 남겨 두면 백엔드가 내려간 뒤에도 마지막 자리에
+          // 로봇이 서 있는 것처럼 보인다.
+          _fleetPoses.clear();
+          _controller.add(status);
+        }),
+      );
+    } catch (_) {
+      // 토픽이 아직 없을 수 있다. 다음 sync 나 healer 가 다시 부른다.
+      _fleetProcess = null;
+    }
   }
 
   /// 5초마다 죽은 구독을 다시 띄운다.
@@ -190,6 +262,9 @@ class RobotTelemetryBridge {
         for (final entry in _wanted.entries)
           if (_feeds[entry.key]?.process == null) entry,
       ];
+      // RMF 쪽 읽기도 함께 되살린다. 이것이 끊기면 화면의 위치가 조용히
+      // odom 으로 되돌아가, 맞던 자리가 다시 어긋나기 시작한다.
+      await _openFleetStates();
       if (dead.isEmpty) return;
       for (final entry in dead) {
         await _feeds.remove(entry.key)?.close();
@@ -284,6 +359,11 @@ class RobotTelemetryBridge {
     _healer?.cancel();
     _healer = null;
     _wanted.clear();
+    await _fleetLines?.cancel();
+    _fleetLines = null;
+    _fleetProcess?.kill(ProcessSignal.sigint);
+    _fleetProcess = null;
+    _fleetPoses.clear();
     for (final feed in _feeds.values.toList()) {
       await feed.close();
     }

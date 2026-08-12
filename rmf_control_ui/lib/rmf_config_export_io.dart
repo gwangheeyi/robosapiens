@@ -161,3 +161,13 @@ Future<RmfConfigExportResult> exportProjectConfigFiles({
     );
   }
 }
+
+/// 이 맵의 실행 스크립트가 디스크에 있는가.
+///
+/// `ros2 launch` 는 앱이 아니라 **파일**을 읽는다. MySQL 에 설정이 다 들어 있어도
+/// 내보내기를 안 했으면 띄울 것이 없다. 그 상태로 실행을 누르면 `파일이
+/// 없습니다` 하나만 보이는데, 무엇을 먼저 눌러야 하는지는 안 나온다.
+bool projectRunScriptExists(String mapDirectory, String mapName) {
+  if (mapDirectory.trim().isEmpty || mapName.trim().isEmpty) return false;
+  return File('$mapDirectory/run_$mapName.sh').existsSync();
+}
