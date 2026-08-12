@@ -16,60 +16,56 @@
   gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
 
-# PK-01 · 핑키 1호 (이동 로봇)
-- ros_topic_name: "/pinky_01/odom"
-  gz_topic_name: "/pinky_01/odom"
+# OMX-01 · 매니퓰레이터 1호 (설치 로봇)
+#   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.
+#   관절 상태: joint_state_broadcaster 가 /omx_01/joint_states 로 낸다.
+#   팔 명령: /omx_01/arm_controller · /omx_01/gripper_controller 액션.
+
+# OMX-02 · 매니퓰레이터 2호 (설치 로봇)
+#   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.
+#   관절 상태: joint_state_broadcaster 가 /omx_02/joint_states 로 낸다.
+#   팔 명령: /omx_02/arm_controller · /omx_02/gripper_controller 액션.
+
+# PK_03 · 핑키 3호 (이동 로봇)
+- ros_topic_name: "/pinky_03/odom"
+  gz_topic_name: "/pinky_03/odom"
   ros_type_name: "nav_msgs/msg/Odometry"
   gz_type_name: "gz.msgs.Odometry"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_01/cmd_vel"
-  gz_topic_name: "/pinky_01/cmd_vel"
+- ros_topic_name: "/pinky_03/cmd_vel"
+  gz_topic_name: "/pinky_03/cmd_vel"
   ros_type_name: "geometry_msgs/msg/Twist"
   gz_type_name: "gz.msgs.Twist"
   direction: ROS_TO_GZ
 
-- ros_topic_name: "/pinky_01/scan"
-  gz_topic_name: "/pinky_01/scan"
+- ros_topic_name: "/pinky_03/scan"
+  gz_topic_name: "/pinky_03/scan"
   ros_type_name: "sensor_msgs/msg/LaserScan"
   gz_type_name: "gz.msgs.LaserScan"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_01/joint_states"
-  gz_topic_name: "/pinky_01/joint_states"
+- ros_topic_name: "/pinky_03/joint_states"
+  gz_topic_name: "/pinky_03/joint_states"
   ros_type_name: "sensor_msgs/msg/JointState"
   gz_type_name: "gz.msgs.Model"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_01/camera/camera_info"
-  gz_topic_name: "/pinky_01/camera/camera_info"
+- ros_topic_name: "/pinky_03/camera/camera_info"
+  gz_topic_name: "/pinky_03/camera/camera_info"
   ros_type_name: "sensor_msgs/msg/CameraInfo"
   gz_type_name: "gz.msgs.CameraInfo"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_01/camera/image_raw"
-  gz_topic_name: "/pinky_01/camera/image_raw"
+- ros_topic_name: "/pinky_03/camera/image_raw"
+  gz_topic_name: "/pinky_03/camera/image_raw"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_01/imu_raw"
-  gz_topic_name: "/pinky_01/imu_raw"
+- ros_topic_name: "/pinky_03/imu_raw"
+  gz_topic_name: "/pinky_03/imu_raw"
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
-  direction: GZ_TO_ROS
-
-# OMX-02 · 매니퓰레이터 2호 (설치 로봇)
-- ros_topic_name: "/omx_02/joint_states"
-  gz_topic_name: "/omx_02/joint_states"
-  ros_type_name: "sensor_msgs/msg/JointState"
-  gz_type_name: "gz.msgs.Model"
-  direction: GZ_TO_ROS
-
-# OMX-03 · 매니퓰레이터 3호 (설치 로봇)
-- ros_topic_name: "/omx_03/joint_states"
-  gz_topic_name: "/omx_03/joint_states"
-  ros_type_name: "sensor_msgs/msg/JointState"
-  gz_type_name: "gz.msgs.Model"
   direction: GZ_TO_ROS
 

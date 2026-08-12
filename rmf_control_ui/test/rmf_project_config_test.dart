@@ -188,13 +188,17 @@ void main() {
       expect(robotDirectoryName(robots.first), 'robots/PK-01');
       expect(
         xml,
-        contains(r'<include file="$(var map_dir)/robots/PK-01'
-            '/spawn.launch.xml"/>'),
+        contains(
+          r'<include file="$(var map_dir)/robots/PK-01'
+          '/spawn.launch.xml"/>',
+        ),
       );
       expect(
         xml,
-        contains(r'<include file="$(var map_dir)/robots/PK-02'
-            '/spawn.launch.xml"/>'),
+        contains(
+          r'<include file="$(var map_dir)/robots/PK-02'
+          '/spawn.launch.xml"/>',
+        ),
       );
       // 로봇 설정이 이 파일에 다시 적히면 두 곳이 어긋날 수 있다.
       expect(xml, isNot(contains('upload_robot.launch.py')));
@@ -307,14 +311,12 @@ void main() {
         mapName: 'gwanghee',
         robots: robots,
       );
-      final ros = RegExp(r'ros_topic_name: "([^"]+)"')
-          .allMatches(yaml)
-          .map((m) => m.group(1))
-          .toList();
-      final gz = RegExp(r'gz_topic_name: "([^"]+)"')
-          .allMatches(yaml)
-          .map((m) => m.group(1))
-          .toList();
+      final ros = RegExp(
+        r'ros_topic_name: "([^"]+)"',
+      ).allMatches(yaml).map((m) => m.group(1)).toList();
+      final gz = RegExp(
+        r'gz_topic_name: "([^"]+)"',
+      ).allMatches(yaml).map((m) => m.group(1)).toList();
       expect(ros, isNotEmpty);
       expect(gz, ros);
     });
@@ -609,10 +611,7 @@ void main() {
 
     test('Gazebo 에 없는 로봇에는 다리를 놓지 않는다', () {
       // 오지 않을 토픽을 기다리는 다리가 조용히 남는다.
-      final yaml = buildProjectGzBridgeYaml(
-        mapName: 'gwanghee',
-        robots: mixed,
-      );
+      final yaml = buildProjectGzBridgeYaml(mapName: 'gwanghee', robots: mixed);
       expect(yaml, contains('/pinky_01/odom'));
       expect(yaml, isNot(contains('mock_01')));
       expect(yaml, isNot(contains('real_01')));
@@ -634,10 +633,7 @@ void main() {
         buildRobotInfoYaml(mock),
         contains('data_source: mock # 앱 Mock 데이터'),
       );
-      expect(
-        buildRobotInfoYaml(real),
-        contains('data_source: real # 실제 로봇'),
-      );
+      expect(buildRobotInfoYaml(real), contains('data_source: real # 실제 로봇'));
     });
 
     test('bringup 이 부르지 않는 이유를 그 파일에 적는다', () {
@@ -740,6 +736,176 @@ void main() {
         robots: const [pinky],
       );
       expect(onlyPinky, isNot(contains('open_manipulator_description')));
+    });
+
+    test('Gazebo 창과 RViz 를 따로 고른다', () {
+      // 예전에는 HEADLESS 하나가 둘을 함께 껐다 켰다 했다. 보고 싶은 것이
+      // 서로 다른데(위치는 Gazebo, 계획한 경로는 RViz) 하나를 보려고 둘을 다
+      // 띄우면 그리는 데 자원을 나눠 써 시뮬레이션까지 느려졌다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky],
+      );
+      expect(script, contains(r'GAZEBO_GUI="${GAZEBO_GUI:-$GUI_DEFAULT}"'));
+      expect(script, contains(r'RVIZ="${RVIZ:-$GUI_DEFAULT}"'));
+      // 서로 다른 launch 가 서로 다른 값을 받아야 따로 고른 것이 된다.
+      expect(
+        script,
+        contains(
+          'ros2 launch "\$MAP_DIR/mixed_bringup.launch.xml" '
+          'headless:="\$GAZEBO_HEADLESS"',
+        ),
+      );
+      expect(
+        script,
+        contains(
+          'ros2 launch "\$MAP_DIR/mixed.launch.xml" headless:="\$RVIZ_HEADLESS"',
+        ),
+      );
+      // 하나로 묶여 있던 옛 변수는 launch 로 흘러가지 않는다.
+      expect(script, isNot(contains(r'headless:="$HEADLESS"')));
+    });
+
+    test('아무것도 안 주면 창을 띄우지 않는다', () async {
+      // 기본이 중요하다. 창이 없어도 라이다·카메라는 돌지만(서버는 언제나
+      // 헤드리스 렌더링) 창은 자원을 먹는다. 고르지 않은 사람에게 두 개를
+      // 띄워 주지 않는다.
+      final script = buildProjectRunScript(
+        mapName: 'demo',
+        mapDirectory: '/maps/demo',
+        robots: const [pinky],
+      );
+      Future<String> resolve(Map<String, String> environment) async {
+        // 글자만 보면 뒤집는 자리에서 틀린 것을 못 잡는다. 실제로 bash 에
+        // 물려 본다. 실행 부분은 빼고 값을 정하는 데까지만 돌린다.
+        const tail = 'RVIZ_HEADLESS=true; fi';
+        final start = script.indexOf('is_true() {');
+        final end = script.indexOf(tail);
+        expect(start, greaterThan(0));
+        expect(end, greaterThan(start));
+        final block = script.substring(start, end + tail.length);
+        final file =
+            File(
+              '${Directory.systemTemp.createTempSync('rmf_run_flags').path}'
+              '/flags.sh',
+            )..writeAsStringSync(
+              'set -euo pipefail\n$block\n'
+              r'echo "$GAZEBO_HEADLESS $RVIZ_HEADLESS"'
+              '\n',
+            );
+        // 셋을 늘 넘긴다. 빈 값은 bash 의 `:-` 가 안 준 것과 똑같이 본다.
+        // 부모 환경에 이 이름이 남아 있어도 결과가 흔들리지 않는다.
+        final result = await Process.run(
+          'bash',
+          [file.path],
+          environment: {
+            'GAZEBO_GUI': environment['GAZEBO_GUI'] ?? '',
+            'RVIZ': environment['RVIZ'] ?? '',
+            'HEADLESS': environment['HEADLESS'] ?? '',
+          },
+        );
+        expect(result.exitCode, 0, reason: result.stderr.toString());
+        return result.stdout.toString().trim();
+      }
+
+      // 고르지 않았으면 둘 다 headless.
+      expect(await resolve(const {}), 'true true');
+      // 고른 것만 뜬다.
+      expect(await resolve(const {'GAZEBO_GUI': 'true'}), 'false true');
+      expect(await resolve(const {'RVIZ': 'true'}), 'true false');
+      expect(
+        await resolve(const {'GAZEBO_GUI': 'true', 'RVIZ': 'true'}),
+        'false false',
+      );
+      // 예전 방식(HEADLESS 하나)도 그대로 받는다. 따로 준 값이 이긴다.
+      expect(await resolve(const {'HEADLESS': 'false'}), 'false false');
+      expect(
+        await resolve(const {'HEADLESS': 'false', 'RVIZ': 'false'}),
+        'false true',
+      );
+    }, skip: !Platform.isLinux && !Platform.isMacOS);
+
+    test('월드의 충돌 검출기를 bullet 으로 바꾼다', () {
+      // 기본 ODE 는 메시끼리 닿으면 무너진다. 우리 로봇의 충돌 도형도, 배포가
+      // 만든 바닥·벽도 전부 메시라 늘 메시 대 메시다. 자리를 안 고른 로봇 두
+      // 대가 원점에 겹쳐 놓이자 스폰 4초 만에 Gazebo 가 죽었다
+      // (collision_trimesh_trimesh.cpp:285 어서션, exit 134).
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(
+        script,
+        contains('<collision_detector>bullet</collision_detector>'),
+      );
+      expect(
+        script,
+        contains(r'ensure_world_collision_detector "$MAP_DIR/mixed.world"'),
+      );
+      // 배포가 월드를 다시 만들므로 띄우기 전에 매번 채워야 한다.
+      expect(
+        script.indexOf('ensure_world_collision_detector "'),
+        lessThan(script.indexOf('Gazebo bringup')),
+      );
+    });
+
+    test('Gazebo 가 안 뜨면 RMF 도 Nav2 도 띄우지 않는다', () {
+      // 예전에는 `&` 로 띄우고 `sleep 12` 만 했다. 뜬 줄 알고 넘어간 것이지
+      // 확인한 것이 아니어서, Gazebo 가 4초 만에 죽어도 RMF 와 Nav2 가 그 위에
+      // 올라갔다. 프로세스 15개가 30분을 돌았는데 발행자는 0개였다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(script, contains('wait_for_gazebo'));
+      // 프로세스가 있는 것과 물리가 도는 것은 다르다. 둘 다 본다.
+      expect(script, contains(r'pgrep -u "$(id -u)" -f "gz sim.*$world"'));
+      expect(script, contains('ros2 topic echo /clock --once'));
+      // 확인은 1단계 뒤, 2단계 앞이라야 뜻이 있다.
+      final check = script.indexOf('if ! wait_for_gazebo');
+      expect(check, greaterThan(script.indexOf('[1/3] Gazebo bringup')));
+      expect(check, lessThan(script.indexOf('[2/3] Open-RMF')));
+      // 조용히 넘어가지 않고 멈춘다.
+      expect(script, contains('exit 1'));
+    });
+
+    test('RMF↔Nav2 어댑터가 죽으면 알린다', () {
+      // 어댑터가 죽어도 Gazebo·Nav2·RMF core 는 남는다. 토픽은 오는데 주문만
+      // 안 먹는 상태가 되고, 화면에는 `RMF 가 답하지 않았습니다` 로만 보였다.
+      // 무엇이 죽었는지는 로그에도 안 남았다.
+      final script = buildProjectRunScript(
+        mapName: 'mixed',
+        mapDirectory: '/maps/mixed',
+        robots: const [pinky, omx],
+      );
+      expect(script, contains('watch_fleet_adapter'));
+      // 뜨는 것만 보면 안 된다. 뜬 다음 죽는 것이 진짜 문제다.
+      //
+      // 다만 이제 launch 가 respawn 으로 다시 띄운다. 사라진 그 순간에 알리면
+      // 5초 뒤 살아난 것을 두고 사람을 뛰게 만든다. 정말 안 돌아올 때만 알린다.
+      expect(script, contains('다시 뜨지도 않았습니다'));
+      // 가장 흔한 원인을 함께 적는다.
+      expect(script, contains('rmf/dynamic_event/begin'));
+      // 지켜보기는 3단계와 함께 돌아야 한다.
+      expect(
+        script.indexOf('watch_fleet_adapter &'),
+        greaterThan(script.indexOf('[3/3]')),
+      );
+    });
+
+    test('Nav2 를 안 쓰는 프로젝트도 Gazebo 를 확인한다', () {
+      // 단계 수가 2개로 줄 뿐 확인이 빠질 이유는 없다.
+      final script = buildProjectRunScript(
+        mapName: 'onlymock',
+        mapDirectory: '/maps/onlymock',
+        robots: const [omx],
+      );
+      final check = script.indexOf('if ! wait_for_gazebo');
+      expect(check, greaterThan(script.indexOf('[1/2] Gazebo bringup')));
+      expect(check, lessThan(script.indexOf('[2/2] Open-RMF')));
     });
 
     test('building.yaml 이 더 새로우면 nav graph 를 다시 만든다', () {
@@ -983,11 +1149,11 @@ void main() {
           '"/home/gyi/robosapiens/rmf_maps/gwanghee"/>',
         ),
       );
+      // building_map_server 가 이 맵의 building.yaml 을 물어야 한다.
       expect(
         xml,
         contains(
-          r'<arg name="config_file" value="$(var map_dir)'
-          '/gwanghee.building.yaml"/>',
+          r'args="$(var map_dir)/gwanghee.building.yaml"',
         ),
       );
       expect(
@@ -1016,10 +1182,25 @@ void main() {
         buildingYamlName: 'gwanghee.building.yaml',
       );
       // core 가 먼저 떠야 fleet adapter 가 붙는다. 지난 실패가 그것이었다.
-      expect(xml, contains('rmf_demos)/common.launch.xml'));
+      //
+      // core 는 rmf_demos 의 common.launch.xml 을 include 하지 않고 같은
+      // 내용을 편 것이다 — 그 파일이 시각화에 Lane 굵기를 넘기지 않는다.
+      // 그래서 그 파일이 띄우는 것을 하나도 빠뜨리지 않았는지 여기서 지킨다.
+      for (final node in const [
+        'rmf_traffic_schedule',
+        'rmf_traffic_blockade',
+        'building_map_server',
+        'visualization.launch.xml',
+        'door_supervisor',
+        'lift_supervisor',
+        'mutex_group_supervisor',
+        'rmf_task_dispatcher',
+      ]) {
+        expect(xml, contains(node), reason: 'RMF core 에 \$node 가 빠졌다');
+      }
       expect(xml, contains('rmf_demos_fleet_adapter'));
       expect(
-        xml.indexOf('common.launch.xml'),
+        xml.indexOf('rmf_traffic_schedule'),
         lessThan(xml.indexOf('rmf_demos_fleet_adapter')),
       );
     });
@@ -1045,7 +1226,7 @@ void main() {
         buildingYamlName: 'gwanghee.building.yaml',
         robots: const [pinky],
       );
-      expect(xml, contains('rmf_demos)/common.launch.xml'));
+      expect(xml, contains('rmf_traffic_schedule'));
       expect(xml, isNot(contains('rmf_demos_fleet_adapter)')));
       // 어디로 갔는지는 파일 안에 적혀 있어야 한다.
       expect(xml, contains('gwanghee_nav2.launch.xml'));

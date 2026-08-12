@@ -130,10 +130,7 @@ void main() {
 
     test('건물 지도는 하나만 띄운다', () {
       expect(RegExp('nav2_map_server').allMatches(xml).length, 1);
-      expect(
-        xml,
-        contains('value="\$(var map_dir)/nav2_map/gwanghee.yaml"'),
-      );
+      expect(xml, contains('value="\$(var map_dir)/nav2_map/gwanghee.yaml"'));
     });
 
     test('이동 로봇마다 제 Nav2 를 붙인다', () {

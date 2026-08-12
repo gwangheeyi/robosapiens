@@ -58,7 +58,10 @@ void main() {
         poses: {'PK-01': RobotPose(x: 0, y: 0, heading: 0, at: at)},
         message: '',
       );
-      expect(status.isLive('PK-01', now: at.add(const Duration(seconds: 1))), isTrue);
+      expect(
+        status.isLive('PK-01', now: at.add(const Duration(seconds: 1))),
+        isTrue,
+      );
     });
 
     test('오래된 값은 죽은 것으로 본다', () {
@@ -69,7 +72,10 @@ void main() {
         poses: {'PK-01': RobotPose(x: 0, y: 0, heading: 0, at: at)},
         message: '',
       );
-      expect(status.isLive('PK-01', now: at.add(const Duration(seconds: 5))), isFalse);
+      expect(
+        status.isLive('PK-01', now: at.add(const Duration(seconds: 5))),
+        isFalse,
+      );
     });
 
     test('구독만 걸고 값이 안 오면 살아 있지 않다', () {
@@ -96,22 +102,25 @@ void main() {
     // 있는 것으로 알고 넘기면 앱은 영영 아무 값도 못 받는다 — 등록도 토픽도
     // 멀쩡한데 화면만 조용했다.
     test('죽은 구독을 건너뛰지 않는 조건이 코드에 있다', () {
-      final source = File('lib/robot_telemetry_bridge_io.dart')
-          .readAsStringSync();
+      final source = File(
+        'lib/robot_telemetry_bridge_io.dart',
+      ).readAsStringSync();
       expect(source, contains('feed.process != null &&'));
     });
 
     test('끝난 프로세스에 표시를 남긴다', () {
-      final source = File('lib/robot_telemetry_bridge_io.dart')
-          .readAsStringSync();
+      final source = File(
+        'lib/robot_telemetry_bridge_io.dart',
+      ).readAsStringSync();
       expect(source, contains('process.exitCode.then'));
       expect(source, contains('백엔드가 내려갔을 수 있습니다'));
     });
 
     test('사람이 다시 붙여 주기를 기다리지 않는다', () {
       // 5초마다 스스로 다시 띄운다. 붙을 것이 없으면 시계도 멈춘다.
-      final source = File('lib/robot_telemetry_bridge_io.dart')
-          .readAsStringSync();
+      final source = File(
+        'lib/robot_telemetry_bridge_io.dart',
+      ).readAsStringSync();
       expect(source, contains('void _startHealer()'));
       expect(source, contains('Timer.periodic(const Duration(seconds: 5)'));
       expect(source, contains('_healer?.cancel()'));

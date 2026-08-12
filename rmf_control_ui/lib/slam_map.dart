@@ -137,10 +137,9 @@ parseSlamMapYaml(String text) {
       case 'resolution':
         resolution = double.tryParse(value);
       case 'origin':
-        final numbers = RegExp(r'-?\d+(\.\d+)?([eE][-+]?\d+)?')
-            .allMatches(value)
-            .map((m) => double.parse(m.group(0)!))
-            .toList();
+        final numbers = RegExp(
+          r'-?\d+(\.\d+)?([eE][-+]?\d+)?',
+        ).allMatches(value).map((m) => double.parse(m.group(0)!)).toList();
         if (numbers.length >= 2) origin = numbers;
       case 'negate':
         negate = value == '1' || value.toLowerCase() == 'true';
@@ -259,9 +258,7 @@ MapImageFormat mapImageFormat(Uint8List bytes) {
     throw SlamMapParseError('PGM 크기를 읽지 못했습니다: $width×$height');
   }
   if (maxValue > 255) {
-    throw SlamMapParseError(
-      '한 칸이 2바이트인 PGM 은 아직 못 읽습니다(maxval $maxValue).',
-    );
+    throw SlamMapParseError('한 칸이 2바이트인 PGM 은 아직 못 읽습니다(maxval $maxValue).');
   }
 
   final count = width * height;
@@ -271,9 +268,7 @@ MapImageFormat mapImageFormat(Uint8List bytes) {
     if (at < bytes.length) at++;
     final available = bytes.length - at;
     if (available < count) {
-      throw SlamMapParseError(
-        'PGM 이 잘렸습니다. $count칸이 필요한데 $available칸만 있습니다.',
-      );
+      throw SlamMapParseError('PGM 이 잘렸습니다. $count칸이 필요한데 $available칸만 있습니다.');
     }
     cells.setRange(0, count, bytes, at);
   } else {
@@ -296,9 +291,7 @@ MapImageFormat mapImageFormat(Uint8List bytes) {
       cells[written++] = int.tryParse(buffer.toString()) ?? 0;
     }
     if (written < count) {
-      throw SlamMapParseError(
-        'PGM 이 잘렸습니다. $count칸이 필요한데 $written칸만 있습니다.',
-      );
+      throw SlamMapParseError('PGM 이 잘렸습니다. $count칸이 필요한데 $written칸만 있습니다.');
     }
   }
   return (width: width, height: height, cells: cells);

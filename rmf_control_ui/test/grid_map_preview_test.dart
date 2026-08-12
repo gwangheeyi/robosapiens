@@ -103,9 +103,7 @@ void main() {
     late final String source = File('lib/main.dart').readAsStringSync();
 
     test('그림과 칸 수·한 칸 크기를 함께 보여 준다', () {
-      final preview = source.substring(
-        source.indexOf('class _GridMapPreview'),
-      );
+      final preview = source.substring(source.indexOf('class _GridMapPreview'));
       expect(preview, contains('RawImage('));
       // 칸이 뭉개지면 벽이 이어져 보인다.
       expect(preview, contains('FilterQuality.none'));
@@ -116,9 +114,7 @@ void main() {
     });
 
     test('벽·바닥·모름 범례를 숫자와 함께 보여 준다', () {
-      final preview = source.substring(
-        source.indexOf('class _GridMapPreview'),
-      );
+      final preview = source.substring(source.indexOf('class _GridMapPreview'));
       expect(preview, contains('벽 \${g.occupiedCells}칸'));
       expect(preview, contains('바닥 \${g.freeCells}칸'));
       expect(preview, contains('모름 \${g.unknownCells}칸'));

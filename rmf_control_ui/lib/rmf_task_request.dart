@@ -32,8 +32,7 @@ class RmfTaskActivity {
   ///
   /// [place] 는 nav graph 의 Waypoint 이름이다. 좌표가 아니다 — 좌표를 주면
   /// RMF 가 그 자리를 그래프에서 못 찾는다.
-  const RmfTaskActivity.goToPlace(String place)
-    : this._('go_to_place', place);
+  const RmfTaskActivity.goToPlace(String place) : this._('go_to_place', place);
 
   /// 플릿이 따로 맡은 동작. 어댑터의 `execute_action` 이 받는다.
   ///
@@ -58,9 +57,7 @@ class RmfTaskActivity {
 
   /// 그 자리에서 기다린다.
   RmfTaskActivity.waitFor(double seconds)
-    : this._('wait_for', {
-        'duration': seconds,
-      });
+    : this._('wait_for', {'duration': seconds});
 
   final String category;
   final Object? description;
@@ -88,8 +85,7 @@ class RmfTaskRequest {
   final String fleetName;
   final int activityCount;
 
-  Map<String, Object?> get decoded =>
-      jsonDecode(json) as Map<String, Object?>;
+  Map<String, Object?> get decoded => jsonDecode(json) as Map<String, Object?>;
 }
 
 /// 앱 작업 하나를 RMF 요청으로 바꾼다.
@@ -229,3 +225,13 @@ RmfTaskConversion convertTaskSteps(
   }
   return RmfTaskConversion(activities: activities, skipped: skipped);
 }
+
+/// 돌고 있는 RMF 작업을 취소하는 요청.
+///
+/// RMF 의 task API 는 `dispatch_task_request` 를 넣던 그 토픽으로 취소도 받는다.
+/// 그래서 작업 다리(`<맵>_task_bridge.py`)를 그대로 쓴다 — 보내는 JSON 만 다르다.
+///
+/// [taskId] 는 RMF 가 돌려준 것이어야 한다. 앱이 붙인 작업 번호(`T-0007`)가
+/// 아니다. 둘을 헷갈리면 RMF 는 모르는 작업이라고 답한다.
+String buildCancelTaskRequest(String taskId) =>
+    jsonEncode({'type': 'cancel_task', 'task_id': taskId});

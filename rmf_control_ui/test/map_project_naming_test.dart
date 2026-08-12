@@ -103,11 +103,7 @@ void main() {
       final guard = body.indexOf('mapName == _openProjectName');
       final exists = body.indexOf('mapProjectExists(mapName)');
       expect(guard, greaterThan(-1), reason: '열린 프로젝트 가드가 없다');
-      expect(
-        guard,
-        lessThan(exists),
-        reason: '있는지 확인하기 전에 내 프로젝트인지 먼저 봐야 한다',
-      );
+      expect(guard, lessThan(exists), reason: '있는지 확인하기 전에 내 프로젝트인지 먼저 봐야 한다');
     });
   });
 }

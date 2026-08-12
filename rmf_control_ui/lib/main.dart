@@ -39,9 +39,12 @@ import 'rmf_project_runner.dart';
 import 'rmf_task_bridge.dart';
 import 'rmf_task_request.dart';
 import 'rmf_runtime_service.dart';
+import 'robot_id_rule.dart';
+import 'robot_station_rule.dart';
 import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
 import 'task_store.dart';
+import 'wall_height.dart';
 
 void main() => runApp(const RmfControlApp());
 
@@ -279,7 +282,12 @@ class _MockRobot {
     this.image,
   }) : spawnPosition = spawnPosition ?? position;
 
-  final String id;
+  /// 등록된 로봇의 ID 와 같아야 한다.
+  ///
+  /// 지도에 올린 로봇은 등록에서 온다. 등록에서 ID 를 고치면 이 값도 함께
+  /// 바뀌어야 서로를 찾는다 — 어긋나면 작업이 RMF 로 안 가고 앱 안에서만 돈다.
+  /// 그래서 final 이 아니다.
+  String id;
   Offset position;
 
   /// Spawn 할 때 고른 Waypoint. `로봇 원위치`가 되돌려 놓는 자리다.
@@ -333,6 +341,18 @@ class _RobotSpawnSelection {
 }
 
 enum _MockTaskStatus { queued, active, completed, cancelled, failed }
+
+/// 로봇을 최초 위치로 돌려보낸 결과. 사람에게 무슨 일이 있었는지 적을 때 쓴다.
+enum _ReturnOutcome {
+  /// Lane 을 따라 돌아가는 중.
+  routed,
+
+  /// 갈 길이 없어 그 자리에 놓았다.
+  teleported,
+
+  /// 이미 최초 위치였다.
+  already,
+}
 
 enum _TaskStepType { navigate, returnHome, armLoad, wait }
 
@@ -521,6 +541,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
   OccupancyGrid? _gridPreviewGrid;
   String? _gridPreviewDirectory;
 
+  /// 이 그림이 **저장돼 있던 것**이면 그 파일을 쓴 때. 방금 구운 것이면 null.
+  ///
+  /// 프로젝트를 열면서 올린 격자는 도면보다 오래됐을 수 있다. 언제 만든
+  /// 것인지 같이 보여 주지 않으면, 도면을 고친 뒤에도 지도가 최신인 줄 안다.
+  DateTime? _gridPreviewSavedAt;
+
   /// 사람이 정한 프로젝트 이름. 정해져 있으면 도면 파일 이름을 이기고, 도면을
   /// 갈아 끼워도 그대로다.
   ///
@@ -562,6 +588,46 @@ class _ControlDashboardState extends State<ControlDashboard> {
   double _robotWidthMeters = .6;
   double _turningRadiusMeters = .3;
   double _localizationMarginMeters = .1;
+
+  /// Gazebo 월드에서 벽을 얼마나 높게 세울까(m).
+  ///
+  /// 도면에는 높이가 없다. 길이는 Measurement 로 재지만 높이는 잴 데가 없어
+  /// 사람이 넣어야 한다. 자세한 것은 `wall_height.dart`.
+  double _wallHeightMeters = defaultWallHeight;
+
+  /// 이 프로젝트가 쓸 ROS 도메인. 로봇마다 따로 정하지 않으면 이 값이다.
+  ///
+  /// 같은 도메인에 있는 노드끼리만 서로를 본다. 어긋나면 **아무 오류도 안
+  /// 나면서** 아무것도 안 통한다 — 앱이 배포한 지도를 터미널에서 띄운
+  /// 시뮬레이터가 못 받던 일이 그것이었다. 앱은 비대화형 셸로 스크립트를
+  /// 돌리므로 `~/.bashrc` 의 `export ROS_DOMAIN_ID` 를 못 읽는다.
+  int _rosDomainId = defaultRosDomainId;
+
+  /// 사람이 직접 넣은 Lane 표시 폭(m). null 이면 로봇 폭으로 그린다.
+  ///
+  /// 화면에 그리는 굵기일 뿐 주행에는 안 쓴다. 그런데도 받는 이유는, RMF 의
+  /// 기본값 0.5m 가 창고용이라 2~3m 짜리 실험실 도면에서는 Lane 하나가 건물
+  /// 폭의 1/5 이 되어 스무 개가 서로 겹쳐 덩어리로 보이기 때문이다.
+  double? _manualLaneDisplayWidth;
+
+  /// RViz 가 nav graph 를 그릴 굵기(m).
+  double get _laneDisplayWidth => navGraphLaneWidth(
+    robotWidthMeters: _robotWidthMeters,
+    manual: _manualLaneDisplayWidth,
+  );
+
+  /// 플릿의 프로필 반경을 지금 안전 기준으로 다시 맞춘다.
+  ///
+  /// 직접 넣은 값이 있으면 그것이 이긴다 — [RmfFleetSettings.withRobotSafety].
+  void _syncFleetProfileToSafety() {
+    setState(() {
+      _fleetSettings = _fleetSettings.withRobotSafety(
+        widthMeters: _robotWidthMeters,
+        localizationMarginMeters: _localizationMarginMeters,
+      );
+    });
+  }
+
   String? _mapScenarioSummary;
   bool _scenarioUsesSeparateRoutes = true;
   List<Offset> _scenarioHoldingAnchors = const [];
@@ -729,10 +795,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _slamPreview?.dispose();
       _slamPreview = null;
       _slamMap = null;
+      // 그리드맵도 마찬가지다. 앞 프로젝트에서 구운 격자가 남아 있으면, 새로
+      // 연 프로젝트의 지도가 이미 있는 것으로 보인다.
+      _gridPreview?.dispose();
+      _gridPreview = null;
+      _gridPreviewGrid = null;
+      _gridPreviewDirectory = null;
+      _gridPreviewSavedAt = null;
     });
     if (mapName == null) return;
     // 넣어 둔 SLAM 지도가 있으면 올려 준다. 없으면 조용히 지나간다.
     unawaited(_loadStoredSlam(mapName));
+    // 구워 둔 그리드맵도 같이 올린다. 프로젝트에 딸린 산출물이므로 열면 그때
+    // 만든 것이 그대로 보여야 한다.
+    unawaited(_loadStoredGrid(mapName));
     await _loadMockTasks();
     if (!mounted) return;
     await _pollPendingOrders();
@@ -1338,6 +1414,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final toleranceController = TextEditingController(
       text: _goalTolerance.toStringAsFixed(3),
     );
+    // 아래 셋은 비우면 자동이다. 직접 넣은 값이 있을 때만 채워 둔다 — 계산값을
+    // 미리 적어 두면 폭을 고쳐도 그 값이 남아, 왜 안 따라오는지 알 수 없다.
+    final footprintController = TextEditingController(
+      text: _fleetSettings.manualFootprintRadius?.toStringAsFixed(3) ?? '',
+    );
+    final vicinityController = TextEditingController(
+      text: _fleetSettings.manualVicinityRadius?.toStringAsFixed(3) ?? '',
+    );
+    final laneWidthController = TextEditingController(
+      text: _manualLaneDisplayWidth?.toStringAsFixed(2) ?? '',
+    );
+    String? footprintError;
+    String? vicinityError;
+    String? laneWidthError;
     final floor = minimumGoalTolerance();
     final recommended = _recommendedGoalTolerance;
     final spacing = _minLaneSpacing;
@@ -1348,207 +1438,350 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String? toleranceWarning;
     // 최소보다 작은 값을 한 번 되물은 뒤, 같은 값으로 다시 누르면 넣는다.
     double? toleranceForced;
-    final values = await showMovableDialog<(double, double, double, double?)>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          icon: const Icon(Icons.precision_manufacturing_outlined, size: 34),
-          title: const Text('로봇 주행 안전 기준'),
-          content: SizedBox(
-            width: 390,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: widthController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: '로봇 최대 폭 (m)',
-                      helperText:
-                          '좌우로 가장 넓은 실제 폭입니다. 적재물·돌출 센서·보호 범퍼를 포함한 최대값을 입력하세요.',
-                      helperMaxLines: 2,
-                      errorText: widthError,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: radiusController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: '최소 회전 반경 (m)',
-                      helperText:
-                          '로봇이 주행하며 회전할 때 필요한 최소 반경입니다. 제자리 회전이 가능하면 0을 입력할 수 있습니다.',
-                      helperMaxLines: 2,
-                      errorText: radiusError,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: marginController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: '위치 오차·안전 여유 (m)',
-                      helperText:
-                          'Localization 오차, 제어 편차와 벽 충돌 방지를 위해 로봇 외곽에 추가할 거리입니다.',
-                      helperMaxLines: 2,
-                      errorText: marginError,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: toleranceController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: '도착 인정 반경 (m)',
-                      helperText:
-                          '최소 ${floor.toStringAsFixed(3)} · '
-                          '이 맵 권장 ${recommended.toStringAsFixed(3)}'
-                          '${spacing == null ? '' : ' (레인 최소 간격 ${spacing.toStringAsFixed(3)}m ÷ 4)'}'
-                          '\n비우면 권장값을 씁니다. 벤더 기본값은 '
-                          '${vendorGoalTolerance.toStringAsFixed(2)}m 입니다.',
-                      helperMaxLines: 3,
-                      errorText: toleranceError,
-                      border: const OutlineInputBorder(),
-                    ),
-                    onChanged: (_) => setDialogState(() {
-                      toleranceError = null;
-                      // 값을 고치면 되묻기를 처음부터 다시 한다.
-                      toleranceForced = null;
-                      final value = _parseMeters(toleranceController.text);
-                      toleranceWarning =
-                          value != null && value > 0 && value < floor
-                          ? '코스트맵 한 칸이 ${nav2CostmapResolution.toStringAsFixed(2)}m 입니다. '
-                                '이보다 촘촘히 요구하면 Nav2 가 목표를 못 맞추고 '
-                                '주변을 맴돌다 포기합니다. 실제로 0.080 을 넣었다가 '
-                                '픽업 지점에 닿지 못했습니다.'
-                          : null;
-                    }),
-                  ),
-                  if (toleranceWarning != null) ...[
-                    const SizedBox(height: 6),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(
-                          Icons.warning_amber_rounded,
-                          size: 16,
-                          color: Color(0xFFD97706),
+    final values =
+        await showMovableDialog<
+          ({
+            double width,
+            double radius,
+            double margin,
+            double? tolerance,
+            double? footprint,
+            double? vicinity,
+            double? laneWidth,
+          })
+        >(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              icon: const Icon(
+                Icons.precision_manufacturing_outlined,
+                size: 34,
+              ),
+              title: const Text('로봇 주행 안전 기준'),
+              content: SizedBox(
+                width: 390,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: widthController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
                         ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            toleranceWarning!,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF92400E),
+                        decoration: InputDecoration(
+                          labelText: '로봇 최대 폭 (m)',
+                          helperText:
+                              '좌우로 가장 넓은 실제 폭입니다. 적재물·돌출 센서·보호 범퍼를 포함한 최대값을 입력하세요.',
+                          helperMaxLines: 2,
+                          errorText: widthError,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: radiusController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: '최소 회전 반경 (m)',
+                          helperText:
+                              '로봇이 주행하며 회전할 때 필요한 최소 반경입니다. 제자리 회전이 가능하면 0을 입력할 수 있습니다.',
+                          helperMaxLines: 2,
+                          errorText: radiusError,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: marginController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: '위치 오차·안전 여유 (m)',
+                          helperText:
+                              'Localization 오차, 제어 편차와 벽 충돌 방지를 위해 로봇 외곽에 추가할 거리입니다.',
+                          helperMaxLines: 2,
+                          errorText: marginError,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: toleranceController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: '도착 인정 반경 (m)',
+                          helperText:
+                              '최소 ${floor.toStringAsFixed(3)} · '
+                              '이 맵 권장 ${recommended.toStringAsFixed(3)}'
+                              '${spacing == null ? '' : ' (레인 최소 간격 ${spacing.toStringAsFixed(3)}m ÷ 4)'}'
+                              '\n비우면 권장값을 씁니다. 벤더 기본값은 '
+                              '${vendorGoalTolerance.toStringAsFixed(2)}m 입니다.',
+                          helperMaxLines: 3,
+                          errorText: toleranceError,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) => setDialogState(() {
+                          toleranceError = null;
+                          // 값을 고치면 되묻기를 처음부터 다시 한다.
+                          toleranceForced = null;
+                          final value = _parseMeters(toleranceController.text);
+                          toleranceWarning =
+                              value != null && value > 0 && value < floor
+                              ? '코스트맵 한 칸이 ${nav2CostmapResolution.toStringAsFixed(2)}m 입니다. '
+                                    '이보다 촘촘히 요구하면 Nav2 가 목표를 못 맞추고 '
+                                    '주변을 맴돌다 포기합니다. 실제로 0.080 을 넣었다가 '
+                                    '픽업 지점에 닿지 못했습니다.'
+                              : null;
+                        }),
+                      ),
+                      if (toleranceWarning != null) ...[
+                        const SizedBox(height: 6),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.warning_amber_rounded,
+                              size: 16,
+                              color: Color(0xFFD97706),
                             ),
-                          ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                toleranceWarning!,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF92400E),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
-                    ),
-                  ],
-                  const SizedBox(height: 10),
-                  const Text(
-                    '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
-                    style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                      const SizedBox(height: 18),
+                      const Divider(height: 1),
+                      const SizedBox(height: 14),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '직접 지정 (비우면 위 값에서 계산)',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '로봇을 원으로 보는 계산은 어림입니다. 적재물이나 범퍼가 튀어나오면 '
+                          '실제로 재서 넣는 편이 맞습니다.',
+                          style: TextStyle(
+                            color: Color(0xFF64748B),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: footprintController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: '충돌 반경 footprint (m)',
+                          helperText:
+                              'RMF 가 로봇을 이 반경의 원으로 봅니다. '
+                              '자동 ${(_parseMeters(widthController.text) ?? _robotWidthMeters) / 2 <= 0 ? '-' : ((_parseMeters(widthController.text) ?? _robotWidthMeters) / 2).toStringAsFixed(3)} '
+                              '(로봇 폭 ÷ 2)',
+                          helperMaxLines: 2,
+                          errorText: footprintError,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) =>
+                            setDialogState(() => footprintError = null),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: vicinityController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: '접근 금지 반경 vicinity (m)',
+                          helperText:
+                              '이 원 안에 다른 로봇을 들이지 않습니다. 크면 좁은 통로에서 '
+                              '서로 비켜 주기만 하다 아무도 못 지나갑니다.',
+                          helperMaxLines: 2,
+                          errorText: vicinityError,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) =>
+                            setDialogState(() => vicinityError = null),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: laneWidthController,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Lane 표시 폭 · RViz (m)',
+                          helperText:
+                              '화면에 그리는 굵기일 뿐 주행에는 안 씁니다. 비우면 로봇 폭 '
+                              '(${_robotWidthMeters.toStringAsFixed(2)}m)으로 그립니다. '
+                              '최소 ${minNavGraphLaneWidth.toStringAsFixed(2)}m — 시각화 노드가 그 아래를 안 받습니다.',
+                          helperMaxLines: 3,
+                          errorText: laneWidthError,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) =>
+                            setDialogState(() => laneWidthError = null),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        '필요한 벽 여유는 로봇 폭의 절반과 안전 여유를 합산하고, 최소 Lane 길이는 회전 반경의 2배로 검사합니다.',
+                        style: TextStyle(
+                          color: Color(0xFF64748B),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('취소'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final width = _parseMeters(widthController.text);
+                    final radius = _parseMeters(radiusController.text);
+                    final margin = _parseMeters(marginController.text);
+                    final nextWidthError = width == null
+                        ? '숫자로 입력하세요. 예: 0.20'
+                        : width <= 0
+                        ? '0보다 커야 합니다.'
+                        : null;
+                    final nextRadiusError = radius == null
+                        ? '숫자로 입력하세요. 예: 0.15'
+                        : radius < 0
+                        ? '0 이상이어야 합니다.'
+                        : null;
+                    final nextMarginError = margin == null
+                        ? '숫자로 입력하세요. 예: 0.05'
+                        : margin < 0
+                        ? '0 이상이어야 합니다.'
+                        : null;
+                    // 예전에는 여기서 그냥 return 했다. 버튼을 눌러도 아무 일이
+                    // 일어나지 않아 값이 저장되지 않는 것처럼 보였다.
+                    // 비우면 맵에서 계산한 값을 쓴다는 뜻이다.
+                    final rawTolerance = toleranceController.text.trim();
+                    final tolerance = rawTolerance.isEmpty
+                        ? null
+                        : _parseMeters(rawTolerance);
+                    final nextToleranceError =
+                        rawTolerance.isNotEmpty && tolerance == null
+                        ? '숫자로 입력하세요. 예: ${recommended.toStringAsFixed(3)}'
+                        : tolerance != null && tolerance <= 0
+                        ? '0보다 커야 합니다.'
+                        : null;
+                    // 비우면 자동이라는 뜻이다. 적었으면 숫자여야 하고 0보다 커야
+                    // 한다 — 0 인 충돌 반경은 로봇이 점이라는 말이 된다.
+                    (double?, String?) optional(
+                      TextEditingController controller, {
+                      double? minimum,
+                      String? belowMinimum,
+                    }) {
+                      final raw = controller.text.trim();
+                      if (raw.isEmpty) return (null, null);
+                      final value = _parseMeters(raw);
+                      if (value == null) return (null, '숫자로 입력하세요. 비우면 자동입니다.');
+                      if (value <= 0) return (null, '0보다 커야 합니다.');
+                      if (minimum != null && value < minimum) {
+                        return (null, belowMinimum);
+                      }
+                      return (value, null);
+                    }
+
+                    final footprint = optional(footprintController);
+                    final vicinity = optional(vicinityController);
+                    final laneWidth = optional(
+                      laneWidthController,
+                      minimum: minNavGraphLaneWidth,
+                      belowMinimum:
+                          '${minNavGraphLaneWidth.toStringAsFixed(2)}m 보다 가늘게는 '
+                          '그리지 못합니다. 시각화 노드가 그 값으로 깎습니다.',
+                    );
+                    if (nextWidthError != null ||
+                        nextRadiusError != null ||
+                        nextMarginError != null ||
+                        nextToleranceError != null ||
+                        footprint.$2 != null ||
+                        vicinity.$2 != null ||
+                        laneWidth.$2 != null) {
+                      setDialogState(() {
+                        widthError = nextWidthError;
+                        radiusError = nextRadiusError;
+                        marginError = nextMarginError;
+                        toleranceError = nextToleranceError;
+                        footprintError = footprint.$2;
+                        vicinityError = vicinity.$2;
+                        laneWidthError = laneWidth.$2;
+                      });
+                      return;
+                    }
+                    // 접근 금지 반경은 충돌 반경보다 작을 수 없다. 작으면 다른
+                    // 로봇이 몸 안까지 들어와도 된다는 말이 된다.
+                    final effectiveFootprint = footprint.$1 ?? width! / 2;
+                    if (vicinity.$1 != null &&
+                        vicinity.$1! < effectiveFootprint) {
+                      setDialogState(
+                        () => vicinityError =
+                            '충돌 반경(${effectiveFootprint.toStringAsFixed(3)}m)보다 '
+                            '작을 수 없습니다.',
+                      );
+                      return;
+                    }
+                    // 최소보다 작으면 저장 전에 한 번 더 묻는다. 입력 중에만
+                    // 알리면 그냥 지나치기 쉽다 — 실제로 0.080 이 저장돼 나갔고,
+                    // Nav2 가 목표를 못 맞추고 맴돌다 포기했다.
+                    if (tolerance != null && tolerance < floor) {
+                      setDialogState(() {
+                        widthError = null;
+                        radiusError = null;
+                        marginError = null;
+                        toleranceError =
+                            '최소 ${floor.toStringAsFixed(3)} 보다 작습니다. '
+                            '그래도 쓰시려면 한 번 더 누르세요.';
+                      });
+                      // 같은 값으로 다시 누르면 그때는 넣는다.
+                      if (toleranceForced != tolerance) {
+                        toleranceForced = tolerance;
+                        return;
+                      }
+                    }
+                    Navigator.pop(dialogContext, (
+                      width: width!,
+                      radius: radius!,
+                      margin: margin!,
+                      tolerance: tolerance,
+                      footprint: footprint.$1,
+                      vicinity: vicinity.$1,
+                      laneWidth: laneWidth.$1,
+                    ));
+                  },
+                  child: const Text('기준 저장'),
+                ),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('취소'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final width = _parseMeters(widthController.text);
-                final radius = _parseMeters(radiusController.text);
-                final margin = _parseMeters(marginController.text);
-                final nextWidthError = width == null
-                    ? '숫자로 입력하세요. 예: 0.20'
-                    : width <= 0
-                    ? '0보다 커야 합니다.'
-                    : null;
-                final nextRadiusError = radius == null
-                    ? '숫자로 입력하세요. 예: 0.15'
-                    : radius < 0
-                    ? '0 이상이어야 합니다.'
-                    : null;
-                final nextMarginError = margin == null
-                    ? '숫자로 입력하세요. 예: 0.05'
-                    : margin < 0
-                    ? '0 이상이어야 합니다.'
-                    : null;
-                // 예전에는 여기서 그냥 return 했다. 버튼을 눌러도 아무 일이
-                // 일어나지 않아 값이 저장되지 않는 것처럼 보였다.
-                // 비우면 맵에서 계산한 값을 쓴다는 뜻이다.
-                final rawTolerance = toleranceController.text.trim();
-                final tolerance = rawTolerance.isEmpty
-                    ? null
-                    : _parseMeters(rawTolerance);
-                final nextToleranceError =
-                    rawTolerance.isNotEmpty && tolerance == null
-                    ? '숫자로 입력하세요. 예: ${recommended.toStringAsFixed(3)}'
-                    : tolerance != null && tolerance <= 0
-                    ? '0보다 커야 합니다.'
-                    : null;
-                if (nextWidthError != null ||
-                    nextRadiusError != null ||
-                    nextMarginError != null ||
-                    nextToleranceError != null) {
-                  setDialogState(() {
-                    widthError = nextWidthError;
-                    radiusError = nextRadiusError;
-                    marginError = nextMarginError;
-                    toleranceError = nextToleranceError;
-                  });
-                  return;
-                }
-                // 최소보다 작으면 저장 전에 한 번 더 묻는다. 입력 중에만
-                // 알리면 그냥 지나치기 쉽다 — 실제로 0.080 이 저장돼 나갔고,
-                // Nav2 가 목표를 못 맞추고 맴돌다 포기했다.
-                if (tolerance != null && tolerance < floor) {
-                  setDialogState(() {
-                    widthError = null;
-                    radiusError = null;
-                    marginError = null;
-                    toleranceError =
-                        '최소 ${floor.toStringAsFixed(3)} 보다 작습니다. '
-                        '그래도 쓰시려면 한 번 더 누르세요.';
-                  });
-                  // 같은 값으로 다시 누르면 그때는 넣는다.
-                  if (toleranceForced != tolerance) {
-                    toleranceForced = tolerance;
-                    return;
-                  }
-                }
-                Navigator.pop(dialogContext, (
-                  width!,
-                  radius!,
-                  margin!,
-                  tolerance,
-                ));
-              },
-              child: const Text('기준 저장'),
-            ),
-          ],
-        ),
-      ),
-    );
+        );
     // 창이 닫히는 애니메이션이 끝나기 전에 컨트롤러를 버리면, 사라지는 중인
     // TextField 가 이미 버려진 컨트롤러를 다시 읽어 예외가 난다. 애니메이션이
     // 끝난 뒤에 버리되, 그동안 사용자를 기다리게 하지는 않는다.
@@ -1563,26 +1796,294 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (values == null || !mounted) return;
     _recordUndo();
     setState(() {
-      _robotWidthMeters = values.$1;
-      _turningRadiusMeters = values.$2;
-      _localizationMarginMeters = values.$3;
+      _robotWidthMeters = values.width;
+      _turningRadiusMeters = values.radius;
+      _localizationMarginMeters = values.margin;
+      _manualLaneDisplayWidth = values.laneWidth;
       _fleetSettings = _fleetSettings.copyWith(
-        goalToleranceMeters: values.$4,
-        clearGoalTolerance: values.$4 == null,
+        goalToleranceMeters: values.tolerance,
+        clearGoalTolerance: values.tolerance == null,
+        manualFootprintRadius: values.footprint,
+        manualVicinityRadius: values.vicinity,
+        // 둘 다 비웠으면 직접 지정을 그만두겠다는 뜻이다. copyWith 의 null 은
+        // "안 바꿈" 이라 이 깃발이 없으면 지운 값이 되살아난다.
+        clearManualProfile: values.footprint == null && values.vicinity == null,
       );
       _isDeployed = false;
     });
+    // 프로필 반경은 폭에서 다시 계산된다. 직접 넣은 값이 있으면 그것이 이긴다.
+    _syncFleetProfileToSafety();
     await _saveSettingToOpenProject(
       label: '로봇 안전 기준',
       detail:
-          '폭 ${values.$1.toStringAsFixed(2)}m · '
-          '회전 반경 ${values.$2.toStringAsFixed(2)}m · '
-          '여유 ${values.$3.toStringAsFixed(2)}m · '
+          '폭 ${values.width.toStringAsFixed(2)}m · '
+          '회전 반경 ${values.radius.toStringAsFixed(2)}m · '
+          '여유 ${values.margin.toStringAsFixed(2)}m · '
           '도착 반경 '
-          '${values.$4 == null ? '자동 ${_recommendedGoalTolerance.toStringAsFixed(3)}' : values.$4!.toStringAsFixed(3)}m',
+          '${values.tolerance == null ? '자동 ${_recommendedGoalTolerance.toStringAsFixed(3)}' : values.tolerance!.toStringAsFixed(3)}m · '
+          '충돌 ${_fleetSettings.footprintRadius.toStringAsFixed(3)}m'
+          '${values.footprint == null ? ' (자동)' : ''} · '
+          '접근 금지 ${_fleetSettings.vicinityRadius.toStringAsFixed(3)}m'
+          '${values.vicinity == null ? ' (자동)' : ''} · '
+          'Lane 표시 ${_laneDisplayWidth.toStringAsFixed(2)}m'
+          '${values.laneWidth == null ? ' (자동)' : ''}',
     );
     if (!mounted) return;
     await _showValidationDialog();
+  }
+
+  /// Gazebo 월드에서 벽을 얼마나 높게 세울지 받는다.
+  ///
+  /// 도면에는 높이가 없다. 길이는 Measurement 로 재지만 높이는 잴 데가 없어서
+  /// 여기서 받는다. 안 받으면 traffic_editor 기본값 2.5m 로 서는데, 실험실
+  /// 세트는 0.3m 라 시뮬레이터가 실제와 딴판이 된다.
+  Future<void> _showWallHeightSettings() async {
+    final controller = TextEditingController(
+      text: _wallHeightMeters.toStringAsFixed(2),
+    );
+    String? error;
+    String? warning = wallHeightWarning(_wallHeightMeters);
+    final height = await showMovableDialog<double>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.height, size: 34),
+          title: const Text('벽 높이'),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '도면은 위에서 내려다본 그림이라 높이가 없습니다. 길이는 '
+                    'Measurement 로 재지만 높이는 잴 데가 없어 여기서 받습니다.',
+                    style: TextStyle(color: Color(0xFF475569), fontSize: 12.5),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: '벽 높이 (m)',
+                      helperText:
+                          '실험실 책상 세트는 0.3m 안팎, 건물 벽은 2.5m 쯤입니다. '
+                          '기본값은 ${defaultWallHeight.toStringAsFixed(1)}m 입니다.',
+                      helperMaxLines: 2,
+                      errorText: error,
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setDialogState(() {
+                      error = null;
+                      final value = _parseMeters(controller.text);
+                      warning = value == null || wallHeightError(value) != null
+                          ? null
+                          : wallHeightWarning(value);
+                    }),
+                  ),
+                  if (warning != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(11),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF3C7),
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(color: const Color(0xFFFCD34D)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            size: 18,
+                            color: Color(0xFFB45309),
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: SelectableText(
+                              warning!,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF92400E),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    '$wallHeightGridNote\n'
+                    '바꾼 뒤에는 배포해야 Gazebo 월드에 들어갑니다.',
+                    style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = _parseMeters(controller.text);
+                final nextError = wallHeightError(value);
+                if (nextError != null) {
+                  setDialogState(() => error = nextError);
+                  return;
+                }
+                Navigator.pop(dialogContext, value);
+              },
+              child: const Text('높이 저장'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // 창이 닫히는 애니메이션이 끝나기 전에 버리면, 사라지는 중인 TextField 가
+    // 이미 버려진 컨트롤러를 다시 읽어 예외가 난다.
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 350),
+      ).then((_) => controller.dispose()),
+    );
+    if (height == null || !mounted) return;
+    _recordUndo();
+    setState(() {
+      _wallHeightMeters = height;
+      // 벽 높이는 월드 파일에 들어간다. 다시 배포하기 전에는 떠 있는 Gazebo 가
+      // 아직 옛 높이의 벽을 들고 있다.
+      _isDeployed = false;
+    });
+    await _saveSettingToOpenProject(
+      label: '벽 높이',
+      detail: '${height.toStringAsFixed(2)}m · 배포해야 Gazebo 에 반영됩니다',
+    );
+  }
+
+  /// 이 프로젝트가 쓸 ROS 도메인을 받는다.
+  ///
+  /// 로봇을 등록할 때 이 값을 기본으로 가져간다. 대마다 고칠 수 있다.
+  Future<void> _showRosDomainSettings() async {
+    final controller = TextEditingController(text: '$_rosDomainId');
+    String? error;
+    String? warning = rosDomainIdWarning(_rosDomainId);
+    final domain = await showMovableDialog<int>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.lan_outlined, size: 34),
+          title: const Text('ROS 도메인'),
+          content: SizedBox(
+            width: 430,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '같은 도메인에 있는 노드끼리만 서로를 봅니다. 이 값이 어긋나면 '
+                    '오류는 하나도 안 나면서 아무것도 안 통합니다 — 지도를 배포해도 '
+                    '시뮬레이터가 못 받고, 로봇을 띄워도 관제가 못 봅니다.',
+                    style: TextStyle(color: Color(0xFF475569), fontSize: 12.5),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      labelText: 'ROS_DOMAIN_ID',
+                      helperText:
+                          '0 ~ $maxRosDomainId. 터미널에서 `echo \$ROS_DOMAIN_ID` 로 '
+                          '지금 쓰는 값을 볼 수 있습니다.',
+                      helperMaxLines: 2,
+                      errorText: error,
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setDialogState(() {
+                      error = null;
+                      final value = int.tryParse(controller.text.trim());
+                      warning = value == null || rosDomainIdError(value) != null
+                          ? null
+                          : rosDomainIdWarning(value);
+                    }),
+                  ),
+                  if (warning != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(11),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF3C7),
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(color: const Color(0xFFFCD34D)),
+                      ),
+                      child: SelectableText(
+                        warning!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF92400E),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    '로봇을 등록할 때 이 값을 기본으로 가져갑니다. 실물 로봇처럼 제 '
+                    '도메인을 갖고 오는 대는 등록 창에서 따로 고칠 수 있습니다.\n'
+                    '바꾼 뒤에는 RMF 설정 내보내기와 배포를 다시 하세요 — 실행 '
+                    '스크립트에 이 값이 박혀 나갑니다.',
+                    style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = int.tryParse(controller.text.trim());
+                final nextError = rosDomainIdError(value);
+                if (nextError != null) {
+                  setDialogState(() => error = nextError);
+                  return;
+                }
+                Navigator.pop(dialogContext, value);
+              },
+              child: const Text('도메인 저장'),
+            ),
+          ],
+        ),
+      ),
+    );
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 350),
+      ).then((_) => controller.dispose()),
+    );
+    if (domain == null || !mounted) return;
+    _recordUndo();
+    setState(() {
+      _rosDomainId = domain;
+      // 실행 스크립트에 박혀 나가는 값이다. 다시 내보내기 전에는 떠 있는 것도
+      // 디스크의 스크립트도 예전 도메인을 쓴다.
+      _isDeployed = false;
+    });
+    await _saveSettingToOpenProject(
+      label: 'ROS 도메인',
+      detail: '$domain · 내보내기와 배포를 다시 해야 반영됩니다',
+    );
   }
 
   /// 미터 값을 읽는다. `0,2` 처럼 쉼표를 소수점으로 쓴 입력도 받는다 —
@@ -4583,6 +5084,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _gridPreview = null;
       _gridPreviewGrid = null;
       _gridPreviewDirectory = null;
+      _gridPreviewSavedAt = null;
     });
     // 격자 굽기는 UI 스레드에서 돈다. 한 프레임 내주지 않으면 `작성 중` 커서와
     // 글자가 그려지기 전에 화면이 멈춰 버려, 정작 기다리는 동안 아무 표시가
@@ -4606,6 +5108,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
           _gridPreview = image;
           _gridPreviewGrid = image == null ? null : grid;
           _gridPreviewDirectory = image == null ? null : result?.directory;
+          // 방금 구운 것이다. 저장된 것을 올린 때와 구분한다.
+          _gridPreviewSavedAt = null;
         });
       } else {
         image?.dispose();
@@ -4655,6 +5159,33 @@ class _ControlDashboardState extends State<ControlDashboard> {
       completer.complete,
     );
     return completer.future;
+  }
+
+  /// 이 프로젝트에 구워 둔 그리드맵을 읽어 화면에 올린다.
+  ///
+  /// 격자는 `rmf_maps/<맵>/nav2_map/` 에 파일로 남아 있다. 그것을 다시 읽어
+  /// 올리므로, 프로젝트를 열면 지난번에 만든 지도가 그대로 보인다. 없으면
+  /// 조용히 지나간다 — 아직 안 만든 프로젝트가 정상이다.
+  Future<void> _loadStoredGrid(String mapName) async {
+    // 굽는 중이면 손대지 않는다. 다 구운 그림을 옛 파일로 덮으면 방금 한 일이
+    // 없던 것이 된다.
+    if (_isGeneratingGrid) return;
+    final stored = await loadStoredOccupancyGrid(mapName);
+    if (stored == null || !mounted) return;
+    // 여는 사이에 다른 프로젝트로 넘어갔거나 사람이 새로 구웠으면 버린다.
+    if (_openProjectName != mapName || _isGeneratingGrid) return;
+    final image = await _occupancyGridImage(stored.grid);
+    if (!mounted || _openProjectName != mapName || _isGeneratingGrid) {
+      image.dispose();
+      return;
+    }
+    setState(() {
+      _gridPreview?.dispose();
+      _gridPreview = image;
+      _gridPreviewGrid = stored.grid;
+      _gridPreviewDirectory = stored.directory;
+      _gridPreviewSavedAt = stored.savedAt;
+    });
   }
 
   /// 이 프로젝트에 넣어 둔 SLAM 지도를 읽어 화면에 올린다.
@@ -4864,6 +5395,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _gridPreview = null;
       _gridPreviewGrid = null;
       _gridPreviewDirectory = null;
+      _gridPreviewSavedAt = null;
     });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -5012,8 +5544,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     // 로봇 상세의 진단이 이 값을 본다. 창을 열 때마다 프로세스를 뒤지면
     // 창이 늦게 뜬다.
+    //
+    // 여기서 묻는 것은 "Gazebo 가 도는가" 지 "이 프로젝트의 프로세스가 있는가"
+    // 가 아니다. 진단의 `Gazebo` 고리가 이 값을 그대로 쓰기 때문이다. 예전에는
+    // 뒤엣것을 물어서, Gazebo 가 죽고 RMF·Nav2 만 남은 상태를 초록으로 보여
+    // 줬다.
     try {
-      final running = await runningBackendProjects();
+      final running = await gazeboRunningProjects();
       if (mounted) setState(() => _backendRunning = running.isNotEmpty);
     } catch (_) {}
   }
@@ -5238,8 +5775,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _startBackendFromDetail() async {
     final name = _robotDeployedMap?.summary.name ?? _mapName;
     if (name.trim().isEmpty) return;
-    await startProject(name);
-    final running = await runningBackendProjects();
+    // 여기서도 어떤 창을 볼지 묻는다. 설정 파일 메뉴에서 띄울 때와 다르게
+    // 굴면, 같은 일을 어디서 시작했느냐에 따라 결과가 달라진다.
+    final windows = await _askRunWindows(name);
+    if (windows == null || !mounted) return;
+    await startProject(name, gazeboGui: windows.gazeboGui, rviz: windows.rviz);
+    final running = await gazeboRunningProjects();
     if (!mounted) return;
     setState(() => _backendRunning = running.isNotEmpty);
   }
@@ -5323,6 +5864,203 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// 진행 중이던 작업은 대기로 되돌린다. 로봇만 치우고 작업을 진행 중으로 두면
   /// 아무도 손대지 않는 작업이 남는다.
+  /// 로봇 하나를 Spawn 할 때 고른 자리로 돌려보낸다.
+  ///
+  /// `setState` 안에서 부른다. 돌아간 방식을 돌려주므로 부르는 쪽이 사람에게
+  /// 무슨 일이 있었는지 적을 수 있다.
+  ///
+  /// Lane 으로 갈 길이 없으면 그 자리에 놓아 둔다. 못 돌아간 채로 두면 버튼을
+  /// 눌러도 아무 일이 없는 것처럼 보인다.
+  _ReturnOutcome _sendRobotHome(_MockRobot robot) {
+    robot
+      ..activeTaskId = null
+      ..targetWaypoint = null
+      ..previousWaypoint = null
+      ..assignedRoute.clear();
+    _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+    if ((robot.position - robot.spawnPosition).distance <= .01) {
+      robot
+        ..moving = false
+        ..returningToSpawn = false;
+      return _ReturnOutcome.already;
+    }
+    final path = _routeToSpawn(robot);
+    if (path == null || path.isEmpty) {
+      robot
+        ..position = robot.spawnPosition
+        ..moving = false
+        ..returningToSpawn = false;
+      return _ReturnOutcome.teleported;
+    }
+    robot
+      ..assignedRoute.addAll(path)
+      ..moving = true
+      ..returningToSpawn = true;
+    return _ReturnOutcome.routed;
+  }
+
+  /// 돌고 있는 작업 하나를 취소하고, 그 로봇을 최초 위치로 돌려보낸다.
+  ///
+  /// RMF 가 몰고 있던 작업이면 RMF 에도 취소를 넣는다. 앱에서만 지우면 RMF 는
+  /// 계속 그 작업을 들고 있어, 로봇이 돌아가는 도중에 다시 목적지로 끌려간다.
+  Future<void> _cancelMockTask(_MockTask task) async {
+    // 대기 중인 것도 취소할 수 있다. 배차를 기다리는 작업을 못 지우면 목록에
+    // 계속 남아 다음 로봇이 그것을 물어 간다.
+    if (task.status != _MockTaskStatus.active &&
+        task.status != _MockTaskStatus.queued) {
+      _showProcessingWarning('작업 취소', '${task.name} 작업은 이미 끝났습니다.');
+      return;
+    }
+    // 그 작업을 실제로 들고 있는 로봇을 본다. `task.robotId` 는 `__auto__` 일
+    // 수도 있고, 배차가 바뀌었으면 옛 로봇을 가리킬 수도 있다.
+    final robot = _mockRobots
+        .where((item) => item.activeTaskId == task.id)
+        .firstOrNull;
+    final rmfTaskId = robot?.rmfTaskId;
+    final confirmed = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.cancel_outlined, size: 32),
+        title: const Text('작업 취소'),
+        content: SizedBox(
+          width: 430,
+          child: Text(
+            '${task.name} 을 취소합니다.\n\n'
+            '${robot == null ? '맡은 로봇이 없습니다.' : '${robot.id} 는 Spawn 할 때 고른 자리로 돌아갑니다.'}'
+            '${rmfTaskId == null ? '' : '\n\nRMF 에도 취소를 넣습니다 (작업 $rmfTaskId).'}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('닫기'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
+            icon: const Icon(Icons.cancel_outlined, size: 18),
+            label: const Text('작업 취소'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    // RMF 를 먼저 세운다. 앱 상태를 먼저 지우면 그 사이에 RMF 가 로봇을 계속
+    // 몰아, 돌아가는 로봇과 RMF 의 명령이 서로 당긴다.
+    final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+    final directory = _mapDirectoryFor(mapName);
+    final problems = <String>[];
+    if (rmfTaskId != null) {
+      final result = await RmfTaskBridge.instance.submit(
+        mapDirectory: directory,
+        mapName: mapName,
+        requestJson: buildCancelTaskRequest(rmfTaskId),
+      );
+      if (!result.accepted) problems.add('RMF 취소 실패: ${result.message}');
+    }
+    if (!mounted) return;
+
+    // 되돌아가는 길은 누가 모느냐에 따라 다르다.
+    //
+    // RMF 가 몰던 로봇을 앱 애니메이션으로 되돌리면 **화면만 집에 가고 실제
+    // 로봇은 그 자리에 선다.** 이동 타이머는 `rmfDriven` 로봇을 건너뛰기
+    // 때문이다 — 위치는 토픽에서 온다. 그러니 RMF 에게 자리로 가라고 새 작업을
+    // 넣어야 진짜로 돌아간다.
+    final registered = robot == null
+        ? null
+        : _fleetRobots.where((item) => item.robotId == robot.id).firstOrNull;
+    final charger = registered?.chargerWaypoint?.trim();
+    final byRmf = robot != null && robot.rmfDriven;
+    var sentHomeByRmf = false;
+    if (byRmf) {
+      if (charger == null || charger.isEmpty) {
+        problems.add('${robot.id} 의 자리 Waypoint 가 없어 복귀를 못 시켰습니다.');
+      } else {
+        final request = buildRmfTaskRequest(
+          fleetName: _fleetSettingsFor(mapName).fleetName,
+          robotId: robot.id,
+          category: '복귀',
+          activities: [RmfTaskActivity.goToPlace(charger)],
+        );
+        final result = await RmfTaskBridge.instance.submit(
+          mapDirectory: directory,
+          mapName: mapName,
+          requestJson: request.json,
+        );
+        sentHomeByRmf = result.accepted;
+        if (!result.accepted) {
+          problems.add('복귀 작업을 RMF 가 받지 않았습니다: ${result.message}');
+        }
+      }
+    }
+    if (!mounted) return;
+
+    var outcome = _ReturnOutcome.already;
+    setState(() {
+      task
+        ..status = _MockTaskStatus.cancelled
+        ..completedAt = DateTime.now();
+      // 못 끝낸 단계는 취소로 남긴다. 대기로 되돌리면 이력에서 이 작업이
+      // 어디까지 갔었는지 알 수 없다.
+      for (final step in task.steps.where(
+        (step) =>
+            step.status == _TaskStepStatus.pending ||
+            step.status == _TaskStepStatus.active,
+      )) {
+        step
+          ..status = _TaskStepStatus.cancelled
+          ..remainingSeconds = 0;
+      }
+      if (robot != null) {
+        robot
+          ..activeTaskId = null
+          ..rmfTaskId = null
+          ..rmfGoalX = null
+          ..rmfGoalY = null;
+        if (byRmf) {
+          // 계속 RMF 가 몬다. 여기서 `rmfDriven` 을 내리면 앱이 좌표를 직접
+          // 옮기기 시작해 토픽으로 오는 진짜 위치와 싸운다.
+          robot
+            ..targetWaypoint = null
+            ..previousWaypoint = null
+            ..assignedRoute.clear()
+            ..moving = sentHomeByRmf;
+          _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+        } else {
+          outcome = _sendRobotHome(robot);
+        }
+      }
+    });
+    _startMockRobotTimer();
+    await _saveMockTasks();
+    if (!mounted) return;
+    final detail = robot == null
+        ? '맡은 로봇이 없었습니다'
+        : byRmf
+        ? (sentHomeByRmf
+              ? '${robot.id} 복귀를 RMF 에 넘겼습니다'
+              : '${robot.id} 는 그 자리에 섰습니다')
+        : switch (outcome) {
+            _ReturnOutcome.routed => '${robot.id} 복귀 중',
+            _ReturnOutcome.teleported => '${robot.id} 는 경로가 없어 즉시 이동',
+            _ReturnOutcome.already => '${robot.id} 는 이미 최초 위치',
+          };
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          problems.isEmpty
+              ? '${task.name} 을 취소했습니다 — $detail'
+              : '${task.name} 을 취소했습니다 — $detail\n${problems.join('\n')}',
+        ),
+        duration: const Duration(seconds: 7),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
   Future<void> _returnRobotsToSpawn() async {
     final movable = _mockRobots.where((robot) => robot.kind.isMobile).toList();
     if (movable.isEmpty) {
@@ -5381,36 +6119,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
               ..failureReason = null;
           }
         }
-        robot
-          ..activeTaskId = null
-          ..targetWaypoint = null
-          ..previousWaypoint = null
-          ..assignedRoute.clear();
-        _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
-
-        if ((robot.position - robot.spawnPosition).distance <= .01) {
-          robot
-            ..moving = false
-            ..returningToSpawn = false;
-          already++;
-          continue;
+        // 작업 취소와 같은 길로 돌려보낸다. 두 곳에서 따로 옮기면 한쪽만 고치는
+        // 일이 생긴다.
+        switch (_sendRobotHome(robot)) {
+          case _ReturnOutcome.routed:
+            routed++;
+          case _ReturnOutcome.teleported:
+            teleported++;
+          case _ReturnOutcome.already:
+            already++;
         }
-        final path = _routeToSpawn(robot);
-        if (path == null || path.isEmpty) {
-          // Lane으로 갈 길이 없으면 그 자리에 세워 둔다. 못 돌아간 채로 두면
-          // 버튼을 눌러도 아무 일이 없는 것처럼 보인다.
-          robot
-            ..position = robot.spawnPosition
-            ..moving = false
-            ..returningToSpawn = false;
-          teleported++;
-          continue;
-        }
-        robot
-          ..assignedRoute.addAll(path)
-          ..moving = true
-          ..returningToSpawn = true;
-        routed++;
       }
     });
     _startMockRobotTimer();
@@ -6535,6 +7253,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 이 로봇의 ID 가 등록에 있는지 먼저 본다.
+    //
+    // 없으면 `_isRmfDriven` 이 조용히 거짓을 돌려주고, 앱은 RMF 에 넘기지 않은
+    // 채 저 혼자 단계를 센다. 화면에서는 일하는 것처럼 보이는데 로봇은 가만히
+    // 있는다 — 앱이 단계를 세는 것과 로봇이 실제로 가는 것이 따로 노는 그
+    // 상태다. 조용히 넘기지 않고 멈춰 세운다.
+    final unregistered = unregisteredRobotMessage(_fleetRobots, robot.id);
+    if (unregistered != null) {
+      await showWaypointErrorDialog(
+        context,
+        title: '작업 실행',
+        message: unregistered,
+      );
+      return;
+    }
     // 값의 출처가 Gazebo·실물인 로봇은 RMF 가 몬다. 앱이 단계를 세는 것과
     // 로봇이 실제로 가는 것이 따로 놀면 화면이 거짓말을 한다.
     final rmfDriven = _isRmfDriven(robot.id);
@@ -6593,36 +7326,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ),
     );
     _startMockRobotTimer();
-  }
-
-  void _cancelMockTask(_MockTask task) {
-    if (task.status != _MockTaskStatus.active &&
-        task.status != _MockTaskStatus.queued) {
-      return;
-    }
-    setState(() {
-      task.status = _MockTaskStatus.cancelled;
-      task.completedAt = DateTime.now();
-      for (final step in task.steps.where(
-        (step) =>
-            step.status == _TaskStepStatus.pending ||
-            step.status == _TaskStepStatus.active,
-      )) {
-        step.status = _TaskStepStatus.cancelled;
-      }
-      final robot = _mockRobots
-          .where((item) => item.id == task.robotId)
-          .firstOrNull;
-      if (robot?.activeTaskId == task.id) {
-        robot!
-          ..activeTaskId = null
-          ..targetWaypoint = null
-          ..moving = false
-          ..assignedRoute.clear();
-        _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
-      }
-    });
-    unawaited(_saveMockTasks());
   }
 
   Future<void> _deleteMockTask(_MockTask task) async {
@@ -7464,6 +8167,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
         'turningRadiusMeters': _turningRadiusMeters,
         'localizationMarginMeters': _localizationMarginMeters,
       },
+      // 도면에 없는 값이라 프로젝트가 들고 있어야 한다. 안 남기면 열 때마다
+      // 2.5m 로 돌아가고, 배포한 월드의 벽 높이가 조용히 바뀐다.
+      'wallHeightMeters': _wallHeightMeters,
+      // 비어 있으면 로봇 폭으로 그린다는 뜻이다.
+      'manualLaneDisplayWidth': _manualLaneDisplayWidth,
+      // 도메인이 어긋나면 아무 오류 없이 아무것도 안 통한다. 프로젝트가 들고
+      // 있어야 앱에서 띄우든 터미널에서 띄우든 같은 망을 쓴다.
+      'rosDomainId': _rosDomainId,
       'drawing': drawing == null
           ? null
           : {
@@ -7919,6 +8630,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapDirectory: mapDirectory,
           buildingYamlName: _yamlFileNameFor(mapName),
           robots: deployRobots,
+          laneWidth: _laneDisplayWidth,
+        ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: '$mapName.rviz',
+        kind: 'rviz',
+        description:
+            'RViz 설정. 카메라가 이 도면을 보고, 바닥 그림을 /floorplan 에서 '
+            '받는다. RMF 가 딸려 주는 rmf.rviz 는 office 데모 자리를 보고 있고 '
+            '토픽 이름도 /floor_plan 이라 창은 뜨는데 까맣다.',
+        content: buildProjectRvizConfig(
+          mapName: mapName,
+          robots: deployRobots,
+          extent: _floorBounds,
         ),
         generatedAt: now,
       ),
@@ -8102,6 +8828,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapName: mapName,
           mapDirectory: mapDirectory,
           robots: deployRobots,
+          rosDomainId: _rosDomainId,
         ),
         generatedAt: now,
       ),
@@ -8252,6 +8979,34 @@ class _ControlDashboardState extends State<ControlDashboard> {
     ].where((name) => name.isNotEmpty).toList()..sort();
   }
 
+  /// 자리 Waypoint 이름에서 spawn 좌표(RMF 월드, m)를 푼다.
+  ///
+  /// 자리는 종류에 맞는 카테고리에서만 찾는다. 이동 로봇이 설비 자리에 서거나
+  /// 그 반대가 되면 실행에서 어긋난다.
+  ///
+  /// 화면에 보여 주는 바닥 좌표가 아니라 RMF 월드 좌표를 낸다. 바닥 좌표를
+  /// 그대로 넣으면 y 부호가 반대라 로봇이 건물 밖에 떨어진다.
+  ///
+  /// 등록 창의 저장 단추도, 실제로 저장되는 값도 이 함수 하나만 본다. 두 곳에서
+  /// 따로 풀면 "저장은 되는데 좌표는 없는" 로봇이 다시 생긴다.
+  Offset? _spawnFromStation({
+    required RmfRobotKind kind,
+    required String? station,
+  }) {
+    final name = (station ?? '').trim();
+    if (name.isEmpty) return null;
+    final source = _waypointTypes.entries
+        .where(
+          (entry) =>
+              entry.value == kind.waypointCategory &&
+              (_waypointNames[entry.key] ?? '').trim() == name,
+        )
+        .map((entry) => entry.key)
+        .firstOrNull;
+    if (source == null) return null;
+    return _rmfMetersFromPixel(source);
+  }
+
   /// 자리 Waypoint 하나마다 로봇 한 대를 만든다.
   ///
   /// 로봇을 손으로 하나씩 넣는 대신 맵에서 끌어온다. 충전 Waypoint 는 이동
@@ -8276,7 +9031,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         robots.add(
           kind == RmfRobotKind.mobile
               ? RmfProjectRobot(
-                  robotId: 'PK-$serial',
+                  robotId: 'PK_$serial',
                   displayName: '핑키 $index호',
                   model: 'PINKY-GZ',
                   gzName: 'pinky_$serial',
@@ -8286,7 +9041,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   spawnY: spawn?.dy,
                 )
               : RmfProjectRobot(
-                  robotId: 'OMX-$serial',
+                  robotId: 'OMX_$serial',
                   displayName: '매니퓰레이터 $index호',
                   model: openManipulatorModels.first,
                   kind: RmfRobotKind.workcell,
@@ -8331,8 +9086,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 한 대를 추가하거나 고친다. 취소하면 null.
   Future<RmfProjectRobot?> _editFleetRobot(RmfProjectRobot? existing) async {
     final index = _fleetRobots.length + 1;
+    // 기본 ID 에 하이픈을 쓰지 않는다. RMF 가 이 이름으로 토픽을 만드는데
+    // (`rmf/dynamic_event/begin/<플릿>/<로봇>`) 하이픈은 ROS 2 토픽 이름에 못
+    // 들어간다. 예전 기본값 `PK-01` 로 만든 이동 로봇은 플릿에 붙는 순간
+    // fleet adapter 를 죽였다.
+    //
+    // 이미 등록된 로봇을 열 때는 그 ID 를 그대로 보여 준다. 여기서 말없이 바꾸면
+    // 창을 열어 보기만 해도 이름이 달라진다.
     final idController = TextEditingController(
-      text: existing?.robotId ?? 'PK-${index.toString().padLeft(2, '0')}',
+      text: existing?.robotId ?? 'PK_${index.toString().padLeft(2, '0')}',
     );
     final nameController = TextEditingController(
       text: existing?.displayName ?? '핑키 $index호',
@@ -8343,6 +9105,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final gzController = TextEditingController(
       text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
     );
+    // 맵의 기본 도메인을 가져와 채워 둔다. 대개는 그대로 두고, 실물 로봇처럼
+    // 제 도메인을 갖고 오는 대만 고친다. 비우면 기본값을 따라간다 — 그러면
+    // 나중에 맵에서 기본값을 바꿔도 이 로봇이 같이 따라온다.
+    final domainController = TextEditingController(
+      text: '${existing?.rosDomainId ?? _rosDomainId}',
+    );
+    String? domainError;
     // 속도 한계는 플릿 단위다. RMF 의 `rmf_fleet.limits` 가 그렇게 생겼고,
     // 로봇별로는 `charger` 만 받는다. 그래도 여기서 고치게 두는 것은, 이 값의
     // 근거가 로봇의 벤더 Nav2 파일이라 로봇을 보면서 정해야 맞기 때문이다.
@@ -8381,6 +9150,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
         builder: (context, setDialogState) {
           final stations = _stationWaypointNames(kind);
           final isMobile = kind == RmfRobotKind.mobile;
+          final spawn = _spawnFromStation(kind: kind, station: charger);
+          // 자리를 고르게 하는 규칙. 판정은 robot_station_rule 에 있다.
+          //
+          // 좌표가 아니라 **자리 이름**을 본다. 좌표는 자리 이름에서 계산되는데,
+          // 그 계산에는 지도 축척이 있어야 한다. 그런데 배포 맵을 불러오는
+          // 것만으로는 축척이 따라오지 않는다(맵 관리에서 재는 값이다). 좌표로
+          // 막으면 자리를 멀쩡히 골라도 저장이 안 되고, 사람은 무엇이 잘못인지
+          // 알 수 없다.
+          //
+          // 이름만 있으면 좌표는 나중에 채워진다 — 맵을 열면
+          // `_syncRobotSpawnsToMap` 이 등록된 로봇의 자리를 지금 지도에서 다시
+          // 계산한다. 이름이 없으면 그때도 채울 것이 없다.
+          // 플릿에 들어가는 로봇만 ID 가 토픽 이름이 된다. 설치 로봇은 플릿에
+          // 안 들어가므로 예전 이름을 그대로 두어도 된다 — 멀쩡한 등록에 이름을
+          // 바꾸라고 시킬 이유가 없다.
+          final idMattersForTopics = isMobile && dataSource.usesTopics;
+          final idProblem = idMattersForTopics
+              ? robotIdProblem(idController.text)
+              : null;
+          final stationRule = checkStationRequirement(
+            usesTopics: dataSource.usesTopics,
+            station: charger,
+            stationsAvailable: stations.isNotEmpty || missingStation,
+          );
+          final needsStation = dataSource.usesTopics;
+          final canSave = canSaveRobot(stationRule);
+          final stationMessage = stationRequirementMessage(
+            stationRule,
+            kind.waypointCategory,
+          );
           return AlertDialog(
             icon: Icon(
               isMobile
@@ -8419,7 +9218,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           zones = {'ambient', 'chilled', 'frozen'};
                           if (existing == null) {
                             idController.text =
-                                'PK-${index.toString().padLeft(2, '0')}';
+                                'PK_${index.toString().padLeft(2, '0')}';
                             nameController.text = '핑키 $index호';
                             modelController.text = 'PINKY-GZ';
                             gzController.text =
@@ -8430,7 +9229,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           zones = {};
                           if (existing == null) {
                             idController.text =
-                                'OMX-${index.toString().padLeft(2, '0')}';
+                                'OMX_${index.toString().padLeft(2, '0')}';
                             nameController.text = '매니퓰레이터 $index호';
                             modelController.text = openManipulatorModels.first;
                             gzController.text =
@@ -8486,11 +9285,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     const SizedBox(height: 14),
                     TextField(
                       controller: idController,
+                      // 못 쓰는 글자는 치는 즉시 고친다. 막기만 하면 사람이
+                      // 무엇을 쳐야 하는지 알아내야 한다 — `PK-01` 을 치면
+                      // `PK_01` 이 된다.
+                      inputFormatters: [_RobotIdFormatter()],
+                      onChanged: (_) => setDialogState(() {}),
                       decoration: InputDecoration(
                         labelText: '로봇 ID',
                         helperText: isMobile
-                            ? 'fleet adapter 의 robots 항목 이름이 됩니다.'
+                            ? 'fleet adapter 의 robots 항목 이름이자 RMF 가 만드는 '
+                                  '토픽 이름입니다. 영문·숫자·밑줄만 쓸 수 있습니다.'
                             : '작업에서 이 설비를 가리키는 이름이 됩니다.',
+                        helperMaxLines: 3,
+                        // 예전에 하이픈으로 저장된 로봇을 열었을 때를 위해 남긴다.
+                        // 새로 치는 것은 위 formatter 가 이미 막는다.
+                        errorText: idProblem,
+                        errorMaxLines: 3,
                         border: const OutlineInputBorder(),
                       ),
                     ),
@@ -8544,12 +9354,35 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       ),
                     ),
                     const SizedBox(height: 12),
+                    TextField(
+                      controller: domainController,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: 'ROS_DOMAIN_ID',
+                        helperText: dataSource == RobotDataSource.gazebo
+                            ? '맵 기본값 $_rosDomainId 을 가져왔습니다. Gazebo 로봇은 '
+                                  '시뮬레이터와 같아야 합니다 — 다르면 오류 없이 값만 '
+                                  '안 옵니다.'
+                            : '맵 기본값 $_rosDomainId 을 가져왔습니다. 이 로봇이 다른 '
+                                  '망에 있으면 여기서 고치세요. 비우면 기본값을 따라갑니다.',
+                        helperMaxLines: 3,
+                        errorText: domainError,
+                        border: const OutlineInputBorder(),
+                      ),
+                      onChanged: (_) =>
+                          setDialogState(() => domainError = null),
+                    ),
+                    const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       key: ValueKey(kind),
                       initialValue: charger,
                       isExpanded: true,
                       decoration: InputDecoration(
-                        labelText: isMobile ? '충전 Waypoint' : '설비 Waypoint',
+                        // 필수인 것만 별표를 단다. Mock 로봇에까지 달면
+                        // 안 골라도 되는 칸을 골라야 하는 것으로 읽는다.
+                        labelText:
+                            '${isMobile ? '충전' : '설비'} Waypoint'
+                            '${needsStation ? ' *' : ''}',
                         // 목록이 빈 이유를 밝힌다. 예전에는 맵을 안 열었을
                         // 뿐인데 "Waypoint 가 없습니다" 라고만 해서, 지도에
                         // 멀쩡히 있는 자리를 없는 것으로 알게 했다.
@@ -8562,8 +9395,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             ? '$charger 를 지금 맵에서 찾지 못했습니다. '
                                   '그대로 두면 값은 지워지지 않습니다.'
                             : isMobile
-                            ? 'spawn 위치와 복귀 지점이 됩니다.'
-                            : '이 자리에 고정 설치됩니다.',
+                            ? 'spawn 위치와 복귀 지점이 됩니다. 반드시 골라야 '
+                                  '합니다.'
+                            : '이 자리에 고정 설치됩니다. 반드시 골라야 합니다.',
+                        helperMaxLines: 3,
                         border: const OutlineInputBorder(),
                       ),
                       items: [
@@ -8580,6 +9415,42 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       onChanged: (value) =>
                           setDialogState(() => charger = value),
                     ),
+                    // 단추가 왜 안 눌리는지, 또는 지금 저장하면 무엇이 빈 채로
+                    // 남는지 그 자리에서 밝힌다. 흐린 단추만 두면 사람이 다른
+                    // 칸을 뒤진다.
+                    if (stationMessage != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              canSave
+                                  ? Icons.warning_amber_outlined
+                                  : Icons.error_outline,
+                              size: 16,
+                              // 막는 것과 알리는 것은 색이 달라야 한다. 둘 다
+                              // 빨간색이면 저장되는데도 막힌 줄 안다.
+                              color: canSave
+                                  ? const Color(0xFFB45309)
+                                  : const Color(0xFFDC2626),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                stationMessage,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: canSave
+                                      ? const Color(0xFFB45309)
+                                      : const Color(0xFFDC2626),
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     const SizedBox(height: 12),
                     if (isMobile)
                       Align(
@@ -8744,70 +9615,79 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 child: const Text('취소'),
               ),
               FilledButton(
-                onPressed: () {
-                  final id = idController.text.trim();
-                  if (id.isEmpty) return;
-                  // 자리는 종류에 맞는 카테고리에서만 찾는다. 이동 로봇이
-                  // 설비 자리에 서거나 그 반대가 되면 실행에서 어긋난다.
-                  final source = charger == null
-                      ? null
-                      : _waypointTypes.entries
-                            .where(
-                              (entry) =>
-                                  entry.value == kind.waypointCategory &&
-                                  (_waypointNames[entry.key] ?? '').trim() ==
-                                      charger,
-                            )
-                            .map((entry) => entry.key)
-                            .firstOrNull;
-                  // RMF 월드 좌표로 넣는다. 화면용 바닥 좌표를 넣으면 y 부호가
-                  // 반대라 로봇이 건물 밖에 떨어진다.
-                  final spawn = source == null
-                      ? null
-                      : _rmfMetersFromPixel(source);
-                  // 속도 한계는 플릿 설정이라 로봇과 함께 돌려보낼 수 없다.
-                  // 여기서 바로 반영하고, 부르는 쪽의 저장이 함께 기록한다.
-                  //
-                  // 빈 칸이나 못 읽는 값은 지금 값을 그대로 둔다. 0 으로 떨어지면
-                  // RMF 가 로봇을 멈춰 있는 것으로 보고 배차를 안 한다.
-                  if (isMobile) {
-                    double? read(TextEditingController controller) {
-                      final value = double.tryParse(controller.text.trim());
-                      return value != null && value > 0 ? value : null;
-                    }
+                // 자리를 안 고른 로봇은 만들지 않는다. spawn 좌표가 없으면
+                // 지도 원점에 놓이고, 그 상태로도 등록·배포·스폰이 전부
+                // 성공한 것처럼 보인다.
+                onPressed: !canSave || idProblem != null
+                    ? null
+                    : () {
+                        final id = idController.text.trim();
+                        if (id.isEmpty) return;
+                        // 비우면 맵 기본값을 따라간다는 뜻이라 저장할 것이
+                        // 없다. 적었으면 쓸 수 있는 번호여야 한다.
+                        final rawDomain = domainController.text.trim();
+                        final domain = rawDomain.isEmpty
+                            ? null
+                            : int.tryParse(rawDomain);
+                        if (rawDomain.isNotEmpty) {
+                          final domainProblem = rosDomainIdError(domain);
+                          if (domainProblem != null) {
+                            setDialogState(() => domainError = domainProblem);
+                            return;
+                          }
+                        }
+                        // 속도 한계는 플릿 설정이라 로봇과 함께 돌려보낼 수 없다.
+                        // 여기서 바로 반영하고, 부르는 쪽의 저장이 함께 기록한다.
+                        //
+                        // 빈 칸이나 못 읽는 값은 지금 값을 그대로 둔다. 0 으로 떨어지면
+                        // RMF 가 로봇을 멈춰 있는 것으로 보고 배차를 안 한다.
+                        if (isMobile) {
+                          double? read(TextEditingController controller) {
+                            final value = double.tryParse(
+                              controller.text.trim(),
+                            );
+                            return value != null && value > 0 ? value : null;
+                          }
 
-                    _fleetSettings = _fleetSettings.copyWith(
-                      linearVelocity: read(linearVelocityController),
-                      linearAcceleration: read(linearAccelerationController),
-                      angularVelocity: read(angularVelocityController),
-                      angularAcceleration: read(angularAccelerationController),
-                    );
-                  }
-                  Navigator.pop(
-                    dialogContext,
-                    RmfProjectRobot(
-                      robotId: id,
-                      displayName: nameController.text.trim().isEmpty
-                          ? id
-                          : nameController.text.trim(),
-                      model: modelController.text.trim().isEmpty
-                          ? (isMobile
-                                ? 'PINKY-GZ'
-                                : openManipulatorModels.first)
-                          : modelController.text.trim(),
-                      kind: kind,
-                      dataSource: dataSource,
-                      gzName: gzController.text.trim().isEmpty
-                          ? id.toLowerCase()
-                          : gzController.text.trim(),
-                      zones: zones.toList()..sort(),
-                      chargerWaypoint: charger,
-                      spawnX: spawn == null ? existing?.spawnX : spawn.dx,
-                      spawnY: spawn == null ? existing?.spawnY : spawn.dy,
-                      spawnHeading: existing?.spawnHeading ?? 0,
-                    ),
-                  );
-                },
+                          _fleetSettings = _fleetSettings.copyWith(
+                            linearVelocity: read(linearVelocityController),
+                            linearAcceleration: read(
+                              linearAccelerationController,
+                            ),
+                            angularVelocity: read(angularVelocityController),
+                            angularAcceleration: read(
+                              angularAccelerationController,
+                            ),
+                          );
+                        }
+                        Navigator.pop(
+                          dialogContext,
+                          RmfProjectRobot(
+                            robotId: id,
+                            displayName: nameController.text.trim().isEmpty
+                                ? id
+                                : nameController.text.trim(),
+                            model: modelController.text.trim().isEmpty
+                                ? (isMobile
+                                      ? 'PINKY-GZ'
+                                      : openManipulatorModels.first)
+                                : modelController.text.trim(),
+                            kind: kind,
+                            dataSource: dataSource,
+                            // 맵 기본값과 같으면 따로 들고 있지 않는다.
+                            // 그래야 나중에 기본값을 바꿨을 때 같이 따라온다.
+                            rosDomainId: domain == _rosDomainId ? null : domain,
+                            gzName: gzController.text.trim().isEmpty
+                                ? id.toLowerCase()
+                                : gzController.text.trim(),
+                            zones: zones.toList()..sort(),
+                            chargerWaypoint: charger,
+                            spawnX: spawn == null ? existing?.spawnX : spawn.dx,
+                            spawnY: spawn == null ? existing?.spawnY : spawn.dy,
+                            spawnHeading: existing?.spawnHeading ?? 0,
+                          ),
+                        );
+                      },
                 child: const Text('저장'),
               ),
             ],
@@ -8821,6 +9701,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         nameController.dispose();
         modelController.dispose();
         gzController.dispose();
+        domainController.dispose();
         linearVelocityController.dispose();
         linearAccelerationController.dispose();
         angularVelocityController.dispose();
@@ -8855,17 +9736,45 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _updateFleetRobot(RmfProjectRobot existing) async {
     final updated = await _editFleetRobot(existing);
     if (updated == null) return;
-    setState(
-      () => _fleetRobots = [
+    setState(() {
+      _fleetRobots = [
         for (final robot in _fleetRobots)
           if (robot.robotId == existing.robotId) updated else robot,
-      ],
-    );
+      ];
+      // ID 를 바꿨으면 그 ID 를 들고 있는 것을 여기서 전부 함께 바꾼다.
+      //
+      // 지도에 올린 로봇도 작업도 등록에서 온 ID 를 들고 있다. 등록만 고치면
+      // 옛 ID 가 그대로 남아 서로를 못 찾는다. 그러면 작업이 RMF 로 안 가고
+      // 앱 안에서만 돌아, 화면에서는 일하는 것처럼 보이는데 로봇은 가만히
+      // 있는다. 고치는 자리에서 맞춰 두면 어긋날 일이 없다.
+      if (updated.robotId != existing.robotId) {
+        _renameRobotEverywhere(existing.robotId, updated.robotId);
+      }
+    });
     await _saveSettingToOpenProject(
       label: '로봇 수정',
       detail: '${updated.robotId} · ${updated.displayName}',
     );
+    // 작업이 들고 있던 ID 도 바뀌었으므로 함께 남긴다.
+    await _saveMockTasks();
     await _syncTelemetry();
+  }
+
+  /// 지도·작업·자리 예약이 들고 있는 로봇 ID 를 한꺼번에 바꾼다.
+  ///
+  /// `setState` 안에서 부른다 — 화면이 한 번에 새 ID 로 그려져야 중간 상태가
+  /// 안 보인다.
+  void _renameRobotEverywhere(String from, String to) {
+    for (final robot in _mockRobots) {
+      if (robot.id == from) robot.id = to;
+    }
+    for (final task in _mockTasks) {
+      if (task.robotId == from) task.robotId = to;
+    }
+    // 자리 예약은 값이 로봇 ID 다. 안 바꾸면 그 자리가 영영 잠긴다.
+    for (final entry in _homeReservations.entries.toList()) {
+      if (entry.value == from) _homeReservations[entry.key] = to;
+    }
   }
 
   /// 등록을 지운다. 이미 스폰해 둔 로봇이 있으면 함께 사라진다는 것을 먼저
@@ -9160,13 +10069,108 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 지난번에 고른 실행 창 설정. 한 번 정하면 대개 그대로 여러 번 띄운다.
+  bool _runWithGazeboGui = false;
+  bool _runWithRviz = false;
+
+  /// 띄우기 전에 어떤 창을 볼지 고르게 한다. 취소하면 null.
+  ///
+  /// 기본은 둘 다 끈 것이다. 창이 없어도 시뮬레이션은 그대로 돌고 라이다·
+  /// 카메라도 발행한다 — Gazebo 서버는 언제나 헤드리스 렌더링으로 뜬다.
+  /// 창은 사람이 보기 위한 것일 뿐이고, 두 개를 함께 띄우면 이 컴퓨터에서는
+  /// 프레임이 떨어져 시뮬레이션까지 느려진다.
+  Future<({bool gazeboGui, bool rviz})?> _askRunWindows(String mapName) async {
+    var gazeboGui = _runWithGazeboGui;
+    var rviz = _runWithRviz;
+    final chosen = await showMovableDialog<({bool gazeboGui, bool rviz})>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.play_circle_outline, size: 32),
+          title: Text('$mapName 실행'),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('띄울 화면을 고르세요.'),
+                const SizedBox(height: 10),
+                CheckboxListTile(
+                  value: gazeboGui,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Gazebo 창'),
+                  subtitle: const Text(
+                    '로봇과 건물이 실제로 어디 있는지 3D 로 봅니다.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  onChanged: (value) =>
+                      setDialogState(() => gazeboGui = value ?? false),
+                ),
+                CheckboxListTile(
+                  value: rviz,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('RViz'),
+                  subtitle: const Text(
+                    'RMF 가 계획한 경로와 교통 정리를 봅니다.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  onChanged: (value) =>
+                      setDialogState(() => rviz = value ?? false),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  gazeboGui || rviz
+                      ? '창을 띄우면 그리는 데 자원을 나눠 써 시뮬레이션이 느려질 수 있습니다.'
+                      : '창 없이 띄웁니다. 시뮬레이션은 그대로 돌고 라이다·카메라도 '
+                            '발행합니다 — 앱의 로봇 화면에서 위치와 센서를 볼 수 있습니다.',
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, (
+                gazeboGui: gazeboGui,
+                rviz: rviz,
+              )),
+              icon: const Icon(Icons.play_arrow, size: 18),
+              label: const Text('실행'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null) return null;
+    // 고른 것을 다음 실행의 기본값으로 남긴다.
+    setState(() {
+      _runWithGazeboGui = chosen.gazeboGui;
+      _runWithRviz = chosen.rviz;
+    });
+    return chosen;
+  }
+
   /// 앱에서 프로젝트를 띄운다.
   ///
   /// 앱이 띄운 것만 앱이 내린다. 창을 닫을 때 자동으로 정리되지만, 강제 종료
   /// (kill·전원)는 막을 수 없다 — 그때는 남은 것을 다음 실행에서 알아채고
   /// `로봇 운영` 화면에서 정리한다.
   Future<void> _runProjectScript(String mapName) async {
-    final result = await startProject(mapName);
+    final windows = await _askRunWindows(mapName);
+    if (windows == null || !mounted) return;
+    final result = await startProject(
+      mapName,
+      gazeboGui: windows.gazeboGui,
+      rviz: windows.rviz,
+    );
     if (!mounted) return;
     await showWaypointErrorDialog(
       context,
@@ -9297,6 +10301,30 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String mapName,
     List<MapProjectFile> files,
   ) async {
+    // 자리 없는 로봇이 있으면 파일을 만들지 않는다.
+    //
+    // 등록 창은 고를 자리가 하나도 없을 때는 막지 않는다 — 맵을 그리기 전에도
+    // 로봇 목록은 짤 수 있어야 하기 때문이다. 그래서 자리 없는 로봇이 남을 수
+    // 있고, 예전에 그렇게 저장된 것도 있다. 배포는 여기까지 왔으면 맵이 이미
+    // 있으므로, 좌표가 파일에 박히기 전 마지막으로 여기서 막는다.
+    //
+    // 화면의 목록(_fleetRobots)이 아니라 산출물을 만든 그 목록을 본다. 저장된
+    // 프로젝트에서 읽어 오므로 둘이 다를 수 있고, 다르면 검사와 파일이 어긋난다.
+    final deployRobots = await _fleetRobotsForDeploy(mapName);
+    // ID 를 먼저 본다. 자리를 다 골라도 ID 가 틀리면 fleet adapter 가 죽어서
+    // 어차피 주문이 안 먹는다. 예전에 하이픈으로 저장된 로봇이 여기서 걸린다.
+    final blocked =
+        deployBlockedByRobotId(deployRobots) ??
+        deployBlockedMessage(deployRobots);
+    if (blocked != null) {
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: '설정 내보내기 실패',
+        message: blocked,
+      );
+      return;
+    }
     final result = await exportProjectConfigFiles(
       mapName: mapName,
       files: files,
@@ -9803,6 +10831,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
             (safetyData?['turningRadiusMeters'] as num?)?.toDouble() ?? .3;
         _localizationMarginMeters =
             (safetyData?['localizationMarginMeters'] as num?)?.toDouble() ?? .1;
+        // 예전 프로젝트에는 이 값이 없다. 그때 배포한 월드가 2.5m 였으므로
+        // 없으면 2.5m 다 — 열었다고 벽 높이가 달라지면 안 된다.
+        _wallHeightMeters =
+            (data['wallHeightMeters'] as num?)?.toDouble() ?? defaultWallHeight;
+        _manualLaneDisplayWidth = (data['manualLaneDisplayWidth'] as num?)
+            ?.toDouble();
+        _rosDomainId =
+            (data['rosDomainId'] as num?)?.toInt() ?? defaultRosDomainId;
         _drawing = drawingData == null
             ? null
             : UploadedDrawing(
@@ -10304,9 +11340,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (wallIndices.isEmpty) {
       buffer.writeln('      []');
     } else {
+      // `texture_height` 가 벽 높이다. traffic_editor 에서는 벽 한 장에
+      // 텍스처를 한 번 입히는 높이라, 벽 높이와 같은 값을 쓴다(기본 2.5m).
+      // 배포 스크립트가 이 값을 읽어 Gazebo 벽 모델의 높이로 세운다.
+      final height = _wallHeightMeters.toStringAsFixed(3);
       for (final wall in wallIndices) {
         buffer.writeln(
-          '      - [${wall.$1}, ${wall.$2}, {alpha: [3, 1], texture_height: [3, 2.5], texture_name: [1, default], texture_scale: [3, 1], texture_width: [3, 1]}]',
+          '      - [${wall.$1}, ${wall.$2}, {alpha: [3, 1], texture_height: [3, $height], texture_name: [1, default], texture_scale: [3, 1], texture_width: [3, 1]}]',
         );
       }
     }
@@ -10490,6 +11530,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       yaml: _buildBuildingYaml(),
       imageName: drawing.name,
       imageBytes: drawing.bytes!,
+      rosDomainId: _rosDomainId,
     );
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
@@ -10703,6 +11744,34 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                                 size: 18,
                                               ),
                                               label: const Text('로봇 안전 기준'),
+                                            ),
+                                            // 지금 높이를 단추에 적는다. 도면
+                                            // 어디에도 안 보이는 값이라, 열어
+                                            // 보지 않으면 2.5m 인 줄 모른다.
+                                            OutlinedButton.icon(
+                                              onPressed:
+                                                  _showWallHeightSettings,
+                                              icon: const Icon(
+                                                Icons.height,
+                                                size: 18,
+                                              ),
+                                              label: Text(
+                                                '벽 높이 '
+                                                '${_wallHeightMeters.toStringAsFixed(2)}m',
+                                              ),
+                                            ),
+                                            // 도메인도 단추에 적는다. 어긋나면
+                                            // 오류 없이 아무것도 안 통하므로,
+                                            // 지금 값이 늘 보여야 한다.
+                                            OutlinedButton.icon(
+                                              onPressed: _showRosDomainSettings,
+                                              icon: const Icon(
+                                                Icons.lan_outlined,
+                                                size: 18,
+                                              ),
+                                              label: Text(
+                                                'ROS 도메인 $_rosDomainId',
+                                              ),
                                             ),
                                           ],
                                         ),
@@ -11063,6 +12132,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               preview: _gridPreview,
                               previewGrid: _gridPreviewGrid,
                               previewDirectory: _gridPreviewDirectory,
+                              previewSavedAt: _gridPreviewSavedAt,
                               slamMap: _slamMap,
                               slamPreview: _slamPreview,
                               readingSlam: _isReadingSlamMap,
@@ -11118,6 +12188,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                   _waypointNames,
                               robots: _mockRobots,
                               projectName: _openProjectName,
+                              // 차례의 `RMF 설정 내보내기` 칸이 이 둘로 배포
+                              // 산출물을 읽는다. 맵 이름은 산출물 파일 이름과
+                              // 같은 것이라야 한다 — 열린 프로젝트 이름과 다를
+                              // 수 있다.
+                              mapDirectory: _deployedMapDirectory,
+                              deployMapName:
+                                  _robotDeployedMap?.summary.name ?? _mapName,
                               fleetName: _fleetSettings.fleetName,
                               registeredRobots: _fleetRobots,
                               onLoadMap: _loadMapForRobots,
@@ -12312,6 +13389,20 @@ class _TaskManagementPage extends StatelessWidget {
                                         color: Color(0xFF15803D),
                                       ),
                                     ),
+                                    // 돌고 있는 작업에만 나온다. 멈출 수 없는
+                                    // 작업 옆에 흐린 단추를 두면 무엇이 지금
+                                    // 누를 수 있는 것인지 흐려진다.
+                                    if (task.status == _MockTaskStatus.active)
+                                      IconButton(
+                                        onPressed: () => onCancel(task),
+                                        tooltip: '작업 취소 · 로봇은 최초 위치로',
+                                        visualDensity: VisualDensity.compact,
+                                        icon: const Icon(
+                                          Icons.cancel_outlined,
+                                          size: 19,
+                                          color: Color(0xFFB45309),
+                                        ),
+                                      ),
                                     IconButton(
                                       onPressed: () => onEdit(task),
                                       tooltip: '작업 수정',
@@ -13080,6 +14171,7 @@ class _GridMapPage extends StatelessWidget {
     required this.preview,
     required this.previewGrid,
     required this.previewDirectory,
+    required this.previewSavedAt,
     required this.slamMap,
     required this.slamPreview,
     required this.readingSlam,
@@ -13123,6 +14215,9 @@ class _GridMapPage extends StatelessWidget {
   final ui.Image? preview;
   final OccupancyGrid? previewGrid;
   final String? previewDirectory;
+
+  /// 이 그림이 프로젝트에 저장돼 있던 것이면 그 파일을 쓴 때. 방금 구웠으면 null.
+  final DateTime? previewSavedAt;
 
   /// 이 프로젝트에 넣어 둔 SLAM 지도. 없으면 아직 안 올렸다.
   final SlamMap? slamMap;
@@ -13347,6 +14442,7 @@ class _GridMapPage extends StatelessWidget {
               image: preview!,
               grid: previewGrid,
               directory: previewDirectory,
+              savedAt: previewSavedAt,
             ),
           ],
 
@@ -13426,9 +14522,7 @@ class _GridMapPage extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2.2),
                   )
                 : const Icon(Icons.upload_file_outlined, size: 18),
-            label: Text(
-              readingSlam ? '읽는 중…' : 'SLAM 지도 올리기 — .yaml 고르기',
-            ),
+            label: Text(readingSlam ? '읽는 중…' : 'SLAM 지도 올리기 — .yaml 고르기'),
             style: OutlinedButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
             ),
@@ -13724,15 +14818,20 @@ class _GridMapPreview extends StatelessWidget {
     required this.image,
     required this.grid,
     required this.directory,
+    this.savedAt,
   });
 
   final ui.Image image;
   final OccupancyGrid? grid;
   final String? directory;
 
+  /// 프로젝트에 저장돼 있던 것을 올렸으면 그 파일을 쓴 때. 방금 구웠으면 null.
+  final DateTime? savedAt;
+
   @override
   Widget build(BuildContext context) {
     final g = grid;
+    final stored = savedAt;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -13740,10 +14839,22 @@ class _GridMapPreview extends StatelessWidget {
           children: [
             const Icon(Icons.check_circle, size: 18, color: Color(0xFF16A34A)),
             const SizedBox(width: 8),
-            const Text(
-              '만든 그리드맵',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            Text(
+              stored == null ? '만든 그리드맵' : '프로젝트에 저장된 그리드맵',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
             ),
+            if (stored != null) ...[
+              const SizedBox(width: 10),
+              Text(
+                // 도면을 이 뒤에 고쳤으면 지도가 옛것이다. 언제 만든 것인지
+                // 보이지 않으면 최신인 줄 알고 그대로 배포한다.
+                '${_ControlDashboardState._projectTimestamp(stored)} 작성',
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  color: Color(0xFF64748B),
+                ),
+              ),
+            ],
             if (g != null) ...[
               const SizedBox(width: 12),
               Text(
@@ -13801,7 +14912,9 @@ class _GridMapPreview extends StatelessWidget {
         if (directory != null && directory!.isNotEmpty) ...[
           const SizedBox(height: 10),
           SelectableText(
-            '$directory/nav2_map/',
+            // 이미 `nav2_map` 까지 들어 있는 경로다. 뒤에 또 붙이면 없는
+            // 디렉터리를 알려 주게 된다.
+            '$directory/',
             style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
           ),
         ],
@@ -14418,7 +15531,15 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onStartBackend,
     required this.onRefreshScripts,
     required this.telemetry,
+    this.mapDirectory,
+    this.deployMapName,
   });
+
+  /// 이 프로젝트의 배포 산출물이 있는 곳. 없으면 내보내기 여부를 볼 수 없다.
+  final String? mapDirectory;
+
+  /// 산출물 파일 이름에 쓰이는 맵 이름(`<이름>_bringup.launch.xml`).
+  final String? deployMapName;
 
   final UploadedDrawing? drawing;
   final String activeMapSourceName;
@@ -14487,6 +15608,19 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     // 이미 떠 있는 백엔드를 모르고 새로 띄우면 schedule node 와 fleet adapter 가
     // 부딪혀 엉뚱한 오류로 나타난다. 화면에 들어올 때 먼저 확인한다.
     unawaited(_refreshRmfStatus());
+    unawaited(_refreshDeployedCount());
+  }
+
+  @override
+  void didUpdateWidget(_RobotManagementPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 로봇을 등록·해제하면 `내보내기` 칸의 판정이 달라진다. 등록만 하고 안
+    // 내보낸 상태를 그 자리에서 보여 줘야 뜻이 있다.
+    if (oldWidget.registeredRobots.length != widget.registeredRobots.length ||
+        oldWidget.deployMapName != widget.deployMapName ||
+        oldWidget.mapDirectory != widget.mapDirectory) {
+      unawaited(_refreshDeployedCount());
+    }
   }
 
   Future<void> _refreshRmfStatus() async {
@@ -14513,6 +15647,69 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
     await _refreshUntilClear();
+  }
+
+  /// 배포된 bringup 이 담고 있는 로봇 수. 안 봤거나 파일이 없으면 null.
+  ///
+  /// 등록은 앱 안에만 남는다. 이 수가 지금 등록된 수와 다르면 `RMF 설정
+  /// 내보내기` 를 아직 안 누른 것이다 — 그대로 띄우면 옛날 로봇 목록으로 뜬다.
+  int? _deployedRobots;
+
+  Future<void> _refreshDeployedCount() async {
+    final directory = widget.mapDirectory;
+    final name = widget.deployMapName;
+    if (directory == null || name == null || name.trim().isEmpty) return;
+    final count = await deployedSpawnCount(
+      mapDirectory: directory,
+      mapName: name,
+    );
+    if (!mounted) return;
+    setState(() => _deployedRobots = count);
+  }
+
+  /// 로봇을 띄우기까지의 차례. 각 칸이 됐는지도 함께 본다.
+  List<_WorkflowStep> get _workflowSteps {
+    final gazeboRobots = widget.registeredRobots
+        .where((robot) => robot.runsInGazebo)
+        .length;
+    final mapReady = widget.waypoints.isNotEmpty;
+    final registered = widget.registeredRobots.isNotEmpty;
+    // 내보낸 로봇 수가 지금 등록된 수와 같아야 한다. 파일만 있으면 옛날 것일 수
+    // 있다 — 로봇을 한 대 더 등록하고 안 내보낸 경우가 그렇다.
+    final exported = _deployedRobots != null && _deployedRobots == gazeboRobots;
+    final backendUp = _rmfStatus.isRunning && !_ghostNodes;
+    return [
+      _WorkflowStep(
+        title: '맵 불러오기',
+        detail: mapReady
+            ? 'Waypoint ${widget.waypoints.length}개'
+            : '자리를 고르려면 맵이 먼저 있어야 합니다',
+        done: mapReady,
+      ),
+      _WorkflowStep(
+        // 아래 `로봇 등록` 단추와 같은 글자를 쓰지 않는다. 화면에 같은 말이 두
+        // 번 나오면 어느 것을 누르라는 말인지 헷갈린다.
+        title: '로봇 등록하기',
+        detail: registered
+            ? '${widget.registeredRobots.length}대 (Gazebo $gazeboRobots대)'
+            : '자리 Waypoint 를 함께 고릅니다',
+        done: registered,
+      ),
+      _WorkflowStep(
+        title: 'RMF 설정 내보내기',
+        detail: exported
+            ? '$gazeboRobots대가 launch 에 들어갔습니다'
+            : _deployedRobots == null
+            ? '아직 안 내보냈습니다'
+            : '내보낸 것은 $_deployedRobots대 · 등록은 $gazeboRobots대',
+        done: exported,
+      ),
+      _WorkflowStep(
+        title: '백엔드 실행',
+        detail: backendUp ? '떠 있습니다' : '마지막에 띄웁니다',
+        done: backendUp,
+      ),
+    ];
   }
 
   /// 지금 내릴 대상 프로젝트. 확인 창에 그대로 보여 준다.
@@ -14974,7 +16171,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   }
 
   @override
-  Widget build(BuildContext context) => Padding(
+  // 맵 관리와 같이 화면을 스크롤한다. 예전에는 창에 든 만큼만 쓰고 지도가
+  // 남는 자리를 가져갔다. 위쪽 카드(차례·등록·백엔드 상태)가 자리를 다 먹어
+  // 지도는 띠처럼 눌렸고, 로봇이 어느 Waypoint 에 서 있는지 알아볼 수 없었다.
+  Widget build(BuildContext context) => SingleChildScrollView(
     padding: const EdgeInsets.all(28),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -15038,6 +16238,9 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
           ],
         ),
         const SizedBox(height: 12),
+        // 차례가 맨 위다. 아래 단추들은 이 차례의 각 칸을 누르는 것이다.
+        _WorkflowStrip(steps: _workflowSteps),
+        const SizedBox(height: 12),
         _registrationCard(),
         const SizedBox(height: 12),
         _rmfStatusCard(),
@@ -15049,7 +16252,11 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
           pendingDeployment: widget.pendingDeployment,
         ),
         const SizedBox(height: 18),
-        Expanded(
+        // 지도는 맵 관리와 같은 크기다. 같은 도면을 두 화면에서 보는데 여기서만
+        // 작으면 다른 지도처럼 보인다. Spawn 목록도 같이 커져 로봇이 여러 대일
+        // 때 스크롤 없이 보인다.
+        SizedBox(
+          height: mapWorkspaceHeight,
           child: LayoutBuilder(
             builder: (context, constraints) {
               final map = _RobotMapCard(
@@ -15087,6 +16294,236 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
       ],
     ),
   );
+}
+
+/// 로봇 ID 칸에 못 쓰는 글자가 들어오면 그 자리에서 고친다.
+///
+/// RMF 는 플릿 로봇마다 `rmf/dynamic_event/begin/<플릿>/<로봇>` 토픽을 만든다.
+/// ROS 2 토픽 이름에는 영문·숫자·밑줄만 쓸 수 있어서, 하이픈이 들어가면 로봇을
+/// 플릿에 붙이는 순간 fleet adapter 가 죽는다. 다 치고 나서 빨간 글씨로 알리는
+/// 것보다 치는 동안 바로잡는 편이 낫다.
+class _RobotIdFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final fixed = normalizeRobotId(newValue.text);
+    if (fixed == newValue.text) return newValue;
+    // 글자 수가 그대로라(한 글자가 한 글자로 바뀐다) 커서를 그 자리에 둔다.
+    // 다시 계산하면 하이픈을 칠 때마다 커서가 끝으로 튄다.
+    final offset =
+        newValue.selection.baseOffset + (fixed.length - newValue.text.length);
+    return TextEditingValue(
+      text: fixed,
+      selection: TextSelection.collapsed(offset: offset.clamp(0, fixed.length)),
+    );
+  }
+}
+
+/// 로봇을 띄우기까지의 차례. 로봇 운영 화면 맨 위에 둔다.
+///
+/// 순서가 있는 일이다. `ros2 launch` 는 띄울 때 파일을 한 번만 읽으므로, 백엔드를
+/// 먼저 띄우면 나중에 등록한 로봇은 그 월드에 없다. 오류도 안 난다 — 다리가
+/// 토픽 이름은 만들어 두어서 목록에는 나오고 값만 안 온다. 로봇 0대이던 시절의
+/// Gazebo 가 34분째 돌고 있던 일이 그래서 생겼다.
+///
+/// 그런데 그 차례가 화면 어디에도 없었다. 사람은 눈에 보이는 단추부터 누른다.
+class _WorkflowStrip extends StatelessWidget {
+  const _WorkflowStrip({required this.steps});
+
+  final List<_WorkflowStep> steps;
+
+  @override
+  Widget build(BuildContext context) {
+    // 아직 못 한 것 중 가장 앞. 지금 할 일 하나만 짚어 준다.
+    final current = steps.indexWhere((step) => !step.done);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFCBD5E1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.format_list_numbered,
+                size: 17,
+                color: Color(0xFF334155),
+              ),
+              const SizedBox(width: 6),
+              const Text(
+                '로봇을 띄우는 차례',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  current < 0 ? '다 되었습니다.' : '지금 할 일 — ${steps[current].title}',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: current < 0
+                        ? const Color(0xFF15803D)
+                        : const Color(0xFFB45309),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              // 좁으면 세로로 쌓는다. 가로로 밀어 넣으면 글자가 잘려서 정작
+              // 무슨 차례인지 안 보인다.
+              final vertical = constraints.maxWidth < 900;
+              final tiles = [
+                for (var i = 0; i < steps.length; i++)
+                  _WorkflowTile(
+                    index: i + 1,
+                    step: steps[i],
+                    isCurrent: i == current,
+                    expand: !vertical,
+                  ),
+              ];
+              if (vertical) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final tile in tiles)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: tile,
+                      ),
+                  ],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < tiles.length; i++) ...[
+                    if (i > 0)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6, left: 4, right: 4),
+                        child: Icon(
+                          Icons.chevron_right,
+                          size: 16,
+                          color: Color(0xFF94A3B8),
+                        ),
+                      ),
+                    tiles[i],
+                  ],
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '차례를 지켜야 합니다. `ros2 launch` 는 띄울 때 파일을 한 번만 '
+            '읽습니다 — 백엔드를 먼저 띄우면 그 뒤에 등록한 로봇은 월드에 '
+            '없습니다. 오류도 안 나고 토픽 이름만 보입니다.',
+            style: TextStyle(
+              fontSize: 11.5,
+              color: Color(0xFF64748B),
+              height: 1.45,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 차례 한 칸.
+class _WorkflowStep {
+  const _WorkflowStep({
+    required this.title,
+    required this.detail,
+    required this.done,
+  });
+
+  final String title;
+
+  /// 지금 어떤 상태인지. 값이 있으면 값을 적는다.
+  final String detail;
+  final bool done;
+}
+
+class _WorkflowTile extends StatelessWidget {
+  const _WorkflowTile({
+    required this.index,
+    required this.step,
+    required this.isCurrent,
+    required this.expand,
+  });
+
+  final int index;
+  final _WorkflowStep step;
+  final bool isCurrent;
+  final bool expand;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = step.done
+        ? const Color(0xFF15803D)
+        : isCurrent
+        ? const Color(0xFFB45309)
+        : const Color(0xFF94A3B8);
+    final tile = Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 20,
+          height: 20,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: step.done ? color : Colors.transparent,
+            shape: BoxShape.circle,
+            border: Border.all(color: color, width: 1.5),
+          ),
+          child: step.done
+              ? const Icon(Icons.check, size: 13, color: Colors.white)
+              : Text(
+                  '$index',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+                ),
+        ),
+        const SizedBox(width: 7),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                step.title,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w700,
+                  color: const Color(0xFF0F172A),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                step.detail,
+                style: TextStyle(fontSize: 11.5, color: color, height: 1.35),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    return expand ? Expanded(child: tile) : tile;
+  }
 }
 
 class _RobotMapCard extends StatelessWidget {
@@ -17070,6 +18507,16 @@ class _StageItem extends StatelessWidget {
   );
 }
 
+/// 지도를 보여 주는 칸의 높이(px).
+///
+/// 맵 관리와 로봇 운영이 같은 값을 쓴다. 같은 도면인데 화면마다 크기가 다르면
+/// 다른 지도처럼 보이고, 로봇 화면에서는 작아서 어느 Waypoint 에 서 있는지
+/// 눈으로 짚기 어려웠다. 한 곳에서 고쳐 둘이 함께 움직이게 한다.
+///
+/// 창 높이에 맞춰 줄이지 않는다 — 도면은 위아래로 넓어서, 남는 자리에
+/// 맞추면 낮은 창에서 지도가 띠처럼 눌린다. 모자라면 화면을 스크롤한다.
+const double mapWorkspaceHeight = 936;
+
 class _MapWorkspace extends StatelessWidget {
   const _MapWorkspace({
     required this.drawing,
@@ -17174,7 +18621,7 @@ class _MapWorkspace extends StatelessWidget {
   final VoidCallback onRemove;
   @override
   Widget build(BuildContext context) => Container(
-    height: 936,
+    height: mapWorkspaceHeight,
     clipBehavior: Clip.antiAlias,
     decoration: BoxDecoration(
       color: Colors.white,
@@ -19947,16 +21394,45 @@ class _ProjectFilesPageState extends State<_ProjectFilesPage> {
     'script': ('셸 스크립트', Icons.terminal, Color(0xFF334155)),
   };
 
+  /// 실행 여부를 실제 프로세스와 맞춰 주는 타이머.
+  ///
+  /// 프로젝트는 앱 밖에서도 내려간다 — 터미널에서 `stop_<맵>.sh` 를 돌리거나
+  /// 프로세스가 죽는다. 그때 앱의 기억을 그대로 두면 `실행` 자리에 `중지` 버튼이
+  /// 굳어, 다시 띄울 길이 화면에서 사라진다. 앱을 껐다 켜야만 풀렸다.
+  ///
+  /// 이 화면이 떠 있는 동안만 돈다. 한 번에 `kill -0` 한 번이라 값이 싸다.
+  Timer? _runStateTimer;
+
   @override
   void initState() {
     super.initState();
     unawaited(_reload());
+    unawaited(_syncRunState());
+    _runStateTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => unawaited(_syncRunState()),
+    );
+  }
+
+  @override
+  void dispose() {
+    _runStateTimer?.cancel();
+    super.dispose();
   }
 
   @override
   void didUpdateWidget(_ProjectFilesPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.projectName != widget.projectName) unawaited(_reload());
+  }
+
+  /// 바뀐 때만 다시 그린다. 3초마다 setState 를 부르면 이 화면의 스크롤과
+  /// 펼친 항목이 계속 흔들린다.
+  Future<void> _syncRunState() async {
+    final before = runningProjectName;
+    final after = await refreshRunningProject();
+    if (!mounted || before == after) return;
+    setState(() {});
   }
 
   Future<void> _reload() async {

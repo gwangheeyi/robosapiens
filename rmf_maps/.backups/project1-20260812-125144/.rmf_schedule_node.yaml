@@ -1,0 +1,30 @@
+- operation: Add
+  participant_description:
+    name: PK_02
+    group: project1_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.050000000000000003
+        - 0.14999999999999999
+- operation: Add
+  participant_description:
+    name: PK_01
+    group: project1_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.050000000000000003
+        - 0.14999999999999999

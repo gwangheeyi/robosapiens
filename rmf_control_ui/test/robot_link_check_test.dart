@@ -130,10 +130,7 @@ void main() {
         expect(action.label, isNotEmpty);
         expect(action.detail, isNotEmpty);
       }
-      expect(
-        RobotLinkAction.spawnRobot.detail,
-        contains('이미 떠 있는 월드에'),
-      );
+      expect(RobotLinkAction.spawnRobot.detail, contains('이미 떠 있는 월드에'));
     });
   });
 

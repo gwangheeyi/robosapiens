@@ -73,10 +73,17 @@ Future<RobotLinkProbe> probeRobotLinks({
       final parts = text.split('---');
       final nodes = parts.first;
       final topics = parts.length > 1 ? parts[1] : '';
+      // 이 로봇을 **올린** 노드를 찾는다. 네임스페이스만 보면 안 된다 —
+      // Nav2 도 같은 네임스페이스에 노드를 둔다(`/pinky_01/amcl` 따위). Nav2 는
+      // 따로 뜨는 launch 라 Gazebo 가 죽어도 혼자 살아남으므로, 네임스페이스로
+      // 세면 월드에 없는 로봇도 "노드가 떠 있다"가 된다. 실제로 그랬다.
+      //
+      // robot_state_publisher 는 spawn.launch.xml 이 띄운다. 이동 로봇이든
+      // 설치 로봇이든 마찬가지다. 이것이 있으면 그 launch 가 돌았다는 뜻이다.
       nodesUp = nodes
           .split('\n')
           .map((line) => line.trim())
-          .any((line) => line.startsWith('/$namespace/'));
+          .contains('/$namespace/robot_state_publisher');
       topicSeen = topics
           .split('\n')
           .map((line) => line.trim())
@@ -195,9 +202,37 @@ Future<RobotLinkFixResult> _run(
         message: '띄우지 못했습니다. ROS 환경을 확인하세요.',
       );
     }
-    return RobotLinkFixResult(ok: true, message: '$started (pid ${pid.trim()})');
+    return RobotLinkFixResult(
+      ok: true,
+      message: '$started (pid ${pid.trim()})',
+    );
   } catch (error) {
     return RobotLinkFixResult(ok: false, message: '$error');
+  }
+}
+
+/// 배포된 bringup 이 로봇을 몇 대 담고 있는가. 파일이 없으면 null.
+///
+/// 로봇 등록은 앱 안(프로젝트 저장소)에만 남는다. `RMF 설정 내보내기` 를 눌러야
+/// 디스크의 launch 파일이 바뀐다. 이 둘이 어긋난 채 백엔드를 띄우면 옛날 로봇
+/// 목록으로 월드가 뜬다 — `ros2 launch` 는 띄울 때 한 번만 파일을 읽기 때문이다.
+/// 오류는 안 난다. 다리가 토픽 이름은 만들어 두므로 목록에는 나오고 값만 안 온다.
+///
+/// bringup 이 `<include ... spawn.launch.xml>` 을 몇 줄 담고 있는지 센다. 그것이
+/// 곧 지금 월드에 올라갈 로봇 수다.
+Future<int?> deployedSpawnCount({
+  required String mapDirectory,
+  required String mapName,
+}) async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) return null;
+  final file = File('$mapDirectory/${mapName}_bringup.launch.xml');
+  if (!file.existsSync()) return null;
+  try {
+    return RegExp(
+      r'spawn\.launch\.xml',
+    ).allMatches(await file.readAsString()).length;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -254,4 +289,3 @@ Future<ProjectBackendAge> readBackendAge({
   }
   return ProjectBackendAge(startedAt: startedAt, deployedAt: deployedAt);
 }
-

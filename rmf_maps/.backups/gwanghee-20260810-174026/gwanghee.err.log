@@ -1,0 +1,30 @@
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/world[@name="sim_world"]/gui/window:/home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee.world:L31]: XML Element[window], child of element[gui], not defined in SDF. Copying[window] as children of [gui].
+[gazebo-1] [WARN] [1786350355.796972358] [omx_02.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786350355.809714326] [omx_02.controller_manager.hardware_component.system.OMXFSystem]: Executor is not available during hardware component initialization for 'OMXFSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786350355.809800358] [omx_02.controller_manager.hardware_component.system.OMXFSystem]: Could not enable FIFO RT scheduling policy. Consider setting up your user to do FIFO RT scheduling. See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details.
+[gazebo-1] [WARN] [1786350355.809925247] [omx_02.controller_manager]: Component 'OMXFSystem' does not have read or write statistics initialized, skipping registration.
+[gazebo-1] [WARN] [1786350357.843576611] [omx_01.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786350357.855513975] [omx_01.controller_manager.hardware_component.system.OMXFSystem]: Executor is not available during hardware component initialization for 'OMXFSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786350357.855588573] [omx_01.controller_manager.hardware_component.system.OMXFSystem]: Could not enable FIFO RT scheduling policy. Consider setting up your user to do FIFO RT scheduling. See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details.
+[gazebo-1] [WARN] [1786350357.855672167] [omx_01.controller_manager]: Component 'OMXFSystem' does not have read or write statistics initialized, skipping registration.
+[gazebo-1] [WARN] [1786350358.009620297] [omx_01.gripper_controller]: [Deprecated]: the `position_controllers/GripperActionController` and `effort_controllers::GripperActionController` controllers are replaced by 'parallel_gripper_controllers/GripperActionController' controller
+[gazebo-1] [WARN] [1786350362.726046788] [omx_02.gripper_controller]: [Deprecated]: the `position_controllers/GripperActionController` and `effort_controllers::GripperActionController` controllers are replaced by 'parallel_gripper_controllers/GripperActionController' controller
+[fleet_manager-14] Traceback (most recent call last):
+[fleet_manager-14] AssertionError
+[ERROR] [fleet_manager-14]: process has died [pid 773912, exit code 1, cmd '/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_manager --config_file /home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee_pinky_config.yaml --ros-args --params-file /tmp/launch_params_pl1l4ckt'].
+[fleet_adapter-15] [WARN] [1786350369.651531883] [gwanghee_pinky_fleet_adapter]: [FleetUpdateHandle::set_retreat_to_charger_interval] This parameter is no longer being used.
+[fleet_adapter-15] Traceback (most recent call last):
+[fleet_adapter-15] KeyError: 'user'
+[fleet_adapter-15] Fatal Python error: Aborted
+[ERROR] [fleet_adapter-15]: process has died [pid 773921, exit code -6, cmd '/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_adapter -c /home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee_pinky_config.yaml -n /home/gyi/robosapiens/rmf_maps/gwanghee/nav_graphs/0.yaml -sim --ros-args --params-file /tmp/launch_params_t_p4gyvw --params-file /tmp/launch_params_eomdao6_'].
+[gazebo-1] [WARN] [1786356099.693280363] [omx_02.controller_manager.hardware_component.system.OMXFSystem]: Trigger read/write called while the previous async trigger is still in progress for hardware interface : 'OMXFSystem'. Failed to trigger read/write cycle!
+[gazebo-1] [WARN] [1786356465.400237604] [rcl.logging_rosout]: Publisher already registered for node name: 'gz_ros_control'. If this is due to multiple nodes with the same name then all logs for the logger named 'omx_02.gz_ros_control' will go out over the existing publisher. As soon as any node with that name is destructed it will unregister the publisher, preventing any further logs for that name from being published on the rosout topic.
+[gazebo-1] [WARN] [1786356465.555013279] [rcl.logging_rosout]: Publisher already registered for node name: 'controller_manager'. If this is due to multiple nodes with the same name then all logs for the logger named 'omx_02.controller_manager' will go out over the existing publisher. As soon as any node with that name is destructed it will unregister the publisher, preventing any further logs for that name from being published on the rosout topic.
+[gazebo-1] [WARN] [1786356465.729012396] [omx_02.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786356465.743511184] [omx_02.controller_manager.hardware_component.system.OMXFSystem]: Executor is not available during hardware component initialization for 'OMXFSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786356465.743702400] [omx_02.controller_manager]: Component 'OMXFSystem' does not have read or write statistics initialized, skipping registration.
+[gazebo-1] [WARN] [1786356465.743781737] [omx_02.controller_manager.hardware_component.system.OMXFSystem]: Could not enable FIFO RT scheduling policy. Consider setting up your user to do FIFO RT scheduling. See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details.
+[gazebo-1] [ERROR] [1786356465.767128482] [omx_01.controller_manager]: Controller 'gripper_controller' can not be configured from 'active' state.
+[gazebo-1] [WARN] [1786356465.893891139] [omx_01.controller_manager]: ResourceManager has already loaded a urdf. Ignoring attempt to reload a robot description.
+[gazebo-1] [WARN] [1786356465.894218869] [omx_02.controller_manager]: ResourceManager has already loaded a urdf. Ignoring attempt to reload a robot description.
+[gazebo-1] [WARN] [1786356465.894272771] [omx_02.controller_manager]: ResourceManager has already loaded a urdf. Ignoring attempt to reload a robot description.

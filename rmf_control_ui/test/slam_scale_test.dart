@@ -17,8 +17,10 @@ void main() {
     for (var row = pad; row < height - pad; row++) {
       for (var col = pad; col < width - pad; col++) {
         final edge =
-            row == pad || row == height - pad - 1 ||
-            col == pad || col == width - pad - 1;
+            row == pad ||
+            row == height - pad - 1 ||
+            col == pad ||
+            col == width - pad - 1;
         cells[row * width + col] = edge
             ? OccupancyGrid.occupied
             : OccupancyGrid.free;

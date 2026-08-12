@@ -73,8 +73,7 @@ Future<SlamMapStoreResult> readSlamMapFrom(String yamlPath) async {
   try {
     final header = parseSlamMapYaml(await yamlFile.readAsString());
     // `image:` 는 yaml 옆에 있는 파일을 가리킨다.
-    final imagePath =
-        '${yamlFile.parent.path}/${header.imageName}';
+    final imagePath = '${yamlFile.parent.path}/${header.imageName}';
     final imageFile = File(imagePath);
     if (!await imageFile.exists()) {
       return SlamMapStoreResult(
@@ -137,9 +136,7 @@ Future<SlamMapStoreResult> writeSlamMap({
   final yaml = slamYamlName(mapName);
   try {
     await target.create(recursive: true);
-    await File(
-      '${target.path}/$image',
-    ).writeAsBytes(_toPgm(map), flush: true);
+    await File('${target.path}/$image').writeAsBytes(_toPgm(map), flush: true);
     final stored = SlamMap(
       imageName: image,
       width: map.width,

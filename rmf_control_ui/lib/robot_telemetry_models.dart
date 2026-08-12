@@ -98,7 +98,11 @@ class RobotTelemetryStatus {
   ///
   /// 구독만 걸어 두고 값이 안 오는 것과 실제로 오는 것은 다르다. 안 오는데
   /// 온다고 표시하면 멈춘 숫자를 실시간으로 착각한다.
-  bool isLive(String robotId, {DateTime? now, Duration stale = const Duration(seconds: 3)}) {
+  bool isLive(
+    String robotId, {
+    DateTime? now,
+    Duration stale = const Duration(seconds: 3),
+  }) {
     final pose = poses[robotId];
     if (pose == null) return false;
     return (now ?? DateTime.now()).difference(pose.at) <= stale;

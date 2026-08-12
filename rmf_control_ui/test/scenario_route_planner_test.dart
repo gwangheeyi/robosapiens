@@ -48,8 +48,9 @@ List<Offset> _convexHull(Iterable<Offset> points) {
   return [...lower.take(lower.length - 1), ...upper.take(upper.length - 1)];
 }
 
-List<Offset> _outlineOf(List<WallSegment> walls) =>
-    _convexHull([for (final wall in walls) ...[wall.$1, wall.$2]]);
+List<Offset> _outlineOf(List<WallSegment> walls) => _convexHull([
+  for (final wall in walls) ...[wall.$1, wall.$2],
+]);
 
 ScenarioRoutePlanner _plannerFor(
   List<WallSegment> walls, {
@@ -143,10 +144,7 @@ void main() {
       _expectRouteIsSafe(planner, path!);
       // The straight line is blocked, so the route has to dip below the wall.
       expect(path.length, greaterThan(2));
-      expect(
-        path.map((point) => point.dy).reduce(math.max),
-        greaterThan(600),
-      );
+      expect(path.map((point) => point.dy).reduce(math.max), greaterThan(600));
     });
 
     test('refuses to link a waypoint parked against a wall', () {
@@ -158,8 +156,10 @@ void main() {
         (Offset(1000, 0), Offset(1000, 800)),
       ];
       final planner = _plannerFor(walls, clearance: clearance);
-      expect(planner.planPath(const Offset(500, 400), const Offset(300, 400)),
-          isNotNull);
+      expect(
+        planner.planPath(const Offset(500, 400), const Offset(300, 400)),
+        isNotNull,
+      );
       // 10 px from the top wall: no lane can reach it with 40 px of clearance.
       expect(
         planner.planPath(const Offset(500, 10), const Offset(300, 400)),
@@ -306,10 +306,7 @@ void main() {
       );
       for (final row in [plan.outbound, plan.returnRoute]) {
         // Centred in its half of the hall, not pinned against a wall.
-        final middle = Offset(
-          (row.first.dx + row.last.dx) / 2,
-          row.first.dy,
-        );
+        final middle = Offset((row.first.dx + row.last.dx) / 2, row.first.dy);
         expect(
           planner.pointClearance(middle),
           greaterThanOrEqualTo(clearance * 2),

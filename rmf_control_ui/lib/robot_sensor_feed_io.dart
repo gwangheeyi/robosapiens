@@ -97,26 +97,20 @@ class RobotSensorFeed {
       var camera = current.camera;
 
       final scanFile = File('$directory/$stem.scan');
-      final scanChanged = await _readIfNewer(
-        scanFile,
-        _scanStamp,
-        robotId,
-        (stamp) async {
-          scan = RobotScan.parse(await scanFile.readAsString(), stamp) ?? scan;
-        },
-      );
+      final scanChanged = await _readIfNewer(scanFile, _scanStamp, robotId, (
+        stamp,
+      ) async {
+        scan = RobotScan.parse(await scanFile.readAsString(), stamp) ?? scan;
+      });
 
       final frameFile = File('$directory/$stem.frame');
-      final frameChanged = await _readIfNewer(
-        frameFile,
-        _frameStamp,
-        robotId,
-        (stamp) async {
-          camera =
-              RobotCameraFrame.parse(await frameFile.readAsBytes(), stamp) ??
-              camera;
-        },
-      );
+      final frameChanged = await _readIfNewer(frameFile, _frameStamp, robotId, (
+        stamp,
+      ) async {
+        camera =
+            RobotCameraFrame.parse(await frameFile.readAsBytes(), stamp) ??
+            camera;
+      });
 
       if (scanChanged || frameChanged) {
         _sensors[robotId] = RobotSensors(scan: scan, camera: camera);

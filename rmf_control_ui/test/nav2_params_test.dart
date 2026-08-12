@@ -145,10 +145,7 @@ behavior_server:
       expect(result.yaml, contains('      y: -0.637600'));
       expect(result.yaml, contains('      z: 0.0'));
       expect(result.yaml, contains('      yaw: 0.000000'));
-      expect(
-        result.changes.any((change) => change.contains('버려집니다')),
-        isTrue,
-      );
+      expect(result.changes.any((change) => change.contains('버려집니다')), isTrue);
     });
 
     test('자리를 모르면 손대지 않고 경고한다', () {
@@ -197,10 +194,7 @@ some_server:
       final changes = rewrite().changes;
       expect(changes, contains('amcl → /pinky_01/amcl'));
       expect(changes, contains('scan_topic: scan → /pinky_01/scan'));
-      expect(
-        changes.any((c) => c.contains('map — 함께 씁니다')),
-        isTrue,
-      );
+      expect(changes.any((c) => c.contains('map — 함께 씁니다')), isTrue);
     });
   });
 
@@ -269,7 +263,9 @@ some_server:
       // 각도는 건드리지 않는다. 물어본 것만 고친다.
       expect(result.yaml, contains('yaw_goal_tolerance: 0.25'));
       expect(
-        result.changes.any((c) => c.contains('xy_goal_tolerance: 0.25 → 0.100')),
+        result.changes.any(
+          (c) => c.contains('xy_goal_tolerance: 0.25 → 0.100'),
+        ),
         isTrue,
       );
     });

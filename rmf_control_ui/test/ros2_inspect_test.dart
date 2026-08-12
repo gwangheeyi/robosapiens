@@ -80,14 +80,9 @@ void main() {
 /door_states [rmf_door_msgs/msg/DoorState]
 ''';
       final items = [
-        for (final line in output.split('\n'))
-          ?parseRos2ListLine(line),
+        for (final line in output.split('\n')) ?parseRos2ListLine(line),
       ];
-      expect(items.map((i) => i.name), [
-        '/bond',
-        '/clock',
-        '/door_states',
-      ]);
+      expect(items.map((i) => i.name), ['/bond', '/clock', '/door_states']);
       expect(items.last.type, 'rmf_door_msgs/msg/DoorState');
     });
   });

@@ -106,9 +106,7 @@ void main() {
 
     test('벽이 바닥을 덮는다 — 칠하는 차례가 맞다', () {
       // 벽은 바닥 다각형 안을 지난다. 바닥을 나중에 칠하면 벽이 지워진다.
-      final grid = build(
-        walls: const [((x: 2, y: -0.5), (x: 2, y: -2.5))],
-      );
+      final grid = build(walls: const [((x: 2, y: -0.5), (x: 2, y: -2.5))]);
       final col = ((2.0 - grid.originX) / grid.resolution).floor();
       final row =
           grid.height - 1 - ((-1.5 - grid.originY) / grid.resolution).floor();
@@ -147,11 +145,7 @@ void main() {
 
     test('축척이 0 이면 만들지 않는다', () {
       expect(
-        buildOccupancyGrid(
-          floorOutline: room,
-          walls: roomWalls,
-          resolution: 0,
-        ),
+        buildOccupancyGrid(floorOutline: room, walls: roomWalls, resolution: 0),
         isNull,
       );
     });
@@ -247,10 +241,7 @@ void main() {
     });
 
     test('큰 건물은 ROS 관례인 0.05m 를 넘지 않는다', () {
-      expect(
-        occupancyResolutionFor(robotWidth: .6, floorShorterSide: 50),
-        .05,
-      );
+      expect(occupancyResolutionFor(robotWidth: .6, floorShorterSide: 50), .05);
     });
 
     test('로봇 몸이 여섯 칸은 되게 한다', () {
@@ -273,10 +264,7 @@ void main() {
     test('바닥을 모르면 로봇 몸만 본다', () {
       expect(occupancyResolutionFor(robotWidth: .6), .05);
       expect(occupancyResolutionFor(robotWidth: .15), closeTo(.025, 1e-9));
-      expect(
-        occupancyResolutionFor(robotWidth: .6, floorShorterSide: 0),
-        .05,
-      );
+      expect(occupancyResolutionFor(robotWidth: .6, floorShorterSide: 0), .05);
     });
   });
 
@@ -299,7 +287,9 @@ void main() {
       // 홈1 (1.7607, −0.6376) 은 바닥 안이어야 한다.
       final col = ((1.7607 - grid.originX) / grid.resolution).floor();
       final row =
-          grid.height - 1 - ((-0.6376 - grid.originY) / grid.resolution).floor();
+          grid.height -
+          1 -
+          ((-0.6376 - grid.originY) / grid.resolution).floor();
       expect(grid.at(col, row), OccupancyGrid.free);
 
       // 예전 판이 로봇을 올리던 자리(1.642, +1.595)는 격자 밖이다.

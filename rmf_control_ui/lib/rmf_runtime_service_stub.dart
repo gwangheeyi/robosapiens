@@ -13,3 +13,8 @@ Future<RmfStopResult> stopRmfBackend({String? mapName}) async =>
     const RmfStopResult(success: false, output: '웹 빌드에서는 백엔드를 내릴 수 없습니다.');
 
 Future<List<String>> runningBackendProjects() async => const [];
+
+Future<List<String>> gazeboRunningProjects() async => const [];
+
+Future<String> sweepOrphanBackends(String rootPath) async =>
+    '웹 빌드에서는 프로세스를 쓸어낼 수 없습니다.';

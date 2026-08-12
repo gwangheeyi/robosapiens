@@ -1,0 +1,18 @@
+[gazebo-1] [1;33mWarning [Utils.cc:132][0m [/sdf/world[@name="sim_world"]/gui/window:/home/gyi/robosapiens/rmf_maps/project1/project1.world:L34]: XML Element[window], child of element[gui], not defined in SDF. Copying[window] as children of [gui].
+[gazebo-1] [WARN] [1786466426.316174442] [omx_01.gz_ros_control]: Waiting RM to load and initialize hardware...
+[gazebo-1] [WARN] [1786466426.330580684] [omx_01.controller_manager.hardware_component.system.OpenManipulatorXSystem]: Executor is not available during hardware component initialization for 'OpenManipulatorXSystem'. Skipping node creation!
+[gazebo-1] [WARN] [1786466426.330784833] [omx_01.controller_manager]: Component 'OpenManipulatorXSystem' does not have read or write statistics initialized, skipping registration.
+[fleet_manager-14] Traceback (most recent call last):
+[fleet_manager-14] AssertionError
+[ERROR] [fleet_manager-14]: process has died [pid 151182, exit code 1, cmd '/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_manager --config_file /home/gyi/robosapiens/rmf_maps/project1/project1_pinky_config.yaml --ros-args --params-file /tmp/launch_params_085422_w'].
+[fleet_adapter-15] [WARN] [1786466431.407182228] [project1_pinky_fleet_adapter]: [FleetUpdateHandle::set_retreat_to_charger_interval] This parameter is no longer being used.
+[fleet_adapter-15] Traceback (most recent call last):
+[fleet_adapter-15] KeyError: 'user'
+[fleet_adapter-15] Fatal Python error: Aborted
+[gazebo-1] [WARN] [1786466431.786404123] [omx_01.gripper_controller]: [Deprecated]: the `position_controllers/GripperActionController` and `effort_controllers::GripperActionController` controllers are replaced by 'parallel_gripper_controllers/GripperActionController' controller
+[ERROR] [fleet_adapter-15]: process has died [pid 151183, exit code -6, cmd '/home/gyi/rmf_ws/install/rmf_demos_fleet_adapter/lib/rmf_demos_fleet_adapter/fleet_adapter -c /home/gyi/robosapiens/rmf_maps/project1/project1_pinky_config.yaml -n /home/gyi/robosapiens/rmf_maps/project1/nav_graphs/0.yaml -sim --ros-args --params-file /tmp/launch_params__tzh7_1w --params-file /tmp/launch_params_t5qz50su'].
+[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+[rmf_visualization_building_systems-6] Traceback (most recent call last):
+[rmf_visualization_building_systems-6] Traceback (most recent call last):
+[rmf_visualization_building_systems-6] rclpy._rclpy_pybind11.RCLError: failed to shutdown: rcl_shutdown already called on the given context, at ./src/rcl/init.c:333
+[ERROR] [rmf_visualization_building_systems-6]: process has died [pid 151174, exit code 1, cmd '/home/gyi/rmf_ws/install/rmf_visualization_building_systems/lib/rmf_visualization_building_systems/rmf_visualization_building_systems -m L1 --ros-args --params-file /tmp/launch_params_6rj8si7z'].

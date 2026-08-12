@@ -14,8 +14,8 @@ Waypoint별 ROS 실행, 외부 설비 Handshake 및 정밀 도킹 구조는
 - **맵 작성**: 도면 위에 축척, Floor, Wall, Lane, Waypoint를 정의하고
   `building.yaml`을 만드는 과정입니다.
 - **배포**: 작성 결과를 Open-RMF가 읽을 수 있는 파일로 생성·설치하고,
-  Building Map Server와 Fleet Adapter가 새 파일을 사용하도록 재시작하는
-  과정입니다.
+  Building Map Server가 새 파일을 사용하도록 재시작하는 과정입니다. 플릿을
+  띄우는 것은 배포가 아니라 실행 스크립트(`run_<맵>.sh`)의 일입니다(§7.7).
 
 따라서 화면에 맵을 모두 그렸더라도 배포하지 않으면 실행 중인 Open-RMF와
 로봇은 새 맵을 사용하지 않습니다.
@@ -28,7 +28,6 @@ Waypoint별 ROS 실행, 외부 설비 Handshake 및 정밀 도킹 구조는
 - ROS 2 Jazzy: `/opt/ros/jazzy/setup.bash`
 - 빌드된 Open-RMF workspace: 기본값 `$HOME/rmf_ws`
 - `rmf_building_map_tools`
-- Fleet Adapter 설정 파일
 - 프로젝트 안의 `openrmf/scripts`와 `rmf_maps` 디렉터리
 
 프로젝트 루트는 다음 순서로 찾습니다.
@@ -69,6 +68,29 @@ flutter run -d linux
 Lane과 벽 여유를 검증하는 기준이므로 로봇을 Spawn할 때마다 입력하지 않습니다.
 여러 이동 로봇이 같은 맵을 사용하면 가장 크고 회전이 어려운 로봇을 기준으로
 설정합니다.
+
+### 3.2.1 벽 높이 설정
+
+도면은 위에서 내려다본 그림이라 **높이가 없습니다.** 길이는 Measurement로
+재지만 높이는 잴 데가 없으므로, 맵 관리 상단의 `벽 높이` 버튼에서 따로
+입력합니다. 지금 값이 버튼에 적혀 있습니다.
+
+넣지 않으면 traffic_editor 기본값인 **2.5m**로 섭니다. 실험실 책상 위의 0.3m
+세트를 그대로 두면 무릎 높이 칸막이가 건물 벽처럼 서서 Gazebo 화면이 실제와
+딴판이 됩니다.
+
+- 이 값은 **Gazebo 월드의 벽 모델에만** 들어갑니다. 점유격자(Nav2 지도)는 2D라
+  높이와 상관없습니다.
+- 벽이 로봇 라이다보다 낮으면(핑키는 바닥에서 약 0.102m) 라이다가 벽을
+  넘겨다봅니다. Gazebo에서는 아무것도 맞히지 못하는데 지도에는 벽이 있으므로
+  AMCL이 위치를 잃습니다. 그런 값에는 저장 전에 경고가 나옵니다.
+- 바꾼 뒤에는 **다시 배포해야** 월드에 들어갑니다. 떠 있는 Gazebo는 아직 예전
+  높이의 벽을 들고 있습니다.
+
+`building_map_generator gazebo`는 벽을 항상 2.5m로 세우므로
+(`building_map/wall.py`의 `wall_height`), 배포 스크립트가 생성된 벽 메시
+(`generated_models/*/meshes/wall_*.obj`)의 윗면을 입력한 높이로 내립니다.
+시각과 충돌이 같은 메시라 라이다가 보는 벽도 함께 낮아집니다.
 
 ### 3.3 Wall 인식 및 수정
 
@@ -567,39 +589,55 @@ openrmf/.runtime/building_map_server.log
 Map Server는 RMF 시스템과 대시보드에 Floor, Wall, Lane, Waypoint 정보를
 제공합니다.
 
-### 7.7 Fleet Adapter 재시작
+### 7.7 플릿은 배포가 띄우지 않습니다
 
-현재 사용자 계정의 RMF demo Fleet Manager와 Fleet Adapter를 종료하고 새
-`nav_graphs/0.yaml`로 시작합니다.
+배포는 지도를 만들어 깔고 Map Server에 물리는 데까지입니다. 플릿을 띄우는 것은
+실행 스크립트(`run_<맵>.sh`)의 일입니다.
 
-기본 Fleet 설정은 다음 파일입니다.
-
-```text
-$RMF_WS/install/rmf_demos/share/rmf_demos/config/office/tinyRobot_config.yaml
-```
-
-실제 로봇 Fleet 설정을 사용하려면 앱을 시작하기 전에 지정합니다.
-
-```bash
-export RMF_FLEET_CONFIG=/절대/경로/my_fleet_config.yaml
-```
-
-로그와 PID는 다음 위치에 저장됩니다.
+예전에는 이 자리에서 `rmf_demos_fleet_adapter`를 **rmf_demos의 office 데모
+설정**(`tinyRobot_config.yaml`)으로 띄웠습니다. 이 프로젝트의 로봇도 이 맵의
+설정도 아니었고, 매번 이렇게 죽었습니다.
 
 ```text
-openrmf/.runtime/fleet_adapter.pid
-openrmf/.runtime/fleet_adapter.log
+AssertionError: Failed to parse config file [.../office/tinyRobot_config.yaml]
 ```
+
+그 위에 이 어댑터는 slotcar 전용입니다. 토픽으로 도는 핑키에게는 상대가 없어서,
+설령 떴어도 배차만 받고 로봇은 가만히 있습니다. 지금은 띄우지 않습니다.
 
 ### 7.8 새 지도 수신 확인
 
-배포 스크립트는 최대 약 15초 동안 다음 조건을 확인합니다.
+배포 스크립트는 기본 25초(`MAP_READY_WAIT`) 동안 다음을 확인합니다.
 
 - `/get_building_map` ROS 2 서비스가 나타나는지
 - 새 Building Map Server 프로세스가 살아 있는지
-- 새 Fleet Adapter launch 프로세스가 살아 있는지
 
-모두 확인된 경우에만 UI를 `배포 완료` 상태로 변경합니다.
+시간으로 자르는 이유가 있습니다. 예전에는 `30번 반복 × sleep 0.5`로 15초를
+기다린다고 여겼는데, 노드가 수백 개인 그래프에서는 `ros2 service list` 한 번이
+3~5초라 실제로는 100초가 넘게 걸렸습니다. "배포가 오래 걸린다"가 그것이었습니다.
+
+확인에 실패하면 **ROS 도메인부터 짚습니다.** 그 도메인에 노드가 하나도 없으면
+도메인이 어긋난 것입니다(§7.9).
+
+이미 이 맵으로 떠 있는 시뮬레이터가 있으면, 배포가 끝날 때 다시 띄우라고
+알려 줍니다. 떠 있는 것은 **뜰 때 읽은 nav graph를 그대로 들고 있어서** 지도만
+바꾸면 로봇은 옛 지도로 다닙니다. 오류는 나지 않습니다.
+
+### 7.9 ROS 도메인
+
+같은 도메인에 있는 노드끼리만 서로를 봅니다. 어긋나면 **오류가 하나도 나지
+않으면서** 아무것도 통하지 않습니다.
+
+맵 관리 상단의 `ROS 도메인` 단추에서 정하고, 앱이 배포 스크립트와 실행
+스크립트에 그 값을 넘깁니다. 로봇 등록 창은 이 값을 기본으로 가져오며, 실물
+로봇처럼 제 도메인을 갖고 오는 대는 거기서 따로 고칩니다.
+
+**앱은 `~/.bashrc`를 읽지 않습니다.** 비대화형 셸로 스크립트를 돌리기 때문에
+`export ROS_DOMAIN_ID=22`가 적용되지 않습니다. 그래서 이 값을 프로젝트가 들고
+있어야 합니다 — 예전에는 터미널의 시뮬레이터가 22번에 있는 동안 배포만 0번에서
+혼자 돌아, 지도를 배포해도 시뮬레이터가 받지 못했습니다.
+
+배포 로그 머리에 `ROS_DOMAIN_ID: N`이 남습니다.
 
 ## 8. 환경 변수
 
@@ -607,15 +645,14 @@ openrmf/.runtime/fleet_adapter.log
 | --- | --- | --- |
 | `RMF_ROOT` | 현재 디렉터리에서 자동 탐색 | 프로젝트 루트 |
 | `RMF_WS` | `$HOME/rmf_ws` | Open-RMF workspace |
-| `RMF_FLEET_CONFIG` | Office tinyRobot 설정 | Fleet Adapter 설정 파일 |
-| `RMF_SERVER_URI` | `ws://127.0.0.1:8000/_internal` | rmf-web 내부 WebSocket |
+| `ROS_DOMAIN_ID` | 맵 관리에서 정한 값 | ROS 2 도메인. 앱이 넘깁니다 |
+| `MAP_READY_WAIT` | `25` | 새 지도 수신 확인을 기다리는 초 |
 | `RMF_USE_SIM_TIME` | `true` | ROS simulation time 사용 여부 |
 
 실제 로봇에서 실행할 때는 일반적으로 다음과 같이 설정합니다.
 
 ```bash
 export RMF_USE_SIM_TIME=false
-export RMF_FLEET_CONFIG=/path/to/production_fleet.yaml
 ```
 
 ## 9. 배포 성공 후 확인할 항목
@@ -824,7 +861,8 @@ YAML을 다시 생성합니다.
 
 ### Fleet 설정 파일을 찾을 수 없음
 
-`RMF_FLEET_CONFIG`가 올바른 절대 경로인지 확인합니다.
+플릿은 배포가 아니라 `run_<맵>.sh`가 띄웁니다(§7.7). 플릿 설정은 앱의
+`RMF 설정 내보내기`가 맵 디렉터리에 `<플릿>_config.yaml`로 냅니다.
 
 ### `/get_building_map` 서비스를 확인하지 못함
 

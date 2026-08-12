@@ -5,5 +5,4 @@
 library;
 
 export 'ros2_inspect_models.dart';
-export 'ros2_inspect_stub.dart'
-    if (dart.library.io) 'ros2_inspect_io.dart';
+export 'ros2_inspect_stub.dart' if (dart.library.io) 'ros2_inspect_io.dart';

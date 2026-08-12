@@ -143,4 +143,3 @@ String? truncateLog(String path) {
     return '$error';
   }
 }
-

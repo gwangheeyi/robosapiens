@@ -15,10 +15,9 @@ int _menuSlot(String source, String name) {
 List<String> _menuTitles(String source) {
   final start = source.indexOf('title: const [');
   final end = source.indexOf('][_selectedMenu]', start);
-  return RegExp("'([^']+)'")
-      .allMatches(source.substring(start, end))
-      .map((m) => m.group(1)!)
-      .toList();
+  return RegExp(
+    "'([^']+)'",
+  ).allMatches(source.substring(start, end)).map((m) => m.group(1)!).toList();
 }
 
 /// 로봇 메뉴에서 로봇을 등록하고, 등록한 로봇만 스폰되는지 확인한다.
@@ -37,6 +36,37 @@ void main() {
     await tester.tap(find.text('로봇'));
     await tester.pumpAndSettle();
   }
+
+  testWidgets('로봇 운영 맨 위에 차례가 보인다', (tester) async {
+    // 순서가 있는 일인데 그 차례가 화면 어디에도 없었다. `ros2 launch` 는 띄울
+    // 때 파일을 한 번만 읽으므로, 백엔드를 먼저 띄우면 그 뒤에 등록한 로봇은
+    // 월드에 없다 — 오류도 안 나고 토픽 이름만 보인다.
+    await openRobotMenu(tester);
+
+    expect(find.text('로봇을 띄우는 차례'), findsOneWidget);
+    expect(find.text('맵 불러오기'), findsOneWidget);
+    expect(find.text('로봇 등록하기'), findsOneWidget);
+    expect(find.text('RMF 설정 내보내기'), findsOneWidget);
+    expect(find.text('백엔드 실행'), findsOneWidget);
+    // 왜 순서를 지켜야 하는지도 함께 적는다. 차례만 있으면 건너뛴다.
+    expect(find.textContaining('파일을 한 번만 읽습니다'), findsOneWidget);
+
+    // 아직 아무것도 안 했으므로 첫 칸을 짚는다.
+    expect(find.textContaining('지금 할 일 — 맵 불러오기'), findsOneWidget);
+  });
+
+  testWidgets('로봇을 등록하면 차례가 다음 칸을 짚는다', (tester) async {
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+
+    // 등록 칸은 끝났다. 맵이 없는 화면이라 첫 칸이 아직 남아 있으므로 그것을
+    // 짚는다 — 지금 할 일은 늘 못 한 것 중 맨 앞이다.
+    expect(find.textContaining('1대'), findsWidgets);
+    expect(find.textContaining('지금 할 일 — 맵 불러오기'), findsOneWidget);
+  });
 
   testWidgets('로봇 메뉴에 로봇 등록이 있다', (tester) async {
     await openRobotMenu(tester);
@@ -97,7 +127,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 등록 · 1대'), findsOneWidget);
-    expect(find.textContaining('PK-01 · 핑키 1호'), findsWidgets);
+    expect(find.textContaining('PK_01 · 핑키 1호'), findsWidgets);
     // 아직 지도에 올리지는 않았다.
     expect(find.text('대기'), findsOneWidget);
 
@@ -108,6 +138,52 @@ void main() {
       ),
     );
     expect(spawn.onPressed, isNotNull);
+  });
+
+  testWidgets('ID 를 고치면 등록 카드가 새 ID 로 바뀐다', (tester) async {
+    // 지도에 올린 로봇도 작업도 등록에서 온 ID 를 들고 있다. 등록만 고치고
+    // 나머지가 옛 ID 로 남으면 서로를 못 찾아, 작업이 RMF 로 안 가고 앱
+    // 안에서만 돈다 — 화면에서는 일하는 것처럼 보이는데 로봇은 가만히 있는다.
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('PK_01 · 핑키 1호'), findsWidgets);
+
+    await tester.tap(find.byTooltip('수정').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.ancestor(of: find.text('로봇 ID'), matching: find.byType(TextField)),
+      'PK_09',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('저장'));
+    await tester.pumpAndSettle();
+
+    // 등록 카드가 새 ID 로 바뀐다. 정확히 맞춰 본다 — 운영 로그에는
+    // `로봇 등록 적용 · PK_01 · 핑키 1호` 가 그대로 남아야 한다. 지나간 기록을
+    // 나중에 고쳐 쓰면 무슨 일이 있었는지 알 수 없다.
+    expect(find.text('PK_09 · 핑키 1호'), findsWidgets);
+    expect(find.text('PK_01 · 핑키 1호'), findsNothing);
+    expect(find.textContaining('로봇 등록 적용 · PK_01'), findsWidgets);
+  });
+
+  testWidgets('ID 칸에 하이픈을 치면 밑줄로 바뀐다', (tester) async {
+    // RMF 가 ID 로 토픽을 만드는데 하이픈은 ROS 2 토픽 이름에 못 들어간다.
+    // 막기만 하면 사람이 무엇을 쳐야 하는지 알아내야 하므로 그 자리에서 고친다.
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+
+    final idField = find.ancestor(
+      of: find.text('로봇 ID'),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(idField, 'PK-07');
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(idField).controller!.text, 'PK_07');
   });
 
   testWidgets('등록은 됐지만 맵이 없으면 무엇이 없는지 팝업으로 알린다', (tester) async {
@@ -185,7 +261,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 등록 · 1대'), findsOneWidget);
-    expect(find.textContaining('OMX-01'), findsWidgets);
+    expect(find.textContaining('OMX_01'), findsWidgets);
     expect(find.textContaining('open_manipulator_x'), findsWidgets);
   });
 
@@ -240,6 +316,38 @@ void main() {
     // 등록 카드와 위쪽 요약 모두 출처를 드러낸다.
     expect(find.textContaining('앱 Mock 데이터'), findsWidgets);
     expect(find.textContaining('앱 Mock 1'), findsOneWidget);
+  });
+
+  /// 등록 창의 `저장` 단추를 집는다.
+  FilledButton saveButton(WidgetTester tester) => tester.widget<FilledButton>(
+    find.ancestor(of: find.text('저장'), matching: find.byType(FilledButton)),
+  );
+
+  testWidgets('Gazebo 로 올릴 로봇은 자리가 비면 무엇이 빈지 알린다', (tester) async {
+    // 자리를 안 고르면 spawn 좌표가 없어 지도 원점(0,0)에 놓인다. 그렇게
+    // 등록된 이동 로봇과 설치 로봇이 원점에 겹치자, 메시끼리 파고들어 Gazebo 가
+    // 스폰 4초 만에 죽었다(collision_trimesh_trimesh.cpp:285, exit 134). 그
+    // 뒤로 RMF 와 Nav2 만 살아남아 토픽 이름은 있는데 값은 하나도 안 왔다.
+    //
+    // 여기에는 맵이 없어 고를 자리 자체가 없다. 그때는 막지 않고 알린다 —
+    // 막으면 맵을 그리기 전에는 로봇을 한 대도 등록할 수 없다. 정작 중요한
+    // "고를 자리가 있는데 안 골랐다" 는 robot_station_rule_test 에서 본다.
+    await openRobotMenu(tester);
+    await tester.tap(find.text('로봇 등록'));
+    await tester.pumpAndSettle();
+
+    // 기본값인 앱 Mock 은 Gazebo 에 올라가지 않으므로 자리 이야기가 없다.
+    expect(saveButton(tester).onPressed, isNotNull);
+    expect(find.textContaining('지도 원점'), findsNothing);
+
+    await tester.tap(find.text('값의 출처'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gazebo 시뮬레이션').last);
+    await tester.pumpAndSettle();
+
+    // 올릴 로봇이 되는 순간 자리가 필요해진다.
+    expect(find.textContaining('지도 원점(0,0)에 놓입니다'), findsOneWidget);
+    expect(saveButton(tester).onPressed, isNotNull);
   });
 
   testWidgets('자리 맞추기가 로봇 메뉴에 있다', (tester) async {
@@ -383,11 +491,7 @@ void main() {
       final button = tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, '그리드맵 만들기'),
       );
-      expect(
-        button.onPressed,
-        isNull,
-        reason: '준비가 안 된 채로 누르면 실패 팝업만 뜬다',
-      );
+      expect(button.onPressed, isNull, reason: '준비가 안 된 채로 누르면 실패 팝업만 뜬다');
     });
 
     test('못 만들 때는 흐린 단추만 두지 않고 이유를 적는다', () {
@@ -426,16 +530,27 @@ void main() {
       // 줄마다 SelectableText 를 두면 그 줄 안에서만 골라진다. 여러 줄을
       // 끌려면 SelectionArea 로 감싸고 안은 보통 Text 여야 한다.
       final source = File('lib/main.dart').readAsStringSync();
-      final page = source.substring(source.indexOf('class _ProjectLogPageState'));
+      final page = source.substring(
+        source.indexOf('class _ProjectLogPageState'),
+      );
       expect(page, contains('SelectionArea('));
-      expect(page, isNot(contains('child: SelectableText(\n                                    line.text')));
+      expect(
+        page,
+        isNot(
+          contains(
+            'child: SelectableText(\n                                    line.text',
+          ),
+        ),
+      );
     });
 
     test('화면 밖 줄도 선택에 들어간다', () {
       // ListView.builder 는 화면 밖 줄을 만들지 않아 스크롤한 부분이 선택에서
       // 빠진다. 50줄뿐이니 통째로 둔다.
       final source = File('lib/main.dart').readAsStringSync();
-      final page = source.substring(source.indexOf('class _ProjectLogPageState'));
+      final page = source.substring(
+        source.indexOf('class _ProjectLogPageState'),
+      );
       // 주석에는 남아 있으므로 실제로 쓰는지를 본다.
       expect(page, isNot(contains('child: ListView.builder(')));
       expect(page, contains('for (final line in tail.lines)'));

@@ -52,7 +52,7 @@ def report(**fields):
 
 # RMF 가 아는 이름 -> ROS 네임스페이스.
 ROBOT_NAMESPACES = {
-    'PK-01': 'pinky_01',
+    'PK_03': 'pinky_03',
 }
 
 # 건물 층 이름. nav graph 의 level 과 같아야 한다.

@@ -83,16 +83,12 @@ class _Ros2InspectPageState extends State<Ros2InspectPage>
     _load(_kind);
   }
 
-  Future<void> _openDetail(Ros2Kind kind, Ros2Item item) => showMovableDialog<
-    void
-  >(
-    context: context,
-    builder: (_) => _Ros2DetailDialog(
-      kind: kind,
-      item: item,
-      request: _request,
-    ),
-  );
+  Future<void> _openDetail(Ros2Kind kind, Ros2Item item) =>
+      showMovableDialog<void>(
+        context: context,
+        builder: (_) =>
+            _Ros2DetailDialog(kind: kind, item: item, request: _request),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -190,9 +186,8 @@ class _Ros2InspectPageState extends State<Ros2InspectPage>
                     DropdownMenuItem(value: 5, child: Text('5초')),
                     DropdownMenuItem(value: 10, child: Text('10초')),
                   ],
-                  onChanged: (value) => _changeProbe(
-                    () => _spinSeconds = value ?? _spinSeconds,
-                  ),
+                  onChanged: (value) =>
+                      _changeProbe(() => _spinSeconds = value ?? _spinSeconds),
                 ),
               ),
             if (_kind.includeHiddenFlag != null)
@@ -257,9 +252,7 @@ class _Ros2InspectPageState extends State<Ros2InspectPage>
         child: Padding(
           padding: const EdgeInsets.all(32),
           child: Text(
-            result.items.isEmpty
-                ? result.message
-                : '걸러낸 결과가 없습니다.',
+            result.items.isEmpty ? result.message : '걸러낸 결과가 없습니다.',
             textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
           ),
@@ -312,9 +305,9 @@ class _CommandChip extends StatelessWidget {
       onPressed: () async {
         await Clipboard.setData(ClipboardData(text: command));
         if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('명령을 복사했습니다.')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('명령을 복사했습니다.')));
       },
       icon: const Icon(Icons.terminal, size: 16),
       label: const Text('명령 복사'),

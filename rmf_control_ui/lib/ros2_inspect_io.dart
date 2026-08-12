@@ -82,9 +82,7 @@ Future<Ros2ListResult> ros2List(
       return Ros2ListResult(
         success: false,
         items: const [],
-        message: error.isEmpty
-            ? 'ros2 를 실행하지 못했습니다. ROS 환경을 확인하세요.'
-            : error,
+        message: error.isEmpty ? 'ros2 를 실행하지 못했습니다. ROS 환경을 확인하세요.' : error,
         command: command,
       );
     }

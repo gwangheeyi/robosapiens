@@ -73,20 +73,21 @@ class RmfTaskBridge {
     );
     try {
       await payload.writeAsString(requestJson);
-      final result = await Process.run('bash', [
-        '-lc',
-        _withRosEnvironment(
-          'exec python3 ${_quote(script.path)} --submit ${_quote(payload.path)}',
-        ),
-      ]).timeout(
-        const Duration(seconds: 30),
-        onTimeout: () => ProcessResult(
-          0,
-          1,
-          '',
-          '작업 다리가 30초 안에 끝나지 않았습니다. ROS 환경을 확인하세요.',
-        ),
-      );
+      final result =
+          await Process.run('bash', [
+            '-lc',
+            _withRosEnvironment(
+              'exec python3 ${_quote(script.path)} --submit ${_quote(payload.path)}',
+            ),
+          ]).timeout(
+            const Duration(seconds: 30),
+            onTimeout: () => ProcessResult(
+              0,
+              1,
+              '',
+              '작업 다리가 30초 안에 끝나지 않았습니다. ROS 환경을 확인하세요.',
+            ),
+          );
       final output = '${result.stdout}'.trim().isEmpty
           ? '${result.stderr}'
           : '${result.stdout}';

@@ -53,8 +53,7 @@ extension SpawnIssueLabel on SpawnIssue {
     SpawnIssue.noStation =>
       '이 로봇이 선다고 적힌 Waypoint 를 지도에서 못 찾았습니다. '
           '이름이 바뀌었거나 지워졌습니다. 로봇 등록에서 자리를 다시 골라 주세요.',
-    SpawnIssue.noCoordinate =>
-      '아직 설 자리를 안 정했습니다. 로봇 등록에서 자리를 골라 주세요.',
+    SpawnIssue.noCoordinate => '아직 설 자리를 안 정했습니다. 로봇 등록에서 자리를 골라 주세요.',
   };
 
   /// 지도 기준으로 다시 맞추면 풀리는가.

@@ -10,24 +10,40 @@ import 'package:rmf_control_ui/rmf_project_config.dart';
 
 void main() {
   const pinky = RmfProjectRobot(
-    robotId: 'PK-01', displayName: '핑키 1호', model: 'PINKY-GZ',
-    gzName: 'pinky_01', zones: ['ambient'],
-    dataSource: RobotDataSource.gazebo, chargerWaypoint: '충전1',
-    spawnX: 1.76, spawnY: -0.64,
+    robotId: 'PK-01',
+    displayName: '핑키 1호',
+    model: 'PINKY-GZ',
+    gzName: 'pinky_01',
+    zones: ['ambient'],
+    dataSource: RobotDataSource.gazebo,
+    chargerWaypoint: '충전1',
+    spawnX: 1.76,
+    spawnY: -0.64,
   );
   const pinkyTwo = RmfProjectRobot(
-    robotId: 'PK-02', displayName: '핑키 2호', model: 'PINKY-GZ',
-    gzName: 'pinky_02', zones: ['ambient'],
-    dataSource: RobotDataSource.gazebo, chargerWaypoint: '충전2',
+    robotId: 'PK-02',
+    displayName: '핑키 2호',
+    model: 'PINKY-GZ',
+    gzName: 'pinky_02',
+    zones: ['ambient'],
+    dataSource: RobotDataSource.gazebo,
+    chargerWaypoint: '충전2',
   );
   const omx = RmfProjectRobot(
-    robotId: 'OMX-01', displayName: '매니퓰레이터 1호',
-    model: 'open_manipulator_x', kind: RmfRobotKind.workcell,
-    gzName: 'omx_01', zones: [], dataSource: RobotDataSource.gazebo,
+    robotId: 'OMX-01',
+    displayName: '매니퓰레이터 1호',
+    model: 'open_manipulator_x',
+    kind: RmfRobotKind.workcell,
+    gzName: 'omx_01',
+    zones: [],
+    dataSource: RobotDataSource.gazebo,
   );
   const mock = RmfProjectRobot(
-    robotId: 'MK-01', displayName: '연습용', model: 'PINKY-GZ',
-    gzName: 'mock_01', zones: ['ambient'],
+    robotId: 'MK-01',
+    displayName: '연습용',
+    model: 'PINKY-GZ',
+    gzName: 'mock_01',
+    zones: ['ambient'],
   );
 
   final script = buildNav2FleetAdapterScript(
@@ -92,7 +108,10 @@ void main() {
     test('진행 상황을 앱이 읽을 수 있게 낸다', () {
       // RMF 의 작업 상태는 rmf-web 웹소켓으로만 나간다. 웹서버를 안 띄우면
       // 어디에서도 볼 수 없다. 목적지를 하나씩 받는 것은 이 어댑터다.
-      expect(script, contains("PROGRESS_TOPIC = 'gwanghee_pinky/task_progress'"));
+      expect(
+        script,
+        contains("PROGRESS_TOPIC = 'gwanghee_pinky/task_progress'"),
+      );
       expect(script, contains("event='navigate_start'"));
       expect(script, contains("event='navigate_done'"));
       expect(script, contains("event='action_start'"));

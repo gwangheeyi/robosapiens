@@ -145,10 +145,7 @@ void main() {
 
     test('이미 맞으면 받은 목록을 그대로 돌려준다', () {
       final good = [
-        pinky.withSpawn(
-          spawnX: 1.760744309942079,
-          spawnY: -0.6375845964639578,
-        ),
+        pinky.withSpawn(spawnX: 1.760744309942079, spawnY: -0.6375845964639578),
       ];
       expect(
         identical(

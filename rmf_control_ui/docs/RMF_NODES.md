@@ -219,6 +219,34 @@ Gazebo 로 돌릴 때는 시뮬레이터의 토픽을 이 REST 뒤에 붙입니�
 **`headless:=true` 로 띄워도 이 노드들은 올라옵니다.** RViz 창만 안 뜹니다.
 관제를 앱에서 보므로 창은 필요 없지만, 노드가 도는 비용은 그대로 듭니다.
 
+### 시각화 노드는 스스로 아는 것이 없습니다
+
+이 7개는 **받아서 그리기만** 합니다. 먹이를 주는 것은 fleet adapter 입니다.
+
+| 그리는 것 | 그리는 노드 | 먹이 토픽 | 그 토픽을 내는 것 |
+|---|---|---|---|
+| 경로 (Lane·Waypoint) | `navgraph_visualizer` | `/nav_graphs` | fleet adapter |
+| 로봇 | `fleet_states_visualizer` | `/fleet_states` | fleet adapter |
+| 도면 | `floorplan_visualizer` | `/floorplan` | `building_map_server` |
+
+RMF 안에서 `/nav_graphs` 와 `/fleet_states` 를 내는 것은 fleet adapter
+(`FleetUpdateHandle`) **하나뿐**입니다. 그래서 어댑터가 죽으면 RViz 는 도면만
+남고 **경로와 로봇이 통째로 사라집니다.** 시각화 노드는 멀쩡히 떠 있고 오류도
+안 납니다 — 줄 것이 없어서 안 그릴 뿐입니다.
+
+확인은 발행자 수로 합니다. 0 이면 어댑터가 죽은 것입니다.
+
+```bash
+ros2 topic info /nav_graphs      # Publisher count: 1 이라야 합니다
+ros2 topic info /fleet_states
+```
+
+어댑터는 Nav2 20여 개 노드와 같이 뜨는 중에 `add_easy_fleet` 안에서
+SIGSEGV(-11) 로 죽은 적이 있습니다. 한가할 때 같은 명령을 손으로 돌리면 멀쩡히
+뜹니다. 부하가 걸린 순간에만 나는 rmf_adapter 쪽 경합이라 고칠 수 없어서,
+`<맵>_nav2.launch.xml` 에서 `respawn="true"` (5초 간격, 최대 5회)로 다시
+띄웁니다.
+
 ## 7. 무엇이 없으면 무엇이 안 되나
 
 | 안 뜬 노드 | 겉으로 보이는 증상 |

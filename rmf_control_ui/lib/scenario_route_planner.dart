@@ -50,8 +50,7 @@ class ScenarioCorridorSection {
   bool get isDoubled => outbound.length >= 2 && inbound.length >= 2;
 
   /// The chains this stretch contributes, whichever shape it took.
-  List<List<Offset>> get chains =>
-      isDoubled ? [outbound, inbound] : [shared];
+  List<List<Offset>> get chains => isDoubled ? [outbound, inbound] : [shared];
 }
 
 /// Plans scenario draft routes that keep a fixed clearance from every wall.
@@ -133,10 +132,8 @@ class ScenarioRoutePlanner {
       _inGrid(column, row) &&
       _component[_index(column, row)] == _mainComponent;
 
-  Offset center(int column, int row) => Offset(
-    origin.dx + (column + .5) * cell,
-    origin.dy + (row + .5) * cell,
-  );
+  Offset center(int column, int row) =>
+      Offset(origin.dx + (column + .5) * cell, origin.dy + (row + .5) * cell);
 
   (int, int) cellOf(Offset point) => (
     ((point.dx - origin.dx) / cell).floor(),
@@ -270,7 +267,11 @@ class ScenarioRoutePlanner {
       }
     }
     var inside = false;
-    for (var i = 0, j = floorOutline.length - 1; i < floorOutline.length; j = i++) {
+    for (
+      var i = 0, j = floorOutline.length - 1;
+      i < floorOutline.length;
+      j = i++
+    ) {
       final a = floorOutline[i];
       final b = floorOutline[j];
       final crosses =
@@ -423,7 +424,8 @@ class ScenarioRoutePlanner {
       if (scale <= .1) return null;
       chain.add(
         run[index] +
-            direction * (lanePairOffsetPixels / scale).clamp(
+            direction *
+                (lanePairOffsetPixels / scale).clamp(
                   lanePairOffsetPixels,
                   lanePairOffsetPixels * 2,
                 ) *
@@ -585,11 +587,7 @@ class ScenarioRoutePlanner {
       final perRow = math.max(2, (waypointTarget / 2).ceil());
       return ScenarioRoutePlan(
         outbound: _rowPoints(top.$1, top.$2, perRow),
-        returnRoute: _rowPoints(
-          bottom.$1,
-          bottom.$2,
-          perRow,
-        ).reversed.toList(),
+        returnRoute: _rowPoints(bottom.$1, bottom.$2, perRow).reversed.toList(),
         separateRoutes: true,
       );
     }

@@ -122,8 +122,14 @@ void main() {
       // 착각한다.
       final old = RobotScan.parse('0,1,0.05,12\n1,2\n', at)!;
       final sensors = RobotSensors(scan: old);
-      expect(sensors.scanIsLive(now: at.add(const Duration(seconds: 1))), isTrue);
-      expect(sensors.scanIsLive(now: at.add(const Duration(seconds: 9))), isFalse);
+      expect(
+        sensors.scanIsLive(now: at.add(const Duration(seconds: 1))),
+        isTrue,
+      );
+      expect(
+        sensors.scanIsLive(now: at.add(const Duration(seconds: 9))),
+        isFalse,
+      );
     });
 
     test('없으면 오고 있지 않다', () {

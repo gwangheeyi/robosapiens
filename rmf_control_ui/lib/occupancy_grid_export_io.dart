@@ -11,6 +11,8 @@ import 'dart:io';
 
 import 'occupancy_grid.dart';
 import 'rmf_config_export.dart' show safeMapDirectoryName;
+import 'slam_map.dart'
+    show MapImageFormat, mapImageFormat, parsePgm, parseSlamMapYaml;
 
 class OccupancyGridExportResult {
   const OccupancyGridExportResult({
@@ -47,6 +49,72 @@ Directory? _findProjectRoot() {
 /// SLAM 으로 뜬 지도와 나란히 두는 곳.
 const String occupancyGridDirectoryName = 'nav2_map';
 
+/// 도면에서 만든 격자가 쓰는 파일 이름. SLAM 지도(`<맵>_slam.*`)와 겹치지 않는다.
+String occupancyGridImageName(String mapName) =>
+    '${safeMapDirectoryName(mapName)}.pgm';
+String occupancyGridYamlName(String mapName) =>
+    '${safeMapDirectoryName(mapName)}.yaml';
+
+/// 프로젝트의 `nav2_map/` 에 저장된 격자를 읽는다.
+class StoredOccupancyGrid {
+  const StoredOccupancyGrid({
+    required this.grid,
+    required this.directory,
+    required this.savedAt,
+  });
+
+  final OccupancyGrid grid;
+
+  /// 읽어 온 디렉터리(`.../nav2_map`).
+  final String directory;
+
+  /// 이 격자를 마지막으로 쓴 때. 도면을 그 뒤에 고쳤을 수 있으므로 화면에
+  /// 같이 보여 준다.
+  final DateTime savedAt;
+}
+
+/// 이 프로젝트에 넣어 둔 격자를 읽는다. 없거나 못 읽으면 null.
+///
+/// 프로젝트를 열 때 부른다. 격자는 프로젝트에 딸린 산출물이라 열면 그때 만든
+/// 것이 그대로 보여야 한다 — 예전에는 화면이 비어 있어서, 이미 구워 배포까지
+/// 한 지도를 사람이 다시 구웠다.
+///
+/// 못 읽는 것은 조용히 넘긴다. 여기서 실패해도 `그리드맵 만들기` 로 다시 만들
+/// 수 있으므로, 프로젝트 열기를 막을 이유가 없다.
+Future<StoredOccupancyGrid?> loadStoredOccupancyGrid(String mapName) async {
+  final root = _findProjectRoot();
+  if (root == null) return null;
+  final safeName = safeMapDirectoryName(mapName);
+  final directory =
+      '${root.path}/rmf_maps/$safeName/$occupancyGridDirectoryName';
+  final yamlFile = File('$directory/${occupancyGridYamlName(mapName)}');
+  if (!await yamlFile.exists()) return null;
+  try {
+    final header = parseSlamMapYaml(await yamlFile.readAsString());
+    final imageFile = File('$directory/${header.imageName}');
+    if (!await imageFile.exists()) return null;
+    final bytes = await imageFile.readAsBytes();
+    // 우리가 쓴 것은 늘 PGM 이다. 다른 형식이면 사람이 갈아 끼운 것이라
+    // 도면에서 만든 격자로 다루지 않는다.
+    if (mapImageFormat(bytes) != MapImageFormat.pgm) return null;
+    final image = parsePgm(bytes);
+    return StoredOccupancyGrid(
+      grid: OccupancyGrid(
+        width: image.width,
+        height: image.height,
+        resolution: header.resolution,
+        originX: header.originX,
+        originY: header.originY,
+        cells: image.cells,
+      ),
+      directory: directory,
+      savedAt: await yamlFile.lastModified(),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /// [grid] 를 `rmf_maps/<맵>/nav2_map/` 에 `.pgm` 과 `.yaml` 로 쓴다.
 ///
 /// [note] 는 `.yaml` 맨 위에 주석으로 들어간다. 파일만 보고 이게 어디서 나온
@@ -73,10 +141,11 @@ Future<OccupancyGridExportResult> exportOccupancyGrid({
   );
   try {
     await target.create(recursive: true);
-    final image = '$safeName.pgm';
+    final image = occupancyGridImageName(mapName);
+    final yaml = occupancyGridYamlName(mapName);
     await File('${target.path}/$image').writeAsBytes(grid.toPgm(), flush: true);
     await File(
-      '${target.path}/$safeName.yaml',
+      '${target.path}/$yaml',
     ).writeAsString(grid.toYaml(imageName: image, note: note), flush: true);
     await File(
       '${target.path}/README.md',
@@ -84,7 +153,7 @@ Future<OccupancyGridExportResult> exportOccupancyGrid({
     return OccupancyGridExportResult(
       success: true,
       directory: target.path,
-      written: [image, '$safeName.yaml', 'README.md'],
+      written: [image, yaml, 'README.md'],
       message:
           '${grid.width}×${grid.height} 격자(${grid.resolution}m/칸)를 '
           '${target.path} 에 썼습니다.',
@@ -100,7 +169,8 @@ Future<OccupancyGridExportResult> exportOccupancyGrid({
 }
 
 /// 이 디렉터리가 무엇이고 어떻게 쓰는지.
-String buildOccupancyGridReadme(String mapName, OccupancyGrid grid) => '''
+String buildOccupancyGridReadme(String mapName, OccupancyGrid grid) =>
+    '''
 # $mapName · Nav2 지도
 
 `rmf_control_ui` 가 **도면에서 만들었습니다.** 손으로 고쳐도 다음 내보내기 때

@@ -1,5 +1,6 @@
-# Runtime deployment logs written by openrmf/scripts/deploy_map.sh
-/map-deploy-*.log
+# Runtime deployment logs written by openrmf/scripts/deploy_map.sh.
+# 최근 3개만 남고 하루 지난 것은 스크립트가 스스로 지운다.
+/log/
 
 # 벤더 ROS 패키지. 각 상위 저장소에서 받는다.
 # rmf_control_ui/docs/PINKY_FLEET_INTEGRATION.md 참고.

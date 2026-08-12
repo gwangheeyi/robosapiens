@@ -187,7 +187,8 @@ Nav2ParamsRewrite rewriteNav2Params({
     // ⓪ costmap 의 static_layer 는 지도를 제가 따로 구독한다. 벤더 파일에는 그
     //    토픽이 안 적혀 있어서 기본값 `map` 을 쓰는데, 네임스페이스 아래에서는
     //    `/pinky_01/map` 이 되어 아무것도 안 온다. 여기서 넣어 준다.
-    if (key == 'plugin' && _unquote(_split(rest).value).endsWith('StaticLayer')) {
+    if (key == 'plugin' &&
+        _unquote(_split(rest).value).endsWith('StaticLayer')) {
       // 형제 키와 같은 칸에 둔다. 한 칸이라도 어긋나면 다른 항목이 된다.
       out
         ..add(line)
@@ -208,9 +209,7 @@ Nav2ParamsRewrite rewriteNav2Params({
     if (key == 'initial_pose') {
       if (initialX == null || initialY == null) {
         out.add(line);
-        warnings.add(
-          'initial_pose 를 채울 자리를 모릅니다. AMCL 이 원점에서 시작합니다.',
-        );
+        warnings.add('initial_pose 를 채울 자리를 모릅니다. AMCL 이 원점에서 시작합니다.');
         continue;
       }
       out

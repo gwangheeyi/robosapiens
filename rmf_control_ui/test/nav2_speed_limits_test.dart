@@ -72,8 +72,10 @@ void main() {
     });
 
     test('목록이 아닌 max_accel 은 무시한다', () {
-      expect(parseVendorSpeedLimits('    max_accel: 2.5').linearAcceleration,
-          isNull);
+      expect(
+        parseVendorSpeedLimits('    max_accel: 2.5').linearAcceleration,
+        isNull,
+      );
     });
   });
 }

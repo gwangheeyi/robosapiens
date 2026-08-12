@@ -34,13 +34,13 @@ rmf_fleet:
   responsive_wait: True
   reassign_task_interval: 120
   robots:
-    PK-01:
+    PK_03:
         charger: "충전1"
 
 # 설치 로봇은 플릿에 넣지 않는다. 배차 대상이 아니다.
 # 이 프로젝트의 설치 로봇:
-#   OMX-02 · 매니퓰레이터 2호 (open_manipulator_x) @ OMX1
-#   OMX-03 · 매니퓰레이터 3호 (open_manipulator_x) @ OMX2
+#   OMX-01 · 매니퓰레이터 1호 (omx_f) @ OMX1
+#   OMX-02 · 매니퓰레이터 2호 (omx_f) @ OMX2
 
 fleet_manager:
   ip: "127.0.0.1"

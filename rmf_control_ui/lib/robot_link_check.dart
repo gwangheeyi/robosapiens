@@ -177,11 +177,7 @@ List<RobotLink> checkRobotLinks(RobotLinkFacts facts) {
     }
     if (good) {
       links.add(
-        RobotLink(
-          title: title,
-          state: RobotLinkState.ok,
-          detail: okDetail,
-        ),
+        RobotLink(title: title, state: RobotLinkState.ok, detail: okDetail),
       );
       return;
     }
@@ -218,8 +214,7 @@ List<RobotLink> checkRobotLinks(RobotLinkFacts facts) {
     okDetail: '월드가 떠 있습니다.',
     // 인자는 먼저 계산된다. 끊기지 않았을 때도 이 값이 만들어지므로 `!` 를
     // 쓰면 안 된다.
-    badDetail:
-        facts.staleBackendDetail ?? '월드가 안 떠 있습니다. 올릴 곳이 없습니다.',
+    badDetail: facts.staleBackendDetail ?? '월드가 안 떠 있습니다. 올릴 곳이 없습니다.',
     action: RobotLinkAction.startBackend,
   );
 
@@ -270,9 +265,7 @@ RobotLink? firstBrokenLink(List<RobotLink> links) =>
 String robotLinkSummary(List<RobotLink> links) {
   final broken = firstBrokenLink(links);
   if (broken != null) return '${broken.title}에서 끊겼습니다 — ${broken.detail}';
-  final unknown = links.where(
-    (link) => link.state == RobotLinkState.unknown,
-  );
+  final unknown = links.where((link) => link.state == RobotLinkState.unknown);
   if (unknown.isNotEmpty) return '아직 다 확인하지 못했습니다.';
   return '다 이어져 있습니다.';
 }

@@ -149,13 +149,16 @@ class RobotSensors {
   ///
   /// 파일이 남아 있는 것과 값이 오는 것은 다르다. relay 가 죽어도 파일은
   /// 그대로라, 멈춘 그림을 실시간으로 착각하기 쉽다.
-  bool scanIsLive({DateTime? now, Duration stale = const Duration(seconds: 3)}) =>
-      scan != null && (now ?? DateTime.now()).difference(scan!.at) <= stale;
+  bool scanIsLive({
+    DateTime? now,
+    Duration stale = const Duration(seconds: 3),
+  }) => scan != null && (now ?? DateTime.now()).difference(scan!.at) <= stale;
 
   bool cameraIsLive({
     DateTime? now,
     Duration stale = const Duration(seconds: 3),
-  }) => camera != null && (now ?? DateTime.now()).difference(camera!.at) <= stale;
+  }) =>
+      camera != null && (now ?? DateTime.now()).difference(camera!.at) <= stale;
 }
 
 /// 로봇이 주고받는 토픽 하나.

@@ -6,6 +6,8 @@
 /// 여기서 만든 결과는 `map_project_files` 에 프로젝트별로 보관한다.
 library;
 
+import 'dart:math' as math;
+
 import 'nav2_params.dart' show nav2MapTopic, nav2MapTopicName;
 import 'rmf_task_request.dart' show rmfArmLoadAction;
 
@@ -78,11 +80,40 @@ enum RmfRobotKind {
   /// 이 로봇이 설 자리를 고를 Waypoint 카테고리.
   String get waypointCategory => this == RmfRobotKind.mobile ? '충전' : '설비';
 
-  static RmfRobotKind parse(String? value) => value == 'workcell'
-      ? RmfRobotKind.workcell
-      : RmfRobotKind.mobile;
+  static RmfRobotKind parse(String? value) =>
+      value == 'workcell' ? RmfRobotKind.workcell : RmfRobotKind.mobile;
 
   String get storageValue => name;
+}
+
+/// ROS 2 는 도메인으로 망을 가른다. 안 정하면 0 이다.
+///
+/// 같은 도메인에 있는 노드끼리만 서로를 본다. 이것이 어긋나면 **아무 오류도
+/// 안 나면서** 아무것도 안 통한다 — 지도를 배포해도 시뮬레이터가 못 받고,
+/// 로봇을 띄워도 관제가 못 본다. 그래서 프로젝트가 이 값을 들고 있어야 한다.
+const int defaultRosDomainId = 0;
+
+/// 여기까지는 어느 환경에서나 안전하다. 그 위는 OS 의 임시 포트 범위와 겹칠 수
+/// 있어 DDS 가 포트를 못 잡는 일이 생긴다.
+const int safeMaxRosDomainId = 101;
+
+/// ROS 2 가 받는 가장 큰 도메인 번호.
+const int maxRosDomainId = 232;
+
+/// 이 번호를 도메인으로 쓸 수 있나. 쓸 수 있으면 null, 아니면 까닭.
+String? rosDomainIdError(int? domainId) {
+  if (domainId == null) return '0 부터 $maxRosDomainId 사이의 정수를 넣으세요.';
+  if (domainId < 0 || domainId > maxRosDomainId) {
+    return '0 부터 $maxRosDomainId 사이여야 합니다.';
+  }
+  return null;
+}
+
+/// 받기는 하지만 알려 줘야 하는 번호인가. 문제없으면 null.
+String? rosDomainIdWarning(int domainId) {
+  if (domainId <= safeMaxRosDomainId) return null;
+  return '$safeMaxRosDomainId 을 넘는 도메인은 OS 의 임시 포트 범위와 겹칠 수 '
+      '있습니다. DDS 가 포트를 못 잡으면 노드가 서로를 못 봅니다.';
 }
 
 /// 프로젝트에 속한 로봇 한 대.
@@ -99,7 +130,17 @@ class RmfProjectRobot {
     this.spawnX,
     this.spawnY,
     this.spawnHeading = 0,
+    this.rosDomainId,
   });
+
+  /// 이 로봇만 다른 ROS 도메인을 쓸 때 그 번호. null 이면 프로젝트 기본값.
+  ///
+  /// 실물 로봇은 제 도메인을 갖고 오는 일이 흔하다. 한 대만 다른 망에 있어도
+  /// 나머지를 따라 옮길 이유는 없으므로 대마다 따로 둔다.
+  ///
+  /// **Gazebo 로봇은 시뮬레이터와 같은 도메인이어야 한다.** 다르면 다리가
+  /// 걸어 놓은 토픽에 값이 하나도 안 온다 — 오류는 안 난다.
+  final int? rosDomainId;
 
   final String robotId;
   final String displayName;
@@ -147,6 +188,7 @@ class RmfProjectRobot {
     spawnX: spawnX,
     spawnY: spawnY,
     spawnHeading: spawnHeading ?? this.spawnHeading,
+    rosDomainId: rosDomainId,
   );
 
   bool get isMobile => kind == RmfRobotKind.mobile;
@@ -169,6 +211,7 @@ class RmfProjectRobot {
     'spawnX': spawnX,
     'spawnY': spawnY,
     'spawnHeading': spawnHeading,
+    'rosDomainId': rosDomainId,
   };
 
   static RmfProjectRobot fromJson(Map<String, dynamic> data) => RmfProjectRobot(
@@ -186,6 +229,7 @@ class RmfProjectRobot {
     spawnX: (data['spawnX'] as num?)?.toDouble(),
     spawnY: (data['spawnY'] as num?)?.toDouble(),
     spawnHeading: (data['spawnHeading'] as num?)?.toDouble() ?? 0,
+    rosDomainId: (data['rosDomainId'] as num?)?.toInt(),
   );
 }
 
@@ -238,7 +282,22 @@ class RmfFleetSettings {
     this.fleetManagerIp = '127.0.0.1',
     this.fleetManagerPort = 22011,
     this.goalToleranceMeters,
+    this.manualFootprintRadius,
+    this.manualVicinityRadius,
   });
+
+  /// 사람이 직접 넣은 충돌 반경 [m]. null 이면 로봇 폭의 절반으로 계산한다.
+  ///
+  /// 계산값은 로봇을 원으로 본 어림이다. 적재물이나 범퍼가 튀어나오면 실제
+  /// 몸이 그 원보다 크고, RMF 는 그만큼을 모르는 채로 두 로봇을 붙인다.
+  /// 재서 넣을 수 있어야 한다.
+  final double? manualFootprintRadius;
+
+  /// 사람이 직접 넣은 접근 금지 반경 [m]. null 이면 충돌 반경 + 위치 오차 여유.
+  ///
+  /// RMF 는 이 원 안에 다른 로봇을 안 들인다. 좁은 통로에서 이 값이 크면 서로
+  /// 비켜 주기만 하다 아무도 못 지나가고, 작으면 실제로 닿는다.
+  final double? manualVicinityRadius;
 
   /// Nav2 가 "도착했다" 고 인정하는 반경 [m].
   ///
@@ -276,12 +335,17 @@ class RmfFleetSettings {
   /// 맵의 로봇 안전 기준에서 프로필 반경을 가져온 설정.
   ///
   /// 사용자가 이미 입력한 값을 다시 묻지 않는다. 두 곳에 따로 적으면 어긋난다.
+  ///
+  /// 다만 **직접 넣은 값이 있으면 그것이 이긴다.** 로봇을 원으로 보는 계산은
+  /// 어림이라, 실제 몸이 원이 아니거나 적재물이 튀어나오면 사람이 재서 넣는
+  /// 편이 맞다. 그때 폭을 고쳤다고 넣은 값을 덮어쓰면 안 된다.
   RmfFleetSettings withRobotSafety({
     required double widthMeters,
     required double localizationMarginMeters,
   }) => copyWith(
-    footprintRadius: widthMeters / 2,
-    vicinityRadius: widthMeters / 2 + localizationMarginMeters,
+    footprintRadius: manualFootprintRadius ?? widthMeters / 2,
+    vicinityRadius:
+        manualVicinityRadius ?? widthMeters / 2 + localizationMarginMeters,
   );
 
   RmfFleetSettings copyWith({
@@ -294,10 +358,19 @@ class RmfFleetSettings {
     double? vicinityRadius,
     double? goalToleranceMeters,
     bool clearGoalTolerance = false,
+    double? manualFootprintRadius,
+    double? manualVicinityRadius,
+    bool clearManualProfile = false,
   }) => RmfFleetSettings(
     goalToleranceMeters: clearGoalTolerance
         ? null
         : goalToleranceMeters ?? this.goalToleranceMeters,
+    manualFootprintRadius: clearManualProfile
+        ? null
+        : manualFootprintRadius ?? this.manualFootprintRadius,
+    manualVicinityRadius: clearManualProfile
+        ? null
+        : manualVicinityRadius ?? this.manualVicinityRadius,
     fleetName: fleetName ?? this.fleetName,
     linearVelocity: linearVelocity ?? this.linearVelocity,
     linearAcceleration: linearAcceleration ?? this.linearAcceleration,
@@ -342,6 +415,10 @@ class RmfFleetSettings {
     'fleetManagerIp': fleetManagerIp,
     'fleetManagerPort': fleetManagerPort,
     'goalToleranceMeters': goalToleranceMeters,
+    // 비어 있으면 로봇 폭에서 계산한다는 뜻이다. 계산값을 적어 두면 나중에
+    // 폭을 고쳐도 옛 값이 남아, 왜 안 따라오는지 알 수 없다.
+    'manualFootprintRadius': manualFootprintRadius,
+    'manualVicinityRadius': manualVicinityRadius,
   };
 
   static RmfFleetSettings fromJson(Map<String, dynamic> d) {
@@ -377,6 +454,8 @@ class RmfFleetSettings {
       fleetManagerPort:
           (d['fleetManagerPort'] as num?)?.toInt() ?? base.fleetManagerPort,
       goalToleranceMeters: (d['goalToleranceMeters'] as num?)?.toDouble(),
+      manualFootprintRadius: (d['manualFootprintRadius'] as num?)?.toDouble(),
+      manualVicinityRadius: (d['manualVicinityRadius'] as num?)?.toDouble(),
     );
   }
 }
@@ -563,6 +642,13 @@ String buildProjectLaunchXml({
   // rmf-web 을 안 띄우면 비운다. 주소를 넘기면 RMF 가 1초마다 영원히 다시
   // 붙으려 하고, 그 여덟 줄이 로그를 채워 정작 볼 것을 덮는다.
   String? serverUri,
+  // RViz 가 nav graph 를 그리는 굵기. 맵 크기에 견줘 정한다 — 자세한 것은
+  // [navGraphLaneWidth].
+  double laneWidth = defaultNavGraphLaneWidth,
+  // Waypoint 원과 이름표를 Lane 굵기의 몇 배로 그릴까. 상류 기본값은 1.3·0.7
+  // 인데, 작은 도면에서는 Waypoint 원끼리 겹쳐서 1.0·0.6 으로 줄였다.
+  double waypointScale = 1.0,
+  double textScale = .6,
 }) {
   final usesNav2 = projectUsesNav2(robots);
   final buffer = StringBuffer()
@@ -590,17 +676,93 @@ String buildProjectLaunchXml({
     )
     ..writeln('  <arg name="map_dir" default="$mapDirectory"/>')
     ..writeln('')
-    ..writeln('  <!-- RMF core. 이것이 먼저 떠야 fleet adapter 가 붙는다. -->')
+    ..writeln('  <!--')
+    ..writeln('    RMF core. 이것이 먼저 떠야 fleet adapter 가 붙는다.')
+    ..writeln('')
+    ..writeln('    rmf_demos 의 common.launch.xml 을 `include` 하지 않고 같은')
+    ..writeln('    내용을 여기 편다. 그 파일이 시각화에 Lane 굵기·글자 크기를')
+    ..writeln('    넘기지 않기 때문이다 — 인자로도, set_parameter 로도 밖에서')
+    ..writeln('    못 바꾼다(launch_ros 는 노드에 직접 준 param 이 이기게 한다).')
+    ..writeln('    기본값 0.5m 는 창고용이라, 2~3m 짜리 도면에서는 Lane 하나가')
+    ..writeln('    건물 폭의 1/5 이 되어 스무 개가 서로 겹쳐 덩어리로 보였다.')
+    ..writeln('')
+    ..writeln('    RMF 가 올라가면 이 부분을 그쪽과 맞춰야 한다. 원본:')
+    ..writeln('    \$(find-pkg-share rmf_demos)/common.launch.xml')
+    ..writeln('  -->')
+    ..writeln('  <arg name="initial_map" default="L1"/>')
+    ..writeln('  <arg name="lane_width" default="${_n(laneWidth)}"/>')
+    ..writeln('  <arg name="waypoint_scale" default="${_n(waypointScale)}"/>')
+    ..writeln('  <arg name="text_scale" default="${_n(textScale)}"/>')
+    ..writeln('')
+    ..writeln('  <node pkg="rmf_traffic_ros2" exec="rmf_traffic_schedule"')
+    ..writeln('        name="rmf_traffic_schedule_primary" output="both">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('  <node pkg="rmf_traffic_ros2" exec="rmf_traffic_blockade"')
+    ..writeln('        output="both">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('  <node pkg="rmf_building_map_tools" exec="building_map_server"')
+    ..writeln('        args="\$(var map_dir)/$buildingYamlName">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('')
+    ..writeln('  <!-- 지도·nav graph·로봇을 마커로 내는 시각화 노드들.')
+    ..writeln('')
+    ..writeln('       <group> 으로 감싸야 한다. XML launch 의 <include> 는')
+    ..writeln('       스스로 범위를 만들지 않아서, 여기 준 <arg> 가 바깥으로')
+    ..writeln('       샌다. 안 감쌌더니 아래 headless 가 true 로 덮여 RViz 가')
+    ..writeln('       아예 안 떴다 — 오류는 한 줄도 안 났다. -->')
+    ..writeln('  <group>')
     ..writeln(
-      '  <include file="\$(find-pkg-share rmf_demos)/common.launch.xml">',
+      '    <include file="\$(find-pkg-share rmf_visualization)'
+      '/visualization.launch.xml">',
     )
-    ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
-    ..writeln('    <arg name="headless" value="\$(var headless)"/>')
+    ..writeln('      <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('      <arg name="map_name" value="\$(var initial_map)"/>')
+    ..writeln('      <arg name="lane_width" value="\$(var lane_width)"/>')
     ..writeln(
-      '    <arg name="config_file" value="\$(var map_dir)/$buildingYamlName"/>',
+      '      <arg name="waypoint_scale" value="\$(var waypoint_scale)"/>',
     )
-    ..writeln('    <arg name="server_uri" value="\$(var server_uri)"/>')
-    ..writeln('  </include>')
+    ..writeln('      <arg name="text_scale" value="\$(var text_scale)"/>')
+    // 이 include 안의 rviz2 는 띄우지 않는다. 그 설정(rmf.rviz)은 office 데모를
+    // 보게 맞춰져 있어 우리 도면이 화면 밖이고, 바닥 그림 토픽 이름도 어긋나
+    // 있다 — 그래서 창은 뜨는데 까맣다. 아래에서 우리 설정으로 띄운다.
+    ..writeln('      <arg name="headless" value="true"/>')
+    ..writeln('    </include>')
+    ..writeln('  </group>')
+    ..writeln('')
+    ..writeln('  <node pkg="rmf_fleet_adapter" exec="door_supervisor">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('  <node pkg="rmf_fleet_adapter" exec="lift_supervisor">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('  </node>')
+    ..writeln('  <node pkg="rmf_fleet_adapter" exec="mutex_group_supervisor"/>')
+    ..writeln('  <node pkg="rmf_task_ros2" exec="rmf_task_dispatcher"')
+    ..writeln('        output="screen">')
+    ..writeln('    <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('    <param name="bidding_time_window" value="2.0"/>')
+    ..writeln('    <param name="use_unique_hex_string_with_task_id"')
+    ..writeln('           value="true"/>')
+    ..writeln('    <param name="server_uri" value="\$(var server_uri)"/>')
+    ..writeln('  </node>')
+    ..writeln('')
+    ..writeln('  <!--')
+    ..writeln('    이 맵을 볼 RViz.')
+    ..writeln('')
+    ..writeln('    설정은 이 프로젝트의 $mapName.rviz 다 — 카메라가 이 도면을')
+    ..writeln('    보고, 바닥 그림은 /floorplan 에서 받는다.')
+    ..writeln('')
+    ..writeln('    use_sim_time 을 반드시 넘긴다. Gazebo 시간으로 찍힌 라이다와')
+    ..writeln('    TF 를 벽시계로 보면 시각이 안 맞아 아무것도 안 그려진다.')
+    ..writeln('  -->')
+    ..writeln('  <group unless="\$(var headless)">')
+    ..writeln('    <node pkg="rviz2" exec="rviz2" name="rviz2" output="both"')
+    ..writeln('          args="-d \$(var map_dir)/$mapName.rviz">')
+    ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('    </node>')
+    ..writeln('  </group>')
     ..writeln('');
   if (usesNav2) {
     buffer
@@ -622,22 +784,26 @@ String buildProjectLaunchXml({
     return buffer.toString();
   }
   buffer
-    ..writeln('  <!-- 이 프로젝트의 플릿. 설정과 nav graph 모두 이 맵의 것이다. -->')
+    ..writeln('  <!-- 이 프로젝트의 플릿. 설정과 nav graph 모두 이 맵의 것이다.')
+    ..writeln('       <group> 으로 감싼다 — include 의 <arg> 는 감싸지 않으면')
+    ..writeln('       바깥으로 샌다. -->')
+    ..writeln('  <group>')
     ..writeln(
-      '  <include file="\$(find-pkg-share rmf_demos_fleet_adapter)'
+      '    <include file="\$(find-pkg-share rmf_demos_fleet_adapter)'
       '/launch/fleet_adapter.launch.xml">',
     )
-    ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+    ..writeln('      <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
     ..writeln(
-      '    <arg name="config_file" value="\$(var map_dir)'
+      '      <arg name="config_file" value="\$(var map_dir)'
       '/${fleetName}_config.yaml"/>',
     )
     ..writeln(
-      '    <arg name="nav_graph_file" '
+      '      <arg name="nav_graph_file" '
       'value="\$(var map_dir)/nav_graphs/0.yaml"/>',
     )
-    ..writeln('    <arg name="server_uri" value="\$(var server_uri)"/>')
-    ..writeln('  </include>')
+    ..writeln('      <arg name="server_uri" value="\$(var server_uri)"/>')
+    ..writeln('    </include>')
+    ..writeln('  </group>')
     ..writeln('</launch>');
   return buffer.toString();
 }
@@ -851,16 +1017,19 @@ String buildProjectBringupXml({
     ..writeln('       헤드리스 렌더링이 있어야 라이다·카메라가 돈다.')
     ..writeln('       gpu_lidar 는 GPU 로 거리를 재므로 그릴 자리가 없으면')
     ..writeln('       아무것도 발행하지 않는다. 오류도 나지 않는다. -->')
+    // include 의 <arg> 는 <group> 으로 감싸지 않으면 바깥으로 샌다.
+    ..writeln('  <group>')
     ..writeln(
-      '  <include file="\$(find-pkg-share ros_gz_sim)'
+      '    <include file="\$(find-pkg-share ros_gz_sim)'
       '/launch/gz_sim.launch.py">',
     )
     ..writeln(
-      '    <arg name="gz_args"'
+      '      <arg name="gz_args"'
       ' value="-r -s -v2 --headless-rendering \$(var world)"/>',
     )
-    ..writeln('    <arg name="on_exit_shutdown" value="true"/>')
-    ..writeln('  </include>')
+    ..writeln('      <arg name="on_exit_shutdown" value="true"/>')
+    ..writeln('    </include>')
+    ..writeln('  </group>')
     ..writeln('  <group unless="\$(var headless)">')
     ..writeln(
       '    <include file="\$(find-pkg-share ros_gz_sim)'
@@ -954,6 +1123,7 @@ String buildProjectRunScript({
   String rmfWorkspace = r'$HOME/rmf_ws',
   String pinkyWorkspace = r'$HOME/robosapiens/pinky_pro',
   String manipulatorWorkspace = r'$HOME/robosapiens/open_manipulator',
+  int rosDomainId = defaultRosDomainId,
 }) =>
     '''#!/usr/bin/env bash
 # $mapName 프로젝트 실행.
@@ -965,6 +1135,14 @@ String buildProjectRunScript({
 # 있는다.
 set -euo pipefail
 
+# ROS 도메인. 같은 도메인끼리만 서로를 본다.
+#
+# 이것이 어긋나면 **아무 오류도 안 나면서** 아무것도 안 통한다. 앱이 띄운
+# 것과 터미널에서 띄운 것이 서로를 못 보던 일이 그래서 생겼다 — 앱은
+# 비대화형 셸로 스크립트를 돌리므로 ~/.bashrc 의 export 를 못 읽는다.
+# 그래서 맵 프로젝트가 정한 값을 여기 박아 둔다.
+export ROS_DOMAIN_ID="\${ROS_DOMAIN_ID:-$rosDomainId}"
+
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 ROS_SETUP="\${ROS_SETUP:-$rosSetup}"
 RMF_WS="\${RMF_WS:-$rmfWorkspace}"
@@ -973,7 +1151,38 @@ OMX_WS="\${OMX_WS:-$manipulatorWorkspace}"
 
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="${_requiredPackages(robots).join(' ')}"
-HEADLESS="\${HEADLESS:-true}"
+
+# 창을 띄울지 말지. Gazebo 와 RViz 를 따로 고른다.
+#
+# 예전에는 HEADLESS 하나가 둘을 함께 껐다 켰다 했다. 그런데 보고 싶은 것이
+# 서로 다르다 — 로봇이 물리적으로 어디 있는지는 Gazebo 창에서, 계획한 경로와
+# 코스트맵은 RViz 에서 본다. 하나만 보려고 둘을 다 띄우면 이 컴퓨터에서
+# 프레임이 떨어져 시뮬레이션까지 느려졌다.
+#
+# 둘 다 안 띄워도 라이다·카메라는 돈다. Gazebo 서버는 언제나 헤드리스
+# 렌더링으로 뜨기 때문이다. 창은 보는 용도일 뿐 데이터와는 무관하다.
+#
+# 앱이 실행할 때 환경 변수로 넘긴다. 터미널에서 직접 띄울 때는 이렇게 쓴다:
+#   GAZEBO_GUI=true RVIZ=true ./run_$mapName.sh
+is_true() {
+  case "\${1,,}" in
+    true|1|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# HEADLESS 만 준 예전 방식도 그대로 받는다. 따로 준 값이 있으면 그쪽이 이긴다.
+if is_true "\${HEADLESS:-true}"; then
+  GUI_DEFAULT=false
+else
+  GUI_DEFAULT=true
+fi
+GAZEBO_GUI="\${GAZEBO_GUI:-\$GUI_DEFAULT}"
+RVIZ="\${RVIZ:-\$GUI_DEFAULT}"
+
+# launch 인자는 반대말(headless)이다. 여기서 한 번만 뒤집는다.
+if is_true "\$GAZEBO_GUI"; then GAZEBO_HEADLESS=false; else GAZEBO_HEADLESS=true; fi
+if is_true "\$RVIZ"; then RVIZ_HEADLESS=false; else RVIZ_HEADLESS=true; fi
 
 BUILDING_YAML="\$MAP_DIR/$mapName.building.yaml"
 NAV_GRAPH="\$MAP_DIR/nav_graphs/0.yaml"
@@ -1069,6 +1278,9 @@ function fold() {
 END { fold() }
 ') 2>&1
 echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
+# 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
+# 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
+echo "Gazebo 창: \$GAZEBO_GUI · RViz: \$RVIZ · ROS_DOMAIN_ID: \$ROS_DOMAIN_ID"
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
 # 앱이 detached 로 띄우면 이 셸의 PID 는 그룹 리더가 아니므로, PID 가 아니라
@@ -1155,27 +1367,211 @@ PYTHON
 }
 ensure_world_sensors "\$MAP_DIR/$mapName.world"
 
+# 월드의 충돌 검출기를 bullet 으로 바꾼다.
+#
+# 기본값은 ODE 인데, 메시끼리 닿으면 무너진다. 우리 로봇은 충돌 도형이 전부
+# 메시(핑키의 base_link.stl 따위)이고, 건물 바닥·벽도 배포가 만든 메시
+# (generated_models/<맵>_L1/meshes/floor_1.obj)다. 그래서 로봇이 바닥에 서 있는
+# 것만으로도 메시 대 메시다.
+#
+# 로봇 두 대가 겹쳐 놓이면 접점이 폭발해 여기서 죽는다:
+#
+#   ODE Message 2: Trimesh-trimesh contact hash table bucket overflow   (103번)
+#   ODE INTERNAL ERROR 1: assertion "keyindex < lastkeyindex || ..." failed
+#     in UpdateArbitraryContactInNode() [collision_trimesh_trimesh.cpp:285]
+#   [ERROR] [gazebo-1]: process has died ... exit code 134
+#
+# 자리를 안 고른 로봇은 전부 지도 원점에 놓이므로 두 대만 있어도 이렇게 된다.
+# 실제로 스폰 4초 만에 Gazebo 가 죽었고, 그 뒤 RMF 와 Nav2 만 살아남아 토픽
+# 이름은 있는데 값은 하나도 안 오는 상태로 30분을 돌았다.
+#
+# bullet 은 같은 조건에서 경고 한 줄 없이 버틴다. 주행 거리도 ODE 와 같다
+# (0.2 m/s 로 4초에 ODE 0.811 m · bullet 0.807 m). 자리를 겹쳐 놓는 것 자체는
+# 여전히 잘못이지만, 그것 때문에 시뮬레이터가 죽지는 않게 한다.
+#
+# 배포할 때마다 월드가 다시 만들어지므로 여기서 매번 채운다. 이미 있으면 넘어간다.
+ensure_world_collision_detector() {
+  local world="\$1"
+  [ -f "\$world" ] || return 0
+  python3 - "\$world" <<'PYTHON'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as handle:
+    world = handle.read()
+
+if '<collision_detector>' in world:
+    print('월드에 충돌 검출기가 이미 지정돼 있습니다.')
+    sys.exit(0)
+
+block = ('      <dart>\\n'
+         '        <collision_detector>bullet</collision_detector>\\n'
+         '      </dart>\\n')
+
+opening = re.search(r'<physics\\b[^>]*?(/?)>', world)
+if opening is None:
+    # 월드를 못 고쳐도 실행은 계속한다. 여기서 멈추면 다른 로봇까지 안 뜬다.
+    sys.stderr.write('<physics> 가 없어 충돌 검출기를 못 넣었습니다.\\n')
+    sys.exit(0)
+
+if opening.group(1):
+    # <physics ... /> 처럼 닫혀 있으면 열어서 넣는다.
+    head = opening.group(0)[:-2].rstrip() + '>\\n'
+    world = (world[:opening.start()] + head + block + '    </physics>'
+             + world[opening.end():])
+else:
+    end = world.find('</physics>', opening.end())
+    if end < 0:
+        sys.stderr.write('</physics> 가 없어 충돌 검출기를 못 넣었습니다.\\n')
+        sys.exit(0)
+    # 닫는 태그가 놓인 줄의 맨 앞에서 자른다. 태그 바로 앞에서 자르면 그 줄의
+    # 들여쓰기가 우리 블록 앞에 붙고 </physics> 가 1열로 밀린다.
+    head = world.rfind('\\n', 0, end) + 1
+    if world[head:end].strip():
+        head = end
+    world = world[:head] + block + world[head:]
+
+with open(path, 'w', encoding='utf-8') as handle:
+    handle.write(world)
+print('월드의 충돌 검출기를 bullet 으로 바꿨습니다.')
+PYTHON
+}
+ensure_world_collision_detector "\$MAP_DIR/$mapName.world"
+
+# Gazebo 가 실제로 떴는지 보고 다음 단계로 넘어간다.
+#
+# 예전에는 `&` 로 띄우고 `sleep 12` 만 했다. 뜬 줄 알고 넘어간 것이지 확인한
+# 것이 아니었다. 그래서 Gazebo 가 스폰 4초 만에 죽었는데도(ODE 메시 충돌
+# 어서션, exit 134) RMF 와 Nav2 가 그 시체 위에 올라갔다. 프로세스는 15개가
+# 30분 넘게 살아 있었고 토픽 이름도 다 나왔지만 발행자는 0개였다 — 이름은
+# 다리와 구독자가 남긴 것이다. 무엇이 잘못됐는지 어디에도 안 보였다.
+#
+# 두 가지를 본다. 월드를 물고 있는 `gz sim` 이 있는가, 그리고 /clock 이 나오는가.
+# 떠 있는 것과 물리가 도는 것은 다르다. use_sim_time 을 쓰는 RMF 노드는 /clock
+# 이 없으면 시간이 멈춘 줄 알고 그대로 멈춰 있는다.
+GAZEBO_WAIT="\${GAZEBO_WAIT:-90}"
+wait_for_gazebo() {
+  local world="\$1"
+  local deadline=\$((SECONDS + GAZEBO_WAIT))
+  while ((SECONDS < deadline)); do
+    if pgrep -u "\$(id -u)" -f "gz sim.*\$world" >/dev/null 2>&1 &&
+       timeout 5 ros2 topic echo /clock --once >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 ${projectUsesNav2(robots) ? '''
 echo "[1/3] Gazebo bringup"
-ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
-sleep 12
+ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$GAZEBO_HEADLESS" &
+if ! wait_for_gazebo "\$MAP_DIR/$mapName.world"; then
+  echo "" >&2
+  echo "Gazebo 가 \$GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 그 둘은" >&2
+  echo "토픽 이름만 만들어 놓고 값은 하나도 못 받습니다." >&2
+  echo "" >&2
+  echo "무엇이 있었는지: \$LOG_FILE" >&2
+  echo "오류만 모은 것: \$ERR_FILE" >&2
+  exit 1
+fi
 
 echo "[2/3] Open-RMF"
-ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS" &
+ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$RVIZ_HEADLESS" &
 sleep 12
+
+# RMF↔Nav2 어댑터가 뜨고 계속 살아 있는지 지켜본다.
+#
+# 이 어댑터가 죽어도 Gazebo·Nav2·RMF core 는 그대로 남는다. 그래서 토픽은 잘
+# 오는데 주문만 안 먹는 상태가 된다. 화면에는 `RMF 가 답하지 않았습니다` 로만
+# 보이고 무엇이 죽었는지는 어디에도 안 나왔다.
+#
+# 실제로 로봇 ID 에 하이픈이 있어(`PK-01`) 어댑터가 로봇을 플릿에 붙이는 순간
+# 죽은 일이 있다. RMF 가 `rmf/dynamic_event/begin/<플릿>/<로봇>` 토픽을 만드는데
+# ROS 2 토픽 이름에는 하이픈을 못 쓰기 때문이다.
+ADAPTER_WAIT="\${ADAPTER_WAIT:-90}"
+# launch 의 respawn_delay 보다 넉넉해야 한다. 짧으면 다시 뜨는 중인 것을 두고
+# 죽었다고 알린다.
+ADAPTER_RESPAWN_WAIT="\${ADAPTER_RESPAWN_WAIT:-30}"
+watch_fleet_adapter() {
+  local pattern="\$MAP_DIR/${mapName}_nav2_adapter.py"
+  local deadline=\$((SECONDS + ADAPTER_WAIT))
+  while ((SECONDS < deadline)); do
+    pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1; then
+    echo "" >&2
+    echo "RMF↔Nav2 어댑터가 \$ADAPTER_WAIT 초 안에 뜨지 않았습니다." >&2
+    echo "RMF 는 주문을 받아도 배차할 플릿이 없습니다." >&2
+    echo "오류만 모은 것: \$ERR_FILE" >&2
+    return
+  fi
+  echo "RMF↔Nav2 어댑터가 떴습니다."
+  # 뜬 다음 죽는 것이 진짜 문제다. 계속 지켜본다.
+  #
+  # 다만 launch 가 respawn 으로 다시 띄운다. 사라진 그 순간에 죽었다고 알리면
+  # 5초 뒤 멀쩡히 살아난 것을 두고 사람을 뛰게 만든다. 돌아오기를 기다렸다가,
+  # 정말 안 돌아올 때만 알린다.
+  while :; do
+    if pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1; then
+      sleep 5
+      continue
+    fi
+    local back=\$((SECONDS + ADAPTER_RESPAWN_WAIT))
+    local revived=0
+    while ((SECONDS < back)); do
+      sleep 2
+      if pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1; then
+        revived=1
+        break
+      fi
+    done
+    if ((revived)); then
+      echo "RMF↔Nav2 어댑터가 죽었다가 다시 떴습니다." >&2
+      continue
+    fi
+    break
+  done
+  echo "" >&2
+  echo "RMF↔Nav2 어댑터가 죽었고 다시 뜨지도 않았습니다." >&2
+  echo "이제 RMF 는 주문을 받지 못하고, RViz 에서는 경로와 로봇이 사라집니다 —" >&2
+  echo "그 둘을 내는 /nav_graphs · /fleet_states 가 이 어댑터에서만 나옵니다." >&2
+  echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다. 그래서 겉으로는" >&2
+  echo "멀쩡해 보입니다." >&2
+  echo "" >&2
+  echo "가장 흔한 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
+  echo "(rmf/dynamic_event/begin/<플릿>/<로봇>) 영문·숫자·밑줄만 쓸 수 있습니다." >&2
+  echo "하이픈이 들어간 ID 는 로봇을 플릿에 붙이는 순간 어댑터를 죽입니다." >&2
+  echo "" >&2
+  echo "무엇이 있었는지: \$LOG_FILE" >&2
+  echo "오류만 모은 것: \$ERR_FILE" >&2
+}
 
 # Nav2 와 RMF↔Nav2 어댑터. 이것이 없으면 RMF 가 배차해도 로봇이 안 움직인다 —
 # /<로봇>/cmd_vel 에 발행하는 것이 아무것도 없기 때문이다.
 #
 # RMF core 다음이라야 한다. 어댑터는 뜨자마자 schedule node 를 찾는다.
 echo "[3/3] Nav2 와 RMF 어댑터"
+watch_fleet_adapter &
 ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml"''' : '''
 echo "[1/2] Gazebo bringup"
-ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$HEADLESS" &
-sleep 12
+ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$GAZEBO_HEADLESS" &
+if ! wait_for_gazebo "\$MAP_DIR/$mapName.world"; then
+  echo "" >&2
+  echo "Gazebo 가 \$GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+  echo "Open-RMF 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 토픽 이름만" >&2
+  echo "만들어 놓고 값은 하나도 못 받습니다." >&2
+  echo "" >&2
+  echo "무엇이 있었는지: \$LOG_FILE" >&2
+  echo "오류만 모은 것: \$ERR_FILE" >&2
+  exit 1
+fi
 
 echo "[2/2] Open-RMF"
-ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$HEADLESS"'''}
+ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$RVIZ_HEADLESS"'''}
 ''';
 
 /// 이 프로젝트로 띄운 것을 내리는 셸 스크립트.
@@ -1363,6 +1759,7 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('  혼자 시험하려면 map_server 를 먼저 띄우고 이것을 돌린다.')
     ..writeln('-->')
     ..writeln('<launch>')
+    ..write(_robotDomainEnv(robot))
     ..writeln('  <arg name="use_sim_time" default="true"/>')
     ..writeln('  <group>')
     // 한 번만 건다. 아래 노드에는 네임스페이스를 따로 걸지 않는다.
@@ -1371,9 +1768,7 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('    <!-- 라이다로 제 위치를 잡는다. map → ${robot.gzName}/odom -->')
     ..writeln('    <node pkg="nav2_amcl" exec="amcl" name="amcl"')
     ..writeln('          output="screen">')
-    ..writeln(
-      '      <param from="\$(dirname)/nav2_params.yaml"/>',
-    )
+    ..writeln('      <param from="\$(dirname)/nav2_params.yaml"/>')
     ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
     // 지도는 로봇마다 가르지 않는다. `/map` 은 RMF 의 building_map_server 가
     // 이미 쓰고 있어서 한 토픽에 형식이 둘 올라간다.
@@ -1439,7 +1834,8 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
 String buildTaskBridgeScript({
   required String mapName,
   required String fleetName,
-}) => '''#!/usr/bin/env python3
+}) =>
+    '''#!/usr/bin/env python3
 """$mapName 프로젝트의 작업 다리 — 앱이 만든 작업을 RMF 에 넣는다.
 
 rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다음 저장 때
@@ -2174,21 +2570,41 @@ String buildProjectNav2LaunchXml({
     buffer
       ..writeln('')
       ..writeln('  <!-- ${robot.robotId} · ${robot.displayName} -->')
+      // include 의 <arg> 는 <group> 으로 감싸지 않으면 바깥으로 샌다.
+      ..writeln('  <group>')
       ..writeln(
-        '  <include file="\$(var map_dir)/'
+        '    <include file="\$(var map_dir)/'
         '${robotDirectoryName(robot)}/nav2.launch.xml">',
       )
-      ..writeln('    <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
-      ..writeln('  </include>');
+      ..writeln('      <arg name="use_sim_time" value="\$(var use_sim_time)"/>')
+      ..writeln('    </include>')
+      ..writeln('  </group>');
   }
   if (navigating.isNotEmpty && fleetName != null) {
     buffer
       ..writeln('')
       ..writeln('  <!-- RMF 와 Nav2 를 잇는다. 이것이 없으면 RMF 가 배차해도')
-      ..writeln('       로봇이 안 움직인다. -->')
+      ..writeln('       로봇이 안 움직인다.')
+      ..writeln('')
+      ..writeln('       RViz 도 이것에 매달려 있다. 경로(Lane·Waypoint)를 그리는')
+      ..writeln('       /nav_graphs 와 로봇을 그리는 /fleet_states 를 내는 것이')
+      ..writeln('       RMF 안에서 이 어댑터(FleetUpdateHandle) 하나뿐이다.')
+      ..writeln('       이것이 죽으면 RViz 는 도면만 남고 텅 빈다.')
+      ..writeln('')
+      ..writeln('       respawn 을 켠 이유 — Nav2 20여 개 노드와 같이 뜨는')
+      ..writeln('       중에 add_easy_fleet 안에서 SIGSEGV 로 죽는 일이 있다.')
+      ..writeln('       한가할 때 같은 명령을 다시 돌리면 멀쩡히 뜬다. 부하가')
+      ..writeln('       걸린 순간에만 나는 rmf_adapter 쪽 경합이라 우리가 고칠')
+      ..writeln('       수 없다. 대신 다시 띄운다 — 죽은 채로 두면 오류 한 줄')
+      ..writeln('       없이 RViz 만 비어 보인다. -->')
       // ROS 패키지에 든 노드가 아니라 이 프로젝트가 만든 스크립트라 <node> 로는
       // 못 돌린다. <executable> 은 아무 명령이나 그대로 띄운다.
+      //
+      // respawn_max_retries 를 둔다. 무한히 되살리면 설정이 잘못돼 늘 죽는
+      // 경우에 로그가 같은 역추적으로 덮여 진짜 원인이 묻힌다.
       ..writeln('  <executable output="screen"')
+      ..writeln('              respawn="true" respawn_delay="5.0"')
+      ..writeln('              respawn_max_retries="5"')
       ..writeln(
         '              cmd="python3 \$(var map_dir)/${mapName}_nav2_adapter.py'
         ' -c \$(var map_dir)/${fleetName}_config.yaml'
@@ -2282,6 +2698,290 @@ String robotDirectoryName(RmfProjectRobot robot) {
   return 'robots/${safe.isEmpty ? robot.gzName : safe}';
 }
 
+/// 이 맵이 RMF 월드에서 차지하는 범위(m). RViz 카메라를 여기에 맞춘다.
+typedef RmfMapExtent = ({double minX, double maxX, double minY, double maxY});
+
+/// RViz 가 nav graph 를 그리는 굵기의 기본값(m). `visualization.launch.xml` 값.
+///
+/// RMF 데모(창고 수십 미터)에 맞춘 값이다. 2~3m 짜리 실험실 도면에서는 Lane
+/// 하나가 건물 폭의 1/5 이라, 스무 개가 겹쳐 덩어리로 보인다.
+const double defaultNavGraphLaneWidth = .5;
+
+/// 시각화 노드가 받는 가장 가는 Lane(m).
+///
+/// `NavGraphVisualizer.cpp` 가 `std::max(0.1, lane_width)` 로 깎는다. 더 가늘게
+/// 적어도 0.1m 로 그려지므로, 화면에서 먼저 알려 준다.
+const double minNavGraphLaneWidth = .1;
+
+/// nav graph 를 얼마나 굵게 그릴까(m).
+///
+/// [manual] 이 있으면 그 값이다. 없으면 **로봇 폭**으로 그린다 — "이 Lane 을 이
+/// 로봇이 지난다" 가 그림 그대로 보이는 것이 어림값보다 낫다.
+double navGraphLaneWidth({required double robotWidthMeters, double? manual}) {
+  final value = manual ?? robotWidthMeters;
+  if (!value.isFinite || value <= 0) return defaultNavGraphLaneWidth;
+  return value.clamp(minNavGraphLaneWidth, 2.0);
+}
+
+/// 바닥 그림이 오는 곳. `rmf_visualization_floorplans` 가 내는 이름이다.
+///
+/// **밑줄이 없다.** RMF 가 함께 주는 `rmf.rviz` 는 `/floor_plan` 을 보고 있어서
+/// 도면이 영영 안 온다. 우리가 설정을 따로 만드는 첫 번째 이유다.
+const String rmfFloorplanTopic = '/floorplan';
+
+/// 이 프로젝트를 볼 RViz 설정.
+///
+/// RMF 가 함께 주는 `rmf_visualization_schedule/config/rmf.rviz` 를 그대로 쓰면
+/// **검은 화면**이 된다. 그 파일은 office 데모를 보라고 맞춰 둔 것이다.
+///
+///   1. 카메라가 (17.7, -20.0) 을 가운데 놓고 폭 27m 를 본다. 우리 도면은
+///      원점 둘레 두세 미터라 통째로 화면 밖이다.
+///   2. 바닥 그림을 `/floor_plan` 에서 찾는다. 실제로 오는 이름은
+///      `/floorplan` 이다(밑줄 없음). 이름이 어긋나 도면이 안 온다.
+///   3. Grid 가 꺼져 있다. 그래서 카메라가 엉뚱한 데를 봐도 아무 단서가 없이
+///      그냥 까맣다 — 고장 난 것과 구분되지 않는다.
+///
+/// 그래서 맵마다 우리가 만든다. 카메라는 이 맵의 [extent] 가운데를 보고, 토픽
+/// 이름은 실제로 오는 것을 쓰고, Grid 는 켜 둔다.
+///
+/// [extent] 가 없으면(축척이나 Floor 가 아직 없으면) 원점 둘레를 넓게 본다.
+String buildProjectRvizConfig({
+  required String mapName,
+  List<RmfProjectRobot> robots = const [],
+  RmfMapExtent? extent,
+}) {
+  // 카메라가 볼 창 크기를 이만큼으로 잡고 배율을 정한다. 실제 창이 이보다
+  // 크면 더 넓게 보일 뿐이라 지도가 잘리지 않는다.
+  const viewportWidth = 1600.0;
+  const viewportHeight = 900.0;
+  // 도면 둘레를 조금 남긴다. 벽이 화면 가장자리에 딱 붙으면 답답하다.
+  const margin = 1.25;
+
+  final centerX = extent == null ? 0.0 : (extent.minX + extent.maxX) / 2;
+  final centerY = extent == null ? 0.0 : (extent.minY + extent.maxY) / 2;
+  final spanX = extent == null ? 0.0 : (extent.maxX - extent.minX).abs();
+  final spanY = extent == null ? 0.0 : (extent.maxY - extent.minY).abs();
+  // TopDownOrtho 의 `Scale` 은 1m 가 몇 픽셀인가다. 크면 확대다.
+  final scale = spanX <= 0 || spanY <= 0
+      ? 50.0
+      : math
+            .min(
+              viewportWidth / (spanX * margin),
+              viewportHeight / (spanY * margin),
+            )
+            .clamp(2.0, 500.0);
+  // 격자는 지도를 덮고도 남게 깐다. 배경만 있는 화면과 구분되는 것이 목적이다.
+  final gridCells = spanX <= 0 || spanY <= 0
+      ? 40
+      : (math.max(spanX, spanY).ceil() + 6).clamp(10, 200);
+
+  final buffer = StringBuffer()
+    ..writeln('# $mapName 프로젝트 RViz 설정.')
+    ..writeln('# rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면')
+    ..writeln('# 다음 저장 때 덮어써진다.')
+    ..writeln('#')
+    ..writeln('# 카메라는 이 맵의 가운데(${_n(centerX)}, ${_n(centerY)})를 본다.')
+    ..writeln('# RMF 가 주는 rmf.rviz 는 office 데모 자리를 보고 있어 이 도면이')
+    ..writeln('# 화면 밖이었다. 바닥 그림 토픽 이름도 거기서는 어긋나 있다.')
+    ..writeln('Panels:')
+    ..writeln('  - Class: rviz_common/Displays')
+    ..writeln('    Name: Displays')
+    ..writeln('    Property Tree Widget:')
+    ..writeln('      Expanded: ~')
+    ..writeln('      Splitter Ratio: 0.5')
+    ..writeln('    Tree Height: 600')
+    ..writeln('  - Class: rviz_common/Views')
+    ..writeln('    Name: Views')
+    ..writeln('Visualization Manager:')
+    ..writeln('  Class: ""')
+    ..writeln('  Displays:');
+
+  // 격자. 아무 데이터가 없어도 이것만은 그려진다 — 화면이 살아 있다는 표시다.
+  buffer
+    ..writeln('    - Class: rviz_default_plugins/Grid')
+    ..writeln('      Name: 격자 (1m)')
+    ..writeln('      Enabled: true')
+    ..writeln('      Alpha: 0.35')
+    ..writeln('      Cell Size: 1')
+    ..writeln('      Color: 130; 130; 130')
+    ..writeln('      Line Style:')
+    ..writeln('        Line Width: 0.03')
+    ..writeln('        Value: Lines')
+    ..writeln('      Normal Cell Count: 0')
+    ..writeln('      Offset:')
+    ..writeln('        X: 0')
+    ..writeln('        Y: 0')
+    ..writeln('        Z: 0')
+    ..writeln('      Plane: XY')
+    ..writeln('      Plane Cell Count: $gridCells')
+    ..writeln('      Reference Frame: <Fixed Frame>')
+    ..writeln('      Value: true');
+
+  void mapDisplay({
+    required String name,
+    required String topic,
+    required double alpha,
+    required bool enabled,
+  }) {
+    buffer
+      ..writeln('    - Class: rviz_default_plugins/Map')
+      ..writeln('      Name: $name')
+      ..writeln('      Enabled: $enabled')
+      ..writeln('      Alpha: $alpha')
+      ..writeln('      Color Scheme: map')
+      ..writeln('      Draw Behind: true')
+      ..writeln('      Topic:')
+      ..writeln('        Depth: 5')
+      // 지도는 한 번 내고 만다. Volatile 로 받으면 늦게 붙은 RViz 는 영영
+      // 아무것도 못 받는다 — rmf.rviz 가 그렇게 돼 있다.
+      ..writeln('        Durability Policy: Transient Local')
+      ..writeln('        History Policy: Keep Last')
+      ..writeln('        Reliability Policy: Reliable')
+      ..writeln('        Value: $topic')
+      ..writeln('      Use Timestamp: false')
+      ..writeln('      Value: true');
+  }
+
+  void markerArray({
+    required String name,
+    required String topic,
+    required bool transientLocal,
+    bool enabled = true,
+  }) {
+    buffer
+      ..writeln('    - Class: rviz_default_plugins/MarkerArray')
+      ..writeln('      Name: $name')
+      ..writeln('      Enabled: $enabled')
+      ..writeln('      Namespaces:')
+      ..writeln('        {}')
+      ..writeln('      Topic:')
+      ..writeln('        Depth: 10')
+      ..writeln(
+        '        Durability Policy: '
+        '${transientLocal ? 'Transient Local' : 'Volatile'}',
+      )
+      ..writeln('        History Policy: Keep Last')
+      ..writeln('        Reliability Policy: Reliable')
+      ..writeln('        Value: $topic')
+      ..writeln('      Value: true');
+  }
+
+  mapDisplay(
+    name: '도면 (RMF 바닥 그림)',
+    topic: rmfFloorplanTopic,
+    alpha: 0.9,
+    enabled: true,
+  );
+  if (projectUsesNav2(robots)) {
+    // 로봇이 실제로 위치를 맞추는 지도다. 도면과 겹쳐 놓으면 두 장이 포개져
+    // 무엇이 무엇인지 알 수 없으므로 꺼 둔다. 도면과 어긋났는지 볼 때 켠다 —
+    // 그때는 도면을 끄고 이것만 본다.
+    mapDisplay(
+      name: 'Nav2 지도 (도면과 견줄 때 켜세요)',
+      topic: nav2MapTopic,
+      alpha: 0.7,
+      enabled: false,
+    );
+  }
+  markerArray(
+    name: 'Nav graph (Lane·Waypoint)',
+    topic: '/map_markers',
+    transientLocal: true,
+  );
+  // 로봇 자리는 계속 새로 온다. `/fleet_markers` 에는 발행자가 둘인데(하나는
+  // transient local, 하나는 volatile), transient local 로 받으면 volatile 쪽과
+  // QoS 가 안 맞아 그 발행자의 값이 하나도 안 온다. volatile 로 받으면 둘 다
+  // 받는다 — RViz 가 "incompatible QoS" 경고를 내던 것이 이것이다.
+  markerArray(
+    name: '로봇 (RMF fleet)',
+    topic: '/fleet_markers',
+    transientLocal: false,
+  );
+  markerArray(name: '예약 경로', topic: '/schedule_markers', transientLocal: false);
+  markerArray(
+    name: '문·리프트',
+    topic: '/building_systems_markers',
+    transientLocal: true,
+  );
+
+  // 라이다. 벽 높이를 낮춰 놓고 라이다가 벽을 넘겨다보는지 여기서 확인한다.
+  for (final robot in robots.where(
+    (robot) => robot.isMobile && robot.runsInGazebo,
+  )) {
+    buffer
+      ..writeln('    - Class: rviz_default_plugins/LaserScan')
+      ..writeln('      Name: 라이다 ${robot.robotId}')
+      ..writeln('      Enabled: true')
+      ..writeln('      Alpha: 1')
+      ..writeln('      Color: 255; 85; 0')
+      ..writeln('      Color Transformer: FlatColor')
+      ..writeln('      Decay Time: 0')
+      ..writeln('      Position Transformer: XYZ')
+      ..writeln('      Size (m): 0.03')
+      ..writeln('      Style: Points')
+      ..writeln('      Topic:')
+      ..writeln('        Depth: 5')
+      ..writeln('        Durability Policy: Volatile')
+      ..writeln('        History Policy: Keep Last')
+      ..writeln('        Reliability Policy: Best Effort')
+      ..writeln('        Value: /${robot.gzName}/scan')
+      ..writeln('      Value: true');
+  }
+
+  // TF 는 꺼 둔다. 프레임이 로봇 수만큼 늘어나 지도를 덮는다. 위치가 안 맞을
+  // 때 켜서 map → odom → base_link 가 이어져 있는지 본다.
+  buffer
+    ..writeln('    - Class: rviz_default_plugins/TF')
+    ..writeln('      Name: TF (필요할 때 켜세요)')
+    ..writeln('      Enabled: false')
+    ..writeln('      Marker Scale: 0.4')
+    ..writeln('      Show Arrows: true')
+    ..writeln('      Show Axes: true')
+    ..writeln('      Show Names: true')
+    ..writeln('      Value: true')
+    ..writeln('  Enabled: true')
+    ..writeln('  Global Options:')
+    ..writeln('    Background Color: 48; 48; 48')
+    // RMF 도 Nav2 도 이 프레임을 쓴다. 마커와 지도가 모두 여기 실려 온다.
+    ..writeln('    Fixed Frame: map')
+    ..writeln('    Frame Rate: 30')
+    ..writeln('  Name: root')
+    ..writeln('  Tools:')
+    ..writeln('    - Class: rviz_default_plugins/MoveCamera')
+    ..writeln('    - Class: rviz_default_plugins/Select')
+    ..writeln('    - Class: rviz_default_plugins/FocusCamera')
+    ..writeln('    - Class: rviz_default_plugins/Measure')
+    ..writeln('      Line color: 128; 128; 0')
+    ..writeln('  Transformation:')
+    ..writeln('    Current:')
+    ..writeln('      Class: rviz_default_plugins/TF')
+    ..writeln('  Value: true')
+    ..writeln('  Views:')
+    ..writeln('    Current:')
+    ..writeln('      Class: rviz_default_plugins/TopDownOrtho')
+    ..writeln('      Name: Current View')
+    ..writeln('      Angle: 0')
+    ..writeln('      Near Clip Distance: 0.01')
+    ..writeln('      Scale: ${_n(scale.toDouble())}')
+    ..writeln('      Target Frame: <Fixed Frame>')
+    ..writeln('      X: ${_n(centerX)}')
+    ..writeln('      Y: ${_n(centerY)}')
+    ..writeln('      Value: TopDownOrtho (rviz_default_plugins)')
+    ..writeln('    Saved: ~')
+    ..writeln('Window Geometry:')
+    ..writeln('  Displays:')
+    ..writeln('    collapsed: false')
+    ..writeln('  Height: ${viewportHeight.round()}')
+    ..writeln('  Hide Left Dock: false')
+    ..writeln('  Hide Right Dock: true')
+    ..writeln('  Views:')
+    ..writeln('    collapsed: true')
+    ..writeln('  Width: ${viewportWidth.round()}')
+    ..writeln('  X: 60')
+    ..writeln('  Y: 60');
+  return buffer.toString();
+}
+
 /// 로봇 한 대의 등록 정보. 사람이 읽고 확인하는 용도다.
 String buildRobotInfoYaml(RmfProjectRobot robot) {
   final buffer = StringBuffer()
@@ -2291,9 +2991,16 @@ String buildRobotInfoYaml(RmfProjectRobot robot) {
     ..writeln('id: ${robot.robotId}')
     ..writeln('name: ${robot.displayName}')
     ..writeln('kind: ${robot.kind.storageValue} # ${robot.kind.label}')
-    ..writeln('data_source: ${robot.dataSource.name} # ${robot.dataSource.label}')
+    ..writeln(
+      'data_source: ${robot.dataSource.name} # ${robot.dataSource.label}',
+    )
     ..writeln('model: ${robot.model}')
     ..writeln('gz_name: ${robot.gzName} # 토픽 네임스페이스')
+    ..writeln(
+      robot.rosDomainId == null
+          ? 'ros_domain_id: # 비었으면 프로젝트 기본값을 쓴다'
+          : 'ros_domain_id: ${robot.rosDomainId} # 이 로봇만 따로 정했다',
+    )
     ..writeln('zones: [${robot.zones.join(', ')}]');
   if (robot.chargerWaypoint != null) {
     buffer.writeln(
@@ -2309,6 +3016,22 @@ String buildRobotInfoYaml(RmfProjectRobot robot) {
   }
   buffer.writeln('spawn_heading: ${_n(robot.spawnHeading)}');
   return buffer.toString();
+}
+
+/// 이 로봇만 다른 도메인을 쓸 때 launch 맨 위에 넣을 줄.
+///
+/// `set_env` 는 그 뒤에 뜨는 프로세스의 환경을 바꾼다. 노드가 도메인을 정하는
+/// 것은 `ROS_DOMAIN_ID` 환경 변수뿐이라, 이 방법 말고는 대마다 가를 수 없다.
+///
+/// 프로젝트 기본값을 쓰는 로봇은 아무것도 안 쓴다 — 빈 값을 넣으면 스크립트가
+/// 내보낸 값을 덮어써서, 기본값을 고쳐도 안 따라온다.
+String _robotDomainEnv(RmfProjectRobot robot) {
+  final domain = robot.rosDomainId;
+  if (domain == null) return '';
+  return '  <!-- 이 로봇만 도메인 $domain 을 쓴다. 프로젝트 기본값이 아니다.\n'
+      '       Gazebo 로봇이면 시뮬레이터와 같아야 한다 — 다르면 다리가 걸어 둔\n'
+      '       토픽에 값이 하나도 안 온다. 오류는 안 난다. -->\n'
+      '  <set_env name="ROS_DOMAIN_ID" value="$domain"/>\n';
 }
 
 /// 로봇 한 대만 Gazebo 에 올리는 launch.
@@ -2342,9 +3065,9 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
     ..writeln('  혼자 시험하려면:')
     ..writeln('    ros2 launch <이 파일>')
     ..writeln('-->')
-    ..writeln('<launch>');
+    ..writeln('<launch>')
+    ..write(_robotDomainEnv(robot));
   if (!robot.isMobile) {
-
     // 설치 로봇은 설명 파일도 실행 방법도 다르다. pinky_description 이 아니라
     // open_manipulator_description 의 xacro 를 펼치고, 바퀴 대신 ros2_control
     // 컨트롤러를 올린다.

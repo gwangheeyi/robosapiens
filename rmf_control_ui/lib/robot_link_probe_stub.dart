@@ -36,18 +36,17 @@ class RobotLinkFixResult {
 Future<RobotLinkFixResult> spawnSingleRobot({
   required String mapDirectory,
   required String robotDirectory,
-}) async => const RobotLinkFixResult(
-  ok: false,
-  message: '웹에서는 로봇을 띄울 수 없습니다.',
-);
+}) async => const RobotLinkFixResult(ok: false, message: '웹에서는 로봇을 띄울 수 없습니다.');
 
 Future<RobotLinkFixResult> startSingleRobotBridge({
   required String mapDirectory,
   required String robotDirectory,
-}) async => const RobotLinkFixResult(
-  ok: false,
-  message: '웹에서는 다리를 띄울 수 없습니다.',
-);
+}) async => const RobotLinkFixResult(ok: false, message: '웹에서는 다리를 띄울 수 없습니다.');
+
+Future<int?> deployedSpawnCount({
+  required String mapDirectory,
+  required String mapName,
+}) async => null;
 
 class ProjectBackendAge {
   const ProjectBackendAge({this.startedAt, this.deployedAt});
@@ -62,4 +61,3 @@ Future<ProjectBackendAge> readBackendAge({
   required String mapDirectory,
   required String mapName,
 }) async => const ProjectBackendAge();
-

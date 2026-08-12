@@ -1,0 +1,36 @@
+<?xml version='1.0' ?>
+<!--
+  gwanghee 프로젝트 실행 launch.
+  rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면
+  다음 저장 때 덮어써진다.
+
+  실행:
+    source /opt/ros/jazzy/setup.bash
+    source $HOME/rmf_ws/install/setup.bash
+    ros2 launch /home/gyi/robosapiens/rmf_maps/gwanghee/gwanghee.launch.xml
+-->
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="headless" default="true"/>
+  <!-- rmf-web 을 안 씁니다. 주소를 넘기면 dispatcher 가 1초마다
+       영원히 다시 붙으려 하고, 그 여덟 줄이 로그를 채웁니다.
+       띄우실 때 server_uri 를 넣으세요. -->
+  <arg name="server_uri" default=""/>
+  <arg name="map_dir" default="/home/gyi/robosapiens/rmf_maps/gwanghee"/>
+
+  <!-- RMF core. 이것이 먼저 떠야 fleet adapter 가 붙는다. -->
+  <include file="$(find-pkg-share rmf_demos)/common.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="headless" value="$(var headless)"/>
+    <arg name="config_file" value="$(var map_dir)/gwanghee.building.yaml"/>
+    <arg name="server_uri" value="$(var server_uri)"/>
+  </include>
+
+  <!-- 이 프로젝트의 플릿. 설정과 nav graph 모두 이 맵의 것이다. -->
+  <include file="$(find-pkg-share rmf_demos_fleet_adapter)/launch/fleet_adapter.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="config_file" value="$(var map_dir)/gwanghee_pinky_config.yaml"/>
+    <arg name="nav_graph_file" value="$(var map_dir)/nav_graphs/0.yaml"/>
+    <arg name="server_uri" value="$(var server_uri)"/>
+  </include>
+</launch>

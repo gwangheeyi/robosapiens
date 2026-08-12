@@ -122,7 +122,8 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     ];
     // 일방통행 레인을 놓치면 로봇이 거슬러 올라간다.
     final directions = <(Offset, Offset), String>{};
-    for (final value in (data['laneDirections'] as List<dynamic>?) ?? const []) {
+    for (final value
+        in (data['laneDirections'] as List<dynamic>?) ?? const []) {
       final entry = value as Map<String, dynamic>;
       directions[(decodePoint(entry['start']), decodePoint(entry['end']))] =
           entry['direction'] as String? ?? '양방향';

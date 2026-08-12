@@ -9,7 +9,15 @@ class RmfRunResult {
 
 String? get runningProjectName => null;
 
-Future<RmfRunResult> startProject(String mapName) async => const RmfRunResult(
+String? debugProjectRootOverride;
+
+Future<String?> refreshRunningProject() async => null;
+
+Future<RmfRunResult> startProject(
+  String mapName, {
+  bool gazeboGui = false,
+  bool rviz = false,
+}) async => const RmfRunResult(
   success: false,
   message: '웹 빌드에서는 프로젝트를 띄울 수 없습니다. Linux 데스크톱 앱에서 실행하세요.',
 );
@@ -24,3 +32,5 @@ class OrphanedProject {
 }
 
 Future<List<OrphanedProject>> findOrphanedProjects() async => const [];
+
+Future<List<OrphanedProject>> findRunningProjects() async => const [];

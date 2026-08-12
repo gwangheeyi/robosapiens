@@ -32,8 +32,8 @@
     <param name="node_names" value="[map_server]"/>
   </node>
 
-  <!-- PK-01 · 핑키 1호 -->
-  <include file="$(var map_dir)/robots/PK-01/nav2.launch.xml">
+  <!-- PK_03 · 핑키 3호 -->
+  <include file="$(var map_dir)/robots/PK_03/nav2.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
   </include>
 

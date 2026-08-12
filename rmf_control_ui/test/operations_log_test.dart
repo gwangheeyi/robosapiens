@@ -125,7 +125,8 @@ void main() {
       ]);
       final entries = await loadOperationEntries(DateTime.now());
       final mine = entries.where(
-        (entry) => entry.kind == OperationLogKind.setting &&
+        (entry) =>
+            entry.kind == OperationLogKind.setting &&
             entry.title.contains('시험-01'),
       );
       expect(mine, isNotEmpty, reason: '방금 남긴 설정 기록이 보여야 한다');
@@ -136,13 +137,13 @@ void main() {
 
     test('빈 목록이면 아무것도 남기지 않는다', () async {
       // 저장을 누를 때마다 줄이 늘면 무엇이 실제로 달라졌는지 오히려 안 보인다.
-      final before = (await loadOperationEntries(DateTime.now()))
-          .where((entry) => entry.kind == OperationLogKind.setting)
-          .length;
+      final before = (await loadOperationEntries(
+        DateTime.now(),
+      )).where((entry) => entry.kind == OperationLogKind.setting).length;
       await recordMapProjectChanges(project, const []);
-      final after = (await loadOperationEntries(DateTime.now()))
-          .where((entry) => entry.kind == OperationLogKind.setting)
-          .length;
+      final after = (await loadOperationEntries(
+        DateTime.now(),
+      )).where((entry) => entry.kind == OperationLogKind.setting).length;
       expect(after, before);
     });
 

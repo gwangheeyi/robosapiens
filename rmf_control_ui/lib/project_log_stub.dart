@@ -55,4 +55,3 @@ ProjectLogTail readLogTail(String path, {int count = 50}) => ProjectLogTail(
 );
 
 String? truncateLog(String path) => '웹에서는 로그를 비울 수 없습니다.';
-

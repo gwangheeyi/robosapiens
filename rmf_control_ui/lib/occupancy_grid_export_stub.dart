@@ -18,6 +18,24 @@ class OccupancyGridExportResult {
 
 const String occupancyGridDirectoryName = 'nav2_map';
 
+String occupancyGridImageName(String mapName) => '$mapName.pgm';
+String occupancyGridYamlName(String mapName) => '$mapName.yaml';
+
+class StoredOccupancyGrid {
+  const StoredOccupancyGrid({
+    required this.grid,
+    required this.directory,
+    required this.savedAt,
+  });
+  final OccupancyGrid grid;
+  final String directory;
+  final DateTime savedAt;
+}
+
+/// 브라우저에는 프로젝트 디렉터리가 없어 넣어 둔 격자도 없다.
+Future<StoredOccupancyGrid?> loadStoredOccupancyGrid(String mapName) async =>
+    null;
+
 Future<OccupancyGridExportResult> exportOccupancyGrid({
   required String mapName,
   required OccupancyGrid grid,

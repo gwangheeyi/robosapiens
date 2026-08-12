@@ -198,17 +198,166 @@ PYTHON
 }
 ensure_world_sensors "$MAP_DIR/gwanghee.world"
 
+# 월드의 충돌 검출기를 bullet 으로 바꾼다.
+#
+# 기본값은 ODE 인데, 메시끼리 닿으면 무너진다. 우리 로봇은 충돌 도형이 전부
+# 메시(핑키의 base_link.stl 따위)이고, 건물 바닥·벽도 배포가 만든 메시
+# (generated_models/<맵>_L1/meshes/floor_1.obj)다. 그래서 로봇이 바닥에 서 있는
+# 것만으로도 메시 대 메시다.
+#
+# 로봇 두 대가 겹쳐 놓이면 접점이 폭발해 여기서 죽는다:
+#
+#   ODE Message 2: Trimesh-trimesh contact hash table bucket overflow   (103번)
+#   ODE INTERNAL ERROR 1: assertion "keyindex < lastkeyindex || ..." failed
+#     in UpdateArbitraryContactInNode() [collision_trimesh_trimesh.cpp:285]
+#   [ERROR] [gazebo-1]: process has died ... exit code 134
+#
+# 자리를 안 고른 로봇은 전부 지도 원점에 놓이므로 두 대만 있어도 이렇게 된다.
+# 실제로 스폰 4초 만에 Gazebo 가 죽었고, 그 뒤 RMF 와 Nav2 만 살아남아 토픽
+# 이름은 있는데 값은 하나도 안 오는 상태로 30분을 돌았다.
+#
+# bullet 은 같은 조건에서 경고 한 줄 없이 버틴다. 주행 거리도 ODE 와 같다
+# (0.2 m/s 로 4초에 ODE 0.811 m · bullet 0.807 m). 자리를 겹쳐 놓는 것 자체는
+# 여전히 잘못이지만, 그것 때문에 시뮬레이터가 죽지는 않게 한다.
+#
+# 배포할 때마다 월드가 다시 만들어지므로 여기서 매번 채운다. 이미 있으면 넘어간다.
+ensure_world_collision_detector() {
+  local world="$1"
+  [ -f "$world" ] || return 0
+  python3 - "$world" <<'PYTHON'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as handle:
+    world = handle.read()
+
+if '<collision_detector>' in world:
+    print('월드에 충돌 검출기가 이미 지정돼 있습니다.')
+    sys.exit(0)
+
+block = ('      <dart>\n'
+         '        <collision_detector>bullet</collision_detector>\n'
+         '      </dart>\n')
+
+opening = re.search(r'<physics\b[^>]*?(/?)>', world)
+if opening is None:
+    # 월드를 못 고쳐도 실행은 계속한다. 여기서 멈추면 다른 로봇까지 안 뜬다.
+    sys.stderr.write('<physics> 가 없어 충돌 검출기를 못 넣었습니다.\n')
+    sys.exit(0)
+
+if opening.group(1):
+    # <physics ... /> 처럼 닫혀 있으면 열어서 넣는다.
+    head = opening.group(0)[:-2].rstrip() + '>\n'
+    world = (world[:opening.start()] + head + block + '    </physics>'
+             + world[opening.end():])
+else:
+    end = world.find('</physics>', opening.end())
+    if end < 0:
+        sys.stderr.write('</physics> 가 없어 충돌 검출기를 못 넣었습니다.\n')
+        sys.exit(0)
+    # 닫는 태그가 놓인 줄의 맨 앞에서 자른다. 태그 바로 앞에서 자르면 그 줄의
+    # 들여쓰기가 우리 블록 앞에 붙고 </physics> 가 1열로 밀린다.
+    head = world.rfind('\n', 0, end) + 1
+    if world[head:end].strip():
+        head = end
+    world = world[:head] + block + world[head:]
+
+with open(path, 'w', encoding='utf-8') as handle:
+    handle.write(world)
+print('월드의 충돌 검출기를 bullet 으로 바꿨습니다.')
+PYTHON
+}
+ensure_world_collision_detector "$MAP_DIR/gwanghee.world"
+
+# Gazebo 가 실제로 떴는지 보고 다음 단계로 넘어간다.
+#
+# 예전에는 `&` 로 띄우고 `sleep 12` 만 했다. 뜬 줄 알고 넘어간 것이지 확인한
+# 것이 아니었다. 그래서 Gazebo 가 스폰 4초 만에 죽었는데도(ODE 메시 충돌
+# 어서션, exit 134) RMF 와 Nav2 가 그 시체 위에 올라갔다. 프로세스는 15개가
+# 30분 넘게 살아 있었고 토픽 이름도 다 나왔지만 발행자는 0개였다 — 이름은
+# 다리와 구독자가 남긴 것이다. 무엇이 잘못됐는지 어디에도 안 보였다.
+#
+# 두 가지를 본다. 월드를 물고 있는 `gz sim` 이 있는가, 그리고 /clock 이 나오는가.
+# 떠 있는 것과 물리가 도는 것은 다르다. use_sim_time 을 쓰는 RMF 노드는 /clock
+# 이 없으면 시간이 멈춘 줄 알고 그대로 멈춰 있는다.
+GAZEBO_WAIT="${GAZEBO_WAIT:-90}"
+wait_for_gazebo() {
+  local world="$1"
+  local deadline=$((SECONDS + GAZEBO_WAIT))
+  while ((SECONDS < deadline)); do
+    if pgrep -u "$(id -u)" -f "gz sim.*$world" >/dev/null 2>&1 &&
+       timeout 5 ros2 topic echo /clock --once >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 echo "[1/3] Gazebo bringup"
 ros2 launch "$MAP_DIR/gwanghee_bringup.launch.xml" headless:="$HEADLESS" &
-sleep 12
+if ! wait_for_gazebo "$MAP_DIR/gwanghee.world"; then
+  echo "" >&2
+  echo "Gazebo 가 $GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 그 둘은" >&2
+  echo "토픽 이름만 만들어 놓고 값은 하나도 못 받습니다." >&2
+  echo "" >&2
+  echo "무엇이 있었는지: $LOG_FILE" >&2
+  echo "오류만 모은 것: $ERR_FILE" >&2
+  exit 1
+fi
 
 echo "[2/3] Open-RMF"
 ros2 launch "$MAP_DIR/gwanghee.launch.xml" headless:="$HEADLESS" &
 sleep 12
+
+# RMF↔Nav2 어댑터가 뜨고 계속 살아 있는지 지켜본다.
+#
+# 이 어댑터가 죽어도 Gazebo·Nav2·RMF core 는 그대로 남는다. 그래서 토픽은 잘
+# 오는데 주문만 안 먹는 상태가 된다. 화면에는 `RMF 가 답하지 않았습니다` 로만
+# 보이고 무엇이 죽었는지는 어디에도 안 나왔다.
+#
+# 실제로 로봇 ID 에 하이픈이 있어(`PK-01`) 어댑터가 로봇을 플릿에 붙이는 순간
+# 죽은 일이 있다. RMF 가 `rmf/dynamic_event/begin/<플릿>/<로봇>` 토픽을 만드는데
+# ROS 2 토픽 이름에는 하이픈을 못 쓰기 때문이다.
+ADAPTER_WAIT="${ADAPTER_WAIT:-90}"
+watch_fleet_adapter() {
+  local pattern="$MAP_DIR/gwanghee_nav2_adapter.py"
+  local deadline=$((SECONDS + ADAPTER_WAIT))
+  while ((SECONDS < deadline)); do
+    pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; then
+    echo "" >&2
+    echo "RMF↔Nav2 어댑터가 $ADAPTER_WAIT 초 안에 뜨지 않았습니다." >&2
+    echo "RMF 는 주문을 받아도 배차할 플릿이 없습니다." >&2
+    echo "오류만 모은 것: $ERR_FILE" >&2
+    return
+  fi
+  echo "RMF↔Nav2 어댑터가 떴습니다."
+  # 뜬 다음 죽는 것이 진짜 문제다. 계속 지켜본다.
+  while pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; do
+    sleep 5
+  done
+  echo "" >&2
+  echo "RMF↔Nav2 어댑터가 죽었습니다. 이제 RMF 가 주문을 받지 못합니다." >&2
+  echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다 — 그래서 겉으로는" >&2
+  echo "멀쩡해 보입니다." >&2
+  echo "" >&2
+  echo "가장 흔한 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
+  echo "(rmf/dynamic_event/begin/<플릿>/<로봇>) 영문·숫자·밑줄만 쓸 수 있습니다." >&2
+  echo "하이픈이 들어간 ID 는 로봇을 플릿에 붙이는 순간 어댑터를 죽입니다." >&2
+  echo "" >&2
+  echo "무엇이 있었는지: $LOG_FILE" >&2
+  echo "오류만 모은 것: $ERR_FILE" >&2
+}
 
 # Nav2 와 RMF↔Nav2 어댑터. 이것이 없으면 RMF 가 배차해도 로봇이 안 움직인다 —
 # /<로봇>/cmd_vel 에 발행하는 것이 아무것도 없기 때문이다.
 #
 # RMF core 다음이라야 한다. 어댑터는 뜨자마자 schedule node 를 찾는다.
 echo "[3/3] Nav2 와 RMF 어댑터"
+watch_fleet_adapter &
 ros2 launch "$MAP_DIR/gwanghee_nav2.launch.xml"

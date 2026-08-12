@@ -53,8 +53,7 @@ void main() {
       expect(phases, hasLength(1));
       final sequence = (phases.first as Map)['activity'] as Map;
       expect(sequence['category'], 'sequence');
-      final activities =
-          (sequence['description'] as Map)['activities'] as List;
+      final activities = (sequence['description'] as Map)['activities'] as List;
       expect(activities.map((a) => (a as Map)['category']).toList(), [
         'go_to_place',
         'go_to_place',
@@ -154,6 +153,22 @@ void main() {
         (converted.activities.single.description! as Map)['duration'],
         5.0,
       );
+    });
+  });
+
+  group('작업 취소 요청', () {
+    test('RMF 가 아는 취소 요청을 만든다', () {
+      // 넣던 그 토픽으로 취소도 간다. 작업 다리를 그대로 쓰고 JSON 만 다르다.
+      final json = jsonDecode(buildCancelTaskRequest('abc-123')) as Map;
+      expect(json['type'], 'cancel_task');
+      expect(json['task_id'], 'abc-123');
+    });
+
+    test('앱 작업 번호가 아니라 RMF 가 준 ID 를 그대로 싣는다', () {
+      // 둘을 헷갈리면 RMF 는 모르는 작업이라고 답한다.
+      final json =
+          jsonDecode(buildCancelTaskRequest('project1_pinky/PK_02/4')) as Map;
+      expect(json['task_id'], 'project1_pinky/PK_02/4');
     });
   });
 }

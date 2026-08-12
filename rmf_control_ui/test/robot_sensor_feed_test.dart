@@ -57,13 +57,16 @@ void main() {
               .buffer
               .asUint8List(),
         )
-        ..add(Uint8List(width * height * 4)..fillRange(0, width * height * 4, fill));
+        ..add(
+          Uint8List(width * height * 4)..fillRange(0, width * height * 4, fill),
+        );
       return bytes.toBytes();
     }
 
     test('라이다와 카메라를 함께 읽는다', () async {
-      File('${directory.path}/PK-01.scan')
-          .writeAsStringSync('0,6.283,0.05,12\n1.500,2.000\n');
+      File(
+        '${directory.path}/PK-01.scan',
+      ).writeAsStringSync('0,6.283,0.05,12\n1.500,2.000\n');
       File('${directory.path}/PK-01.frame').writeAsBytesSync(frame(4, 2, 200));
 
       final feed = RobotSensorFeed.instance;

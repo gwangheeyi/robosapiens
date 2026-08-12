@@ -1,0 +1,7 @@
+=== 2026-08-10 10:28:46 gwanghee 실행 ===
+없는 ROS 패키지: pinky_description open_manipulator_description
+
+이 프로젝트의 로봇을 띄우려면 아래를 빌드하고 다시 실행하세요.
+  pinky_description  ->  cd /home/gyi/robosapiens/pinky_pro && colcon build
+  open_manipulator_description  ->  cd /home/gyi/robosapiens/open_manipulator && colcon build
+정리 중...
