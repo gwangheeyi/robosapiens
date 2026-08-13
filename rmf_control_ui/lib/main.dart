@@ -10430,6 +10430,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<({bool gazeboGui, bool rviz})?> _askRunWindows(String mapName) async {
     var gazeboGui = _runWithGazeboGui;
     var rviz = _runWithRviz;
+    var saving = false;
+    var savedNow = false;
+    var exporting = false;
+    var exportedNow = false;
+    String? exportMessage;
     final chosen = await showMovableDialog<({bool gazeboGui, bool rviz})>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -10442,6 +10447,131 @@ class _ControlDashboardState extends State<ControlDashboard> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF7ED),
+                    border: Border.all(color: const Color(0xFFF59E0B)),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '백엔드 실행 전에 설정 파일을 디스크로 내보내야 합니다.',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 5),
+                      const Text(
+                        '로봇 등록, Gazebo 이름, 워크셀 연결과 Nav2 설정은 '
+                        '실행 중 자동으로 바뀌지 않습니다.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                setDialogState(() => saving = true);
+                                final saved = await _saveSettingsBeforeBackend(
+                                  mapName,
+                                );
+                                if (!dialogContext.mounted) return;
+                                setDialogState(() {
+                                  saving = false;
+                                  savedNow = saved;
+                                  exportedNow = false;
+                                  exportMessage = saved
+                                      ? '설정 내용 저장 완료'
+                                      : '설정 내용을 저장하지 못했습니다.';
+                                });
+                              },
+                        icon: saving
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Icon(
+                                savedNow
+                                    ? Icons.check_circle_outline
+                                    : Icons.save_outlined,
+                                size: 18,
+                              ),
+                        label: Text(saving ? '저장하는 중…' : '설정 내용 저장하기'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: exporting || !savedNow
+                            ? null
+                            : () async {
+                                setDialogState(() {
+                                  exporting = true;
+                                  exportMessage = null;
+                                });
+                                try {
+                                  await _refreshProjectScripts();
+                                  final files = await loadMapProjectFiles(
+                                    mapName,
+                                  );
+                                  if (files.isEmpty) {
+                                    throw StateError(
+                                      '만들어진 설정 파일이 없습니다. 프로젝트 저장을 먼저 하세요.',
+                                    );
+                                  }
+                                  final result = await exportProjectConfigFiles(
+                                    mapName: mapName,
+                                    files: files,
+                                  );
+                                  if (!dialogContext.mounted) return;
+                                  setDialogState(() {
+                                    exporting = false;
+                                    exportedNow = result.success;
+                                    exportMessage = result.success
+                                        ? '내보내기 완료 · ${result.written.length}개 파일'
+                                        : result.message;
+                                  });
+                                } catch (error) {
+                                  if (!dialogContext.mounted) return;
+                                  setDialogState(() {
+                                    exporting = false;
+                                    exportedNow = false;
+                                    exportMessage = '내보내기 실패: $error';
+                                  });
+                                }
+                              },
+                        icon: exporting
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.drive_file_move_outline,
+                                size: 18,
+                              ),
+                        label: Text(exporting ? '내보내는 중…' : '디스크로 내보내기'),
+                      ),
+                      if (exportMessage != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          exportMessage!,
+                          style: TextStyle(
+                            color: exportedNow
+                                ? const Color(0xFF15803D)
+                                : const Color(0xFFB91C1C),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
                 const Text('띄울 화면을 고르세요.'),
                 const SizedBox(height: 10),
                 CheckboxListTile(
@@ -10486,12 +10616,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
               child: const Text('취소'),
             ),
             FilledButton.icon(
-              onPressed: () => Navigator.pop(dialogContext, (
-                gazeboGui: gazeboGui,
-                rviz: rviz,
-              )),
+              onPressed: exportedNow
+                  ? () => Navigator.pop(dialogContext, (
+                      gazeboGui: gazeboGui,
+                      rviz: rviz,
+                    ))
+                  : null,
               icon: const Icon(Icons.play_arrow, size: 18),
-              label: const Text('실행'),
+              label: const Text('백엔드 실행'),
             ),
           ],
         ),
@@ -10504,6 +10636,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _runWithRviz = chosen.rviz;
     });
     return chosen;
+  }
+
+  Future<bool> _saveSettingsBeforeBackend(String mapName) async {
+    try {
+      await _writeMapProject(mapName);
+      return true;
+    } catch (error) {
+      if (mounted) _showProcessingWarning('설정 내용 저장', error);
+      return false;
+    }
   }
 
   /// 앱에서 프로젝트를 띄운다.
@@ -12577,6 +12719,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onCheckSpawns: () => unawaited(_showSpawnCheck()),
                               spawnChecks: _spawnChecks,
                               onStartBackend: _startBackendForOpenProject,
+                              onSaveSettings: () => _saveSettingsBeforeBackend(
+                                _openProjectName ?? _mapName,
+                              ),
                               onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
                             )
@@ -16149,6 +16294,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onCheckSpawns,
     required this.spawnChecks,
     required this.onStartBackend,
+    required this.onSaveSettings,
     required this.onRefreshScripts,
     required this.telemetry,
     this.mapDirectory,
@@ -16201,6 +16347,9 @@ class _RobotManagementPage extends StatefulWidget {
   /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
   final Future<void> Function() onStartBackend;
 
+  /// 지금까지 편집한 맵·로봇·워크셀 설정을 프로젝트 원장에 저장한다.
+  final Future<bool> Function() onSaveSettings;
+
   /// 디스크의 실행·중지 스크립트를 MySQL 의 최신 내용으로 맞춘다.
   final Future<void> Function() onRefreshScripts;
 
@@ -16214,6 +16363,10 @@ class _RobotManagementPage extends StatefulWidget {
 class _RobotManagementPageState extends State<_RobotManagementPage> {
   RmfRuntimeStatus _rmfStatus = RmfRuntimeStatus.unknown;
   bool _rmfBusy = false;
+  bool _backendExportBusy = false;
+  bool _backendExportReady = false;
+  bool _backendSaveBusy = false;
+  bool _backendSaveReady = false;
 
   /// 노드 목록 스크롤. Scrollbar 와 스크롤 뷰가 같은 것을 잡아야 손잡이가
   /// 제자리에 붙는다.
@@ -16242,6 +16395,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     if (oldWidget.registeredRobots.length != widget.registeredRobots.length ||
         oldWidget.deployMapName != widget.deployMapName ||
         oldWidget.mapDirectory != widget.mapDirectory) {
+      _backendExportReady = false;
+      _backendSaveReady = false;
       unawaited(_refreshDeployedCount());
     }
   }
@@ -16264,12 +16419,47 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   /// 실행 스크립트는 Gazebo 를 먼저 띄우고 12초 뒤 Open-RMF 를 올린다. 바로
   /// 확인하면 아직 아무것도 없어서 실패한 것처럼 보인다.
   Future<void> _startBackend() async {
+    if (!_backendExportReady) return;
     await widget.onStartBackend();
     if (!mounted) return;
     setState(() => _rmfBusy = true);
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
     await _refreshUntilClear();
+  }
+
+  /// 현재 등록·맵 설정을 실행 파일로 만든 뒤 실제 파일의 로봇 수까지 확인한다.
+  Future<void> _exportBeforeBackend() async {
+    if (_backendExportBusy || !_backendSaveReady) return;
+    setState(() => _backendExportBusy = true);
+    await widget.onRefreshScripts();
+    if (!mounted) return;
+    final directory = widget.mapDirectory;
+    final name = widget.deployMapName;
+    final expected = widget.registeredRobots
+        .where((robot) => robot.runsInGazebo)
+        .length;
+    final count = directory == null || name == null || name.trim().isEmpty
+        ? null
+        : await deployedSpawnCount(mapDirectory: directory, mapName: name);
+    if (!mounted) return;
+    setState(() {
+      _backendExportBusy = false;
+      _deployedRobots = count;
+      _backendExportReady = count != null && count == expected;
+    });
+  }
+
+  Future<void> _saveBeforeBackend() async {
+    if (_backendSaveBusy) return;
+    setState(() => _backendSaveBusy = true);
+    final saved = await widget.onSaveSettings();
+    if (!mounted) return;
+    setState(() {
+      _backendSaveBusy = false;
+      _backendSaveReady = saved;
+      _backendExportReady = false;
+    });
   }
 
   /// 배포된 bringup 이 담고 있는 로봇 수. 안 봤거나 파일이 없으면 null.
@@ -16586,18 +16776,82 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                 ),
               )
             else
-              Tooltip(
-                message: widget.projectName == null
-                    ? '먼저 맵 프로젝트를 열거나 저장하세요.'
-                    : '`${widget.projectName}` 프로젝트로 Gazebo 와 Open-RMF 를 '
-                          '함께 띄웁니다.',
-                child: FilledButton.icon(
-                  onPressed: widget.projectName == null
-                      ? null
-                      : () => unawaited(_startBackend()),
-                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
-                  label: const Text('백엔드 띄우기'),
-                ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  const Text(
+                    '설정 저장 → 디스크 내보내기 → 백엔드 실행 순서입니다.',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF92400E)),
+                  ),
+                  const SizedBox(height: 5),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed:
+                            widget.projectName == null || _backendSaveBusy
+                            ? null
+                            : () => unawaited(_saveBeforeBackend()),
+                        icon: _backendSaveBusy
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Icon(
+                                _backendSaveReady
+                                    ? Icons.check_circle_outline
+                                    : Icons.save_outlined,
+                                size: 18,
+                              ),
+                        label: Text(_backendSaveReady ? '저장 완료' : '설정 내용 저장하기'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed:
+                            widget.projectName == null ||
+                                _backendExportBusy ||
+                                !_backendSaveReady
+                            ? null
+                            : () => unawaited(_exportBeforeBackend()),
+                        icon: _backendExportBusy
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Icon(
+                                _backendExportReady
+                                    ? Icons.check_circle_outline
+                                    : Icons.drive_file_move_outline,
+                                size: 18,
+                              ),
+                        label: Text(
+                          _backendExportReady ? '내보내기 완료' : '디스크로 내보내기',
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Tooltip(
+                        message: widget.projectName == null
+                            ? '먼저 맵 프로젝트를 열거나 저장하세요.'
+                            : !_backendExportReady
+                            ? '설정을 디스크로 내보낸 뒤 실행할 수 있습니다.'
+                            : '`${widget.projectName}` 프로젝트로 Gazebo 와 '
+                                  'Open-RMF 를 함께 띄웁니다.',
+                        child: FilledButton.icon(
+                          onPressed:
+                              widget.projectName == null || !_backendExportReady
+                              ? null
+                              : () => unawaited(_startBackend()),
+                          icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                          label: const Text('백엔드 띄우기'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
           ],
         ],

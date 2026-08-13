@@ -269,7 +269,7 @@ class RmfFleetSettings {
     this.angularAcceleration = 2.0,
     this.footprintRadius = .3,
     this.vicinityRadius = .5,
-    this.reversible = true,
+    this.reversible = false,
     this.batteryVoltage = 12,
     this.batteryCapacity = 24,
     this.chargingCurrent = 5,
@@ -490,7 +490,10 @@ String buildFleetAdapterYaml({
     ..writeln('  profile: # 로봇을 원으로 본 반경. 맵의 로봇 안전 기준에서 가져왔다.')
     ..writeln('    footprint: ${_n(fleet.footprintRadius)}')
     ..writeln('    vicinity: ${_n(fleet.vicinityRadius)}')
-    ..writeln('  reversible: ${fleet.reversible ? 'True' : 'False'}')
+    // Pinky의 Nav2 RPP는 allow_reversing=false다. RMF만 후진 가능으로 두면
+    // 대기점에서 반대 방향 자세를 목표로 준 뒤 Nav2가 다시 전진 방향으로
+    // 돌리는 왕복 회전이 생긴다. 두 계층을 전진 전용으로 맞춘다.
+    ..writeln('  reversible: False')
     ..writeln('  battery_system:')
     ..writeln('    voltage: ${_n(fleet.batteryVoltage)}')
     ..writeln('    capacity: ${_n(fleet.batteryCapacity)}')
@@ -515,7 +518,9 @@ String buildFleetAdapterYaml({
     // `armLoad` 는 앱의 연속 작업에 있는 매니퓰레이터 적재 단계다.
     ..writeln('  actions: ["teleop", "$rmfArmLoadAction"]')
     ..writeln('  finishing_request: "park"')
-    ..writeln('  responsive_wait: True')
+    // 대기점 도착 뒤 별도 responsive-wait 자세를 만들지 않는다. 작업의 다음
+    // 목적지가 정해졌다면 그 경로를 바로 넘겨 불필요한 대기 회전을 막는다.
+    ..writeln('  responsive_wait: False')
     ..writeln('  reassign_task_interval: 120')
     ..writeln('  robots:');
   // 플릿은 돌아다니는 로봇의 모임이다. 한자리에 붙은 설치 로봇을 여기 넣으면
@@ -1615,6 +1620,7 @@ MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 # 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
 ROBOT_NAMESPACES="${robots.where((robot) => robot.runsInGazebo).map((robot) => robot.gzName).join(' ')}"
 RMF_WS="\${RMF_WS:-\$HOME/rmf_ws}"
+LOCK_FILE="\$MAP_DIR/.$mapName.run.lock"
 
 # INT → TERM → KILL 로 올려 가며 내린다.
 #
@@ -1765,6 +1771,45 @@ sweep_bridges() {
 }
 
 sweep_bridges
+
+# 실행 셸의 FD 9는 모든 자식에게 상속된다. launch가 죽은 뒤 이름도 경로도 없는
+# lifecycle_manager가 고아로 남아도 이 잠금 FD만큼은 그대로 들고 있다. 따라서
+# 이름 검색이 모두 실패한 뒤 잠금 파일을 연 PID를 직접 찾아 마지막으로 끊는다.
+sweep_lock_holders() {
+  local pass fd target pid pids=()
+  for pass in 1 2 3; do
+    pids=()
+    for fd in /proc/[0-9]*/fd/*; do
+      target="\$(readlink "\$fd" 2>/dev/null || true)"
+      [[ "\$target" == "\$LOCK_FILE" ]] || continue
+      pid="\${fd#/proc/}"
+      pid="\${pid%%/*}"
+      [[ "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && continue
+      [[ " \${pids[*]} " == *" \$pid "* ]] || pids+=("\$pid")
+    done
+    ((\${#pids[@]} == 0)) && return
+    stop_pids "실행 잠금 보유 프로세스 ($mapName, 확인 \$pass)" "\${pids[@]}"
+  done
+}
+
+sweep_lock_holders
+
+# 종료 성공은 이름 검색 결과가 아니라 새 실행이 잠금을 잡을 수 있는지로 판정한다.
+# 좀비는 FD를 보유하지 않으므로 잠금 검사를 통과하며, 살아 있는 숨은 프로세스는
+# 반드시 실패시킨다. 실패를 성공처럼 표시하지 않도록 0이 아닌 코드로 끝낸다.
+if ! flock -n "\$LOCK_FILE" true; then
+  echo "오류: $mapName 실행 잠금이 아직 사용 중입니다." >&2
+  echo "확인: fuser -v \$LOCK_FILE" >&2
+  exit 1
+fi
+
+remaining_zombies="\$(ps -u "\$(id -u)" -o pid=,ppid=,pgid=,stat=,args= |
+  awk -v map="\$MAP_DIR" '\$4 ~ /^Z/ && index(\$0, map) {print}')"
+if [[ -n "\$remaining_zombies" ]]; then
+  echo "오류: $mapName 관련 좀비 프로세스가 남았습니다:" >&2
+  echo "\$remaining_zombies" >&2
+  exit 1
+fi
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
 ''';

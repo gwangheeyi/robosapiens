@@ -35,6 +35,19 @@ void main() {
   ];
 
   group('fleet adapter 설정', () {
+    test('Nav2와 같이 전진 전용이고 대기점에서 별도 회전을 만들지 않는다', () {
+      final yaml = buildFleetAdapterYaml(
+        fleet: const RmfFleetSettings(reversible: true),
+        robots: const [],
+        mapName: 'gwanghee',
+      );
+      // 저장된 옛 설정이 true여도 Pinky Nav2의 allow_reversing=false와 맞춘다.
+      expect(yaml, contains('  reversible: False'));
+      expect(yaml, contains('  responsive_wait: False'));
+      expect(yaml, isNot(contains('  reversible: True')));
+      expect(yaml, isNot(contains('  responsive_wait: True')));
+    });
+
     test('로봇마다 charger Waypoint 이름이 들어간다', () {
       final yaml = buildFleetAdapterYaml(
         fleet: const RmfFleetSettings(fleetName: 'gwanghee_pinky'),
@@ -1142,6 +1155,20 @@ void main() {
       expect(script, contains('sweep_rmf_core'));
       expect(script, contains('RMF core'));
       expect(script, contains('/install/rmf_'));
+    });
+
+    test('이름 없는 고아도 실행 잠금 FD로 찾아 종료한다', () {
+      expect(script, contains('sweep_lock_holders'));
+      expect(script, contains('/proc/[0-9]*/fd/*'));
+      expect(script, contains(r'readlink "$fd"'));
+      expect(script, contains('실행 잠금 보유 프로세스'));
+    });
+
+    test('마지막에 잠금과 좀비를 다시 검증한다', () {
+      expect(script, contains(r'flock -n "$LOCK_FILE" true'));
+      expect(script, contains('실행 잠금이 아직 사용 중입니다'));
+      expect(script, contains(r'$4 ~ /^Z/'));
+      expect(script, contains('관련 좀비 프로세스가 남았습니다'));
     });
 
     test('없어진 프로세스에 대해 잔소리하지 않는다', () {
