@@ -114,7 +114,7 @@ class RobotTelemetryBridge {
   /// 값이 바뀔 때마다 흘러나온다. 화면이 이것을 듣고 다시 그린다.
   Stream<RobotTelemetryStatus> get updates => _controller.stream;
 
-  bool get subscribing => _feeds.isNotEmpty;
+  bool get subscribing => _wanted.isNotEmpty;
 
   /// `/fleet_states` 를 읽는 프로세스. RMF 가 아는 map 좌표가 여기서 온다.
   Process? _fleetProcess;
@@ -138,19 +138,16 @@ class RobotTelemetryBridge {
     ..._fleetPoses,
   };
 
+  /// 마지막 `/fleet_states` 메시지에 실제로 들어 있던 RMF 로봇 ID.
+  Set<String> get attachedRobotIds => _fleetPoses.keys.toSet();
+
   RobotTelemetryStatus get status {
-    if (_feeds.isEmpty) return RobotTelemetryStatus.idle;
-    final live = _feeds.values.where((feed) => feed.pose != null).length;
-    final errors = _feeds.values
-        .where((feed) => feed.pose == null && feed.error != null)
-        .map((feed) => '${feed.robotId}: ${feed.error}')
-        .toList();
+    if (_wanted.isEmpty) return RobotTelemetryStatus.idle;
+    final live = _wanted.keys.where(poses.containsKey).length;
     return RobotTelemetryStatus(
       subscribing: true,
       poses: poses,
-      message: errors.isEmpty
-          ? '$live/${_feeds.length}대에서 위치를 받고 있습니다.'
-          : '$live/${_feeds.length}대 수신 중. ${errors.join(' · ')}',
+      message: '$live/${_wanted.length}대에서 위치를 받고 있습니다.',
     );
   }
 
@@ -163,28 +160,30 @@ class RobotTelemetryBridge {
       for (final robot in robots)
         if (robot.runsInGazebo) robot.robotId: robot,
     };
-    for (final id in _feeds.keys.toList()) {
-      final feed = _feeds[id]!;
-      final robot = wanted[id];
-      // 스폰 자리가 바뀌면 odom 을 옮길 기준이 달라진다. 토픽이 같아도 다시
-      // 붙여야 위치가 어긋나지 않는다.
-      if (robot != null &&
-          // 프로세스가 죽었으면 다시 띄워야 한다. 백엔드를 내렸다 올리면
-          // `ros2 topic echo` 도 함께 죽는데, 여기서 그냥 넘기면 앱은
-          // 영영 아무 값도 못 받는다 — 등록도 토픽도 멀쩡한데 화면만
-          // 조용한 것이 그 증상이었다.
-          feed.process != null &&
-          _liveTopicFor(robot) == feed.topic &&
-          robot.spawnX == feed.spawnX &&
-          robot.spawnY == feed.spawnY &&
-          robot.spawnHeading == feed.spawnHeading) {
-        continue;
-      }
-      await _feeds.remove(id)!.close();
+    // 위치는 플릿 전체가 담긴 /fleet_states 하나에서 읽는다. 예전에는 로봇마다
+    // `ros2 topic echo`를 하나씩 띄워 DDS 그래프를 N번 돌렸고, 등록 대수만큼
+    // CPU 사용량이 늘었다. 설치 로봇은 움직이지 않으므로 등록된 자리를 쓴다.
+    for (final feed in _feeds.values.toList()) {
+      await feed.close();
     }
+    _feeds.clear();
     for (final entry in wanted.entries) {
-      if (_feeds.containsKey(entry.key)) continue;
-      await _open(entry.key, entry.value);
+      final robot = entry.value;
+      if (robot.isMobile) continue;
+      _feeds[entry.key] =
+          _RobotFeed(
+              robotId: entry.key,
+              topic: _liveTopicFor(robot),
+              spawnX: robot.spawnX,
+              spawnY: robot.spawnY,
+              spawnHeading: robot.spawnHeading,
+            )
+            ..pose = RobotPose(
+              x: robot.spawnX ?? 0,
+              y: robot.spawnY ?? 0,
+              heading: robot.spawnHeading,
+              at: DateTime.now(),
+            );
     }
     _wanted
       ..clear()
@@ -258,100 +257,11 @@ class RobotTelemetryBridge {
       return;
     }
     _healer ??= Timer.periodic(const Duration(seconds: 5), (_) async {
-      final dead = [
-        for (final entry in _wanted.entries)
-          if (_feeds[entry.key]?.process == null) entry,
-      ];
       // RMF 쪽 읽기도 함께 되살린다. 이것이 끊기면 화면의 위치가 조용히
       // odom 으로 되돌아가, 맞던 자리가 다시 어긋나기 시작한다.
       await _openFleetStates();
-      if (dead.isEmpty) return;
-      for (final entry in dead) {
-        await _feeds.remove(entry.key)?.close();
-        await _open(entry.key, entry.value);
-      }
       _controller.add(status);
     });
-  }
-
-  Future<void> _open(String robotId, RmfProjectRobot robot) async {
-    final topic = _liveTopicFor(robot);
-    // 설치 로봇은 제자리에 붙어 있다. 자세를 풀어낼 것이 없으므로 관절 이름만
-    // 받아 살아 있는지만 본다 — 값이 온다는 것이 곧 Gazebo 에 올라와 있고
-    // 컨트롤러가 돌고 있다는 뜻이다. 자리는 등록에서 정한 spawn 그대로다.
-    final stationary = !robot.isMobile;
-    final field = stationary ? 'name' : 'pose.pose';
-    final feed = _RobotFeed(
-      robotId: robotId,
-      topic: topic,
-      spawnX: robot.spawnX,
-      spawnY: robot.spawnY,
-      spawnHeading: robot.spawnHeading,
-    );
-    _feeds[robotId] = feed;
-    try {
-      final process = await Process.start('bash', [
-        '-lc',
-        _withRosEnvironment('exec ros2 topic echo $topic --field $field --csv'),
-      ]);
-      feed.process = process;
-      feed.lines = process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-            if (stationary) {
-              // 한 줄이라도 오면 살아 있는 것이다. 관절 이름을 파싱하지는
-              // 않는다 — 팔이 어느 각도인지는 앱 지도에 그릴 것이 없다.
-              if (line.trim().isEmpty) return;
-              feed.pose = RobotPose(
-                x: feed.spawnX ?? 0,
-                y: feed.spawnY ?? 0,
-                heading: feed.spawnHeading,
-                at: DateTime.now(),
-              );
-              feed.error = null;
-              _controller.add(status);
-              return;
-            }
-            final pose = RobotPose.parseCsv(line, DateTime.now());
-            if (pose == null) return;
-            // odom 은 올린 자리가 원점이다. 그대로 두면 홈1 에 세운 로봇이
-            // 지도 원점에 그려진다.
-            feed.pose = pose.toWorld(
-              spawnX: feed.spawnX,
-              spawnY: feed.spawnY,
-              spawnHeading: feed.spawnHeading,
-            );
-            feed.error = null;
-            _controller.add(status);
-          });
-      // 끝나면 표시를 남긴다. 남기지 않으면 죽은 것을 살아 있는 것으로 알고
-      // 다시 띄우지 않는다.
-      unawaited(
-        process.exitCode.then((code) {
-          if (feed.process != process) return;
-          feed.process = null;
-          feed.error = '토픽 읽기가 끝났습니다. 백엔드가 내려갔을 수 있습니다.';
-          _controller.add(status);
-        }),
-      );
-      // 토픽이 없으면 여기로 사유가 온다. 조용히 아무 값도 안 오는 것보다
-      // 왜 안 오는지 보이는 편이 낫다.
-      unawaited(
-        process.stderr
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .where((line) => line.trim().isNotEmpty)
-            .take(1)
-            .forEach((line) {
-              feed.error = line.trim();
-              _controller.add(status);
-            }),
-      );
-    } catch (error) {
-      feed.error = '$error';
-      _controller.add(status);
-    }
   }
 
   /// 전부 끊는다. 앱을 닫거나 프로젝트를 바꿀 때 부른다.

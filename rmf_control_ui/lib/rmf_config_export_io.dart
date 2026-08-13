@@ -10,7 +10,12 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 import 'map_project_models.dart';
+
+@visibleForTesting
+String? debugRmfConfigRootOverride;
 
 class RmfConfigExportResult {
   const RmfConfigExportResult({
@@ -31,6 +36,8 @@ class RmfConfigExportResult {
 }
 
 Directory? _findProjectRoot() {
+  final override = debugRmfConfigRootOverride;
+  if (override != null) return Directory(override).absolute;
   final configuredRoot = Platform.environment['RMF_ROOT'];
   if (configuredRoot != null && configuredRoot.isNotEmpty) {
     final directory = Directory(configuredRoot).absolute;
@@ -127,6 +134,30 @@ Future<RmfConfigExportResult> exportProjectConfigFiles({
   );
   try {
     await target.create(recursive: true);
+    final expectedRobotDirectories = <String>{
+      for (final file in files)
+        if (safeExportRelativePath(file.fileName) case final name?)
+          if (name.startsWith('robots/') && name.split('/').length >= 3)
+            name.split('/')[1],
+    };
+    final robotsDirectory = Directory('${target.path}/robots');
+    if (robotsDirectory.existsSync()) {
+      await for (final entry in robotsDirectory.list()) {
+        if (entry is! Directory) continue;
+        final name = entry.uri.pathSegments
+            .where((segment) => segment.isNotEmpty)
+            .last;
+        if (expectedRobotDirectories.contains(name)) continue;
+        // 사용자가 만든 디렉터리는 보존하고 앱 생성물만 정리한다.
+        final spawn = File('${entry.path}/spawn.launch.xml');
+        if (!spawn.existsSync()) continue;
+        final generated = await spawn.readAsString();
+        if (!generated.contains('rmf_control_ui 가 맵 프로젝트에서 생성했다')) {
+          continue;
+        }
+        await entry.delete(recursive: true);
+      }
+    }
     final written = <String>[];
     for (final file in files) {
       final name = safeExportRelativePath(file.fileName);

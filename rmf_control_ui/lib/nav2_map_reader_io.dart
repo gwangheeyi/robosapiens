@@ -33,18 +33,13 @@ MapExtentMeters? readNav2MapExtent(String yamlPath) {
     r'^\s*origin:\s*\[\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)',
     multiLine: true,
   ).firstMatch(text);
-  final image = RegExp(
-    r'^\s*image:\s*(\S+)',
-    multiLine: true,
-  ).firstMatch(text);
+  final image = RegExp(r'^\s*image:\s*(\S+)', multiLine: true).firstMatch(text);
   if (resolution == null || originMatch == null || image == null) return null;
 
   // 그림은 yaml 옆에 있다. 경로가 적혀 있으면 그대로 쓴다.
   final imageName = image.group(1)!;
   final pgm = File(
-    imageName.startsWith('/')
-        ? imageName
-        : '${yaml.parent.path}/$imageName',
+    imageName.startsWith('/') ? imageName : '${yaml.parent.path}/$imageName',
   );
   final size = readPgmSize(pgm);
   if (size == null) return null;
@@ -77,7 +72,9 @@ MapExtentMeters? readNav2MapExtent(String yamlPath) {
     final tokens = <String>[];
     for (final line in text.split('\n').skip(1)) {
       if (line.trimLeft().startsWith('#')) continue;
-      tokens.addAll(line.trim().split(RegExp(r'\s+')).where((t) => t.isNotEmpty));
+      tokens.addAll(
+        line.trim().split(RegExp(r'\s+')).where((t) => t.isNotEmpty),
+      );
       if (tokens.length >= 2) break;
     }
     if (tokens.length < 2) return null;

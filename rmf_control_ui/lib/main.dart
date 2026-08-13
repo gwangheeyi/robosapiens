@@ -5795,7 +5795,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (!mounted) return;
       setState(() => _telemetry = status);
     });
-    // 라이다·카메라는 relay 노드가 파일로 내려 준다. 볼 로봇만 지켜본다.
+    // 라이다는 relay 노드가 파일로 내려 준다. 볼 로봇만 지켜본다.
     RobotSensorFeed.instance.watch([
       for (final robot in _fleetRobots)
         if (robot.isMobile && robot.dataSource.usesTopics) robot.robotId,
@@ -6126,8 +6126,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final running = await gazeboRunningProjects();
     if (!mounted) return;
     final backendRunning = running.isNotEmpty;
+    // RobotTelemetryBridge가 이미 /fleet_states를 계속 읽고 있다. 준비 확인마다
+    // 별도 `ros2 topic echo --once`를 띄우면 같은 DDS 데이터를 중복 구독하며
+    // 순간적으로 CPU 한 코어를 대부분 사용한다.
+    final attached = RobotTelemetryBridge.instance.attachedRobotIds;
     final snapshot = backendRunning
-        ? await probeFleetStates(rosDomainId: _rosDomainId)
+        ? RmfFleetSnapshot(
+            reachable: attached.isNotEmpty,
+            robots: attached,
+            message: attached.isEmpty ? '/fleet_states를 아직 받지 못했습니다.' : null,
+          )
         : null;
     final clocks = backendRunning
         ? await probeClockPublishers(rosDomainId: _rosDomainId)
@@ -9533,8 +9541,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
         robots.add(
           kind == RmfRobotKind.mobile
               ? RmfProjectRobot(
-                  robotId: 'PK_$serial',
-                  displayName: '핑키 $index호',
+                  robotId: 'pinky_$serial',
+                  displayName: 'PK-$serial',
                   model: 'PINKY-GZ',
                   gzName: 'pinky_$serial',
                   zones: const ['ambient', 'chilled', 'frozen'],
@@ -9543,8 +9551,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   spawnY: spawn?.dy,
                 )
               : RmfProjectRobot(
-                  robotId: 'OMX_$serial',
-                  displayName: '매니퓰레이터 $index호',
+                  robotId: 'omx_$serial',
+                  displayName: 'OMX-$serial',
                   model: openManipulatorModels.first,
                   kind: RmfRobotKind.workcell,
                   gzName: 'omx_$serial',
@@ -9593,24 +9601,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 로봇 한 대를 추가하거나 고친다. 취소하면 null.
   Future<RmfProjectRobot?> _editFleetRobot(RmfProjectRobot? existing) async {
     final index = _fleetRobots.length + 1;
+    final serial = index.toString().padLeft(2, '0');
     // 기본 ID 에 하이픈을 쓰지 않는다. RMF 가 이 이름으로 토픽을 만드는데
     // (`rmf/dynamic_event/begin/<플릿>/<로봇>`) 하이픈은 ROS 2 토픽 이름에 못
     // 들어간다. 예전 기본값 `PK-01` 로 만든 이동 로봇은 플릿에 붙는 순간
     // fleet adapter 를 죽였다.
     //
-    // 이미 등록된 로봇을 열 때는 그 ID 를 그대로 보여 준다. 여기서 말없이 바꾸면
-    // 창을 열어 보기만 해도 이름이 달라진다.
+    // Gazebo/ROS에서 실제 사용하던 이름을 표준 system ID로 삼는다. 예전 등록을
+    // 저장하면 아래의 기존 rename 경로가 지도와 작업 참조도 함께 옮긴다.
     final idController = TextEditingController(
-      text: existing?.robotId ?? 'PK_${index.toString().padLeft(2, '0')}',
+      text: existing?.gzName ?? 'pinky_$serial',
     );
     final nameController = TextEditingController(
-      text: existing?.displayName ?? '핑키 $index호',
+      text: existing?.displayName ?? 'PK-$serial',
     );
     final modelController = TextEditingController(
       text: existing?.model ?? 'PINKY-GZ',
-    );
-    final gzController = TextEditingController(
-      text: existing?.gzName ?? 'pinky_${index.toString().padLeft(2, '0')}',
     );
     // 맵의 기본 도메인을 가져와 채워 둔다. 대개는 그대로 두고, 실물 로봇처럼
     // 제 도메인을 갖고 오는 대만 고친다. 비우면 기본값을 따라간다 — 그러면
@@ -9705,23 +9711,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         if (kind == RmfRobotKind.mobile) {
                           zones = {'ambient', 'chilled', 'frozen'};
                           if (existing == null) {
-                            idController.text =
-                                'PK_${index.toString().padLeft(2, '0')}';
-                            nameController.text = '핑키 $index호';
+                            idController.text = 'pinky_$serial';
+                            nameController.text = 'PK-$serial';
                             modelController.text = 'PINKY-GZ';
-                            gzController.text =
-                                'pinky_${index.toString().padLeft(2, '0')}';
                           }
                         } else {
                           // 설치 로봇은 배차를 받지 않으므로 구획 자격이 없다.
                           zones = {};
                           if (existing == null) {
-                            idController.text =
-                                'OMX_${index.toString().padLeft(2, '0')}';
-                            nameController.text = '매니퓰레이터 $index호';
+                            idController.text = 'omx_$serial';
+                            nameController.text = 'OMX-$serial';
                             modelController.text = openManipulatorModels.first;
-                            gzController.text =
-                                'omx_${index.toString().padLeft(2, '0')}';
                           }
                         }
                       }),
@@ -9781,9 +9781,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       decoration: InputDecoration(
                         labelText: '로봇 ID',
                         helperText: isMobile
-                            ? 'fleet adapter 의 robots 항목 이름이자 RMF 가 만드는 '
-                                  '토픽 이름입니다. 영문·숫자·밑줄만 쓸 수 있습니다.'
-                            : '작업에서 이 설비를 가리키는 이름이 됩니다.',
+                            ? 'Gazebo 모델명·ROS namespace·RMF 로봇 이름으로 함께 '
+                                  '씁니다. 예: pinky_01'
+                            : 'Gazebo 모델명·ROS namespace와 함께 씁니다. 예: omx_01',
                         helperMaxLines: 3,
                         // 예전에 하이픈으로 저장된 로봇을 열었을 때를 위해 남긴다.
                         // 새로 치는 것은 위 formatter 가 이미 막는다.
@@ -9830,15 +9830,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
                           () => modelController.text = value ?? '',
                         ),
                       ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: gzController,
-                      decoration: InputDecoration(
-                        labelText: 'Gazebo 모델 이름',
-                        helperText: isMobile
-                            ? '토픽 네임스페이스로도 쓰입니다 (/이름/odom).'
-                            : '토픽 네임스페이스로도 쓰입니다 (/이름/joint_states).',
-                        border: const OutlineInputBorder(),
+                    const SizedBox(height: 8),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Gazebo 모델명과 ROS namespace도 위 시스템 ID를 사용합니다.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -10032,9 +10032,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             // 맵 기본값과 같으면 따로 들고 있지 않는다.
                             // 그래야 나중에 기본값을 바꿨을 때 같이 따라온다.
                             rosDomainId: domain == _rosDomainId ? null : domain,
-                            gzName: gzController.text.trim().isEmpty
-                                ? id.toLowerCase()
-                                : gzController.text.trim(),
+                            gzName: id,
                             zones: zones.toList()..sort(),
                             chargerWaypoint: charger,
                             spawnX: spawn == null ? existing?.spawnX : spawn.dx,
@@ -10055,7 +10053,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
         idController.dispose();
         nameController.dispose();
         modelController.dispose();
-        gzController.dispose();
         domainController.dispose();
       }),
     );
@@ -23414,82 +23411,6 @@ class _ScanPainter extends CustomPainter {
       oldDelegate.scan != scan || oldDelegate.live != live;
 }
 
-/// relay 가 내려 준 RGBA 화소를 그린다.
-///
-/// `decodeImageFromPixels` 는 비동기라 그리기 전에 한 번 풀어 둔다. 프레임마다
-/// 다시 풀면 화면이 깜빡인다.
-class _CameraImage extends StatefulWidget {
-  const _CameraImage({required this.frame, required this.dimmed});
-
-  final RobotCameraFrame frame;
-  final bool dimmed;
-
-  @override
-  State<_CameraImage> createState() => _CameraImageState();
-}
-
-class _CameraImageState extends State<_CameraImage> {
-  ui.Image? _image;
-  DateTime? _decodedAt;
-
-  @override
-  void initState() {
-    super.initState();
-    _decode();
-  }
-
-  @override
-  void didUpdateWidget(_CameraImage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.frame.at != _decodedAt) _decode();
-  }
-
-  @override
-  void dispose() {
-    _image?.dispose();
-    super.dispose();
-  }
-
-  void _decode() {
-    final frame = widget.frame;
-    _decodedAt = frame.at;
-    ui.decodeImageFromPixels(
-      frame.pixels,
-      frame.width,
-      frame.height,
-      ui.PixelFormat.rgba8888,
-      (image) {
-        if (!mounted) {
-          image.dispose();
-          return;
-        }
-        setState(() {
-          _image?.dispose();
-          _image = image;
-        });
-      },
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final image = _image;
-    if (image == null) {
-      return const Center(
-        child: Text(
-          '읽는 중',
-          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-        ),
-      );
-    }
-    return Opacity(
-      // 멈춘 그림을 실시간으로 착각하지 않도록 흐리게 둔다.
-      opacity: widget.dimmed ? .45 : 1,
-      child: RawImage(image: image, fit: BoxFit.cover),
-    );
-  }
-}
-
 /// 테스트에서 보내기 창만 따로 띄운다.
 ///
 /// 창을 앱 전체로 몰아 열려면 프로젝트를 띄우고 지도를 붙여야 하는데, 그러면
@@ -24091,25 +24012,18 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       // 출처가 Gazebo 든 실물이든 이름과 형식은 같다. 그래야 위쪽(Nav2·RMF·앱)이
       // 그대로 돈다.
       for (final topic in topics) _topicRow(topic),
-      if (sensors.scan != null || sensors.camera != null) ...[
+      if (sensors.scan != null) ...[
         _heading('보고 있는 것'),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _scanView(sensors, now),
-            const SizedBox(width: 14),
-            Expanded(child: _cameraView(sensors, now)),
-          ],
-        ),
+        _scanView(sensors, now),
       ] else ...[
         _heading('보고 있는 것'),
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Text(
             robot!.dataSource == RobotDataSource.gazebo
-                ? '아직 라이다도 카메라도 들어오지 않았습니다.\n'
+                ? '아직 라이다가 들어오지 않았습니다.\n'
                       '백엔드를 띄웠는지, 센서 relay 가 도는지 확인해 주세요.'
-                : '아직 라이다도 카메라도 들어오지 않았습니다.\n'
+                : '아직 라이다가 들어오지 않았습니다.\n'
                       '로봇이 켜져 있고 토픽이 나오는지 확인해 주세요.',
             style: const TextStyle(color: Color(0xFF64748B), height: 1.5),
           ),
@@ -24205,49 +24119,6 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
             style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
           ),
         ],
-      ],
-    );
-  }
-
-  Widget _cameraView(RobotSensors sensors, DateTime now) {
-    final frame = sensors.camera;
-    final live = sensors.cameraIsLive(now: now);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          frame == null
-              ? '카메라 · 없음'
-              : live
-              ? '카메라 · ${frame.width}×${frame.height}'
-              : '카메라 · 멈춤',
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-            fontSize: 12,
-            color: live ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
-          ),
-        ),
-        const SizedBox(height: 4),
-        AspectRatio(
-          aspectRatio: frame == null
-              ? 16 / 9
-              : frame.width / math.max(1, frame.height),
-          child: Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF0F172A),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: frame == null
-                ? const Center(
-                    child: Text(
-                      '값 없음',
-                      style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-                    ),
-                  )
-                : _CameraImage(frame: frame, dimmed: !live),
-          ),
-        ),
       ],
     );
   }

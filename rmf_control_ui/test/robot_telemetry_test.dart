@@ -101,19 +101,13 @@ void main() {
     // 백엔드를 내렸다 올리면 `ros2 topic echo` 도 함께 죽는다. 죽은 것을 살아
     // 있는 것으로 알고 넘기면 앱은 영영 아무 값도 못 받는다 — 등록도 토픽도
     // 멀쩡한데 화면만 조용했다.
-    test('죽은 구독을 건너뛰지 않는 조건이 코드에 있다', () {
+    test('로봇별 프로세스 대신 fleet_states 하나만 읽는다', () {
       final source = File(
         'lib/robot_telemetry_bridge_io.dart',
       ).readAsStringSync();
-      expect(source, contains('feed.process != null &&'));
-    });
-
-    test('끝난 프로세스에 표시를 남긴다', () {
-      final source = File(
-        'lib/robot_telemetry_bridge_io.dart',
-      ).readAsStringSync();
-      expect(source, contains('process.exitCode.then'));
-      expect(source, contains('백엔드가 내려갔을 수 있습니다'));
+      expect(source, contains('exec ros2 topic echo /fleet_states'));
+      expect(source, contains('await _openFleetStates()'));
+      expect(source, isNot(contains('Future<void> _open(String robotId')));
     });
 
     test('사람이 다시 붙여 주기를 기다리지 않는다', () {

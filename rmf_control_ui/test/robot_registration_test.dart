@@ -127,7 +127,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 등록 · 1대'), findsOneWidget);
-    expect(find.textContaining('PK_01 · 핑키 1호'), findsWidgets);
+    expect(find.textContaining('pinky_01 · PK-01'), findsWidgets);
     // 아직 지도에 올리지는 않았다.
     expect(find.text('대기'), findsOneWidget);
 
@@ -149,7 +149,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('저장'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('PK_01 · 핑키 1호'), findsWidgets);
+    expect(find.textContaining('pinky_01 · PK-01'), findsWidgets);
 
     await tester.tap(find.byTooltip('수정').first);
     await tester.pumpAndSettle();
@@ -162,11 +162,11 @@ void main() {
     await tester.pumpAndSettle();
 
     // 등록 카드가 새 ID 로 바뀐다. 정확히 맞춰 본다 — 운영 로그에는
-    // `로봇 등록 적용 · PK_01 · 핑키 1호` 가 그대로 남아야 한다. 지나간 기록을
+    // `로봇 등록 적용 · pinky_01 · PK-01` 가 그대로 남아야 한다. 지나간 기록을
     // 나중에 고쳐 쓰면 무슨 일이 있었는지 알 수 없다.
-    expect(find.text('PK_09 · 핑키 1호'), findsWidgets);
-    expect(find.text('PK_01 · 핑키 1호'), findsNothing);
-    expect(find.textContaining('로봇 등록 적용 · PK_01'), findsWidgets);
+    expect(find.text('PK_09 · PK-01'), findsWidgets);
+    expect(find.text('pinky_01 · PK-01'), findsNothing);
+    expect(find.textContaining('로봇 등록 적용 · pinky_01'), findsWidgets);
   });
 
   testWidgets('ID 칸에 하이픈을 치면 밑줄로 바뀐다', (tester) async {
@@ -261,7 +261,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 등록 · 1대'), findsOneWidget);
-    expect(find.textContaining('OMX_01'), findsWidgets);
+    expect(find.textContaining('omx_01 · OMX-01'), findsWidgets);
     expect(find.textContaining('open_manipulator_x'), findsWidgets);
   });
 

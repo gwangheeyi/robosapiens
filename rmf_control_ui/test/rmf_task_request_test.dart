@@ -115,6 +115,15 @@ void main() {
       expect(converted.activities, hasLength(10));
       expect(converted.skipped, isEmpty);
       expect(converted.activities[5].category, 'perform_action');
+      final armLoad = converted.activities[5].description! as Map;
+      expect((armLoad['description'] as Map)['target_guid'], '픽업1');
+    });
+
+    test('이동 위치 없이 로봇팔 적재만 요청하지 않는다', () {
+      const steps = [RmfTaskStepInput(kind: 'armLoad', durationSeconds: 4)];
+      final converted = convertTaskSteps(steps);
+      expect(converted.activities, isEmpty);
+      expect(converted.skipped.single, contains('먼저 픽업 위치로 이동'));
     });
 
     test('홈 복귀는 로봇의 자리로 간다', () {

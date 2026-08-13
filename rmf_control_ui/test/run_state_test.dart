@@ -22,7 +22,6 @@ void main() {
   late Directory root;
   late Directory mapDir;
 
-
   const mapName = 'project1';
 
   File pgidFile() => File('${mapDir.path}/.$mapName.pgid');
@@ -67,7 +66,8 @@ sleep 300
 
   /// 파일에 실제로 번호가 적혔는지. 셸은 파일을 먼저 만들고 그 다음에 쓴다.
   bool pgidWritten() =>
-      pgidFile().existsSync() && pgidFile().readAsStringSync().trim().isNotEmpty;
+      pgidFile().existsSync() &&
+      pgidFile().readAsStringSync().trim().isNotEmpty;
 
   /// 실행 스크립트가 pgid 를 남길 때까지 기다린다.
   ///

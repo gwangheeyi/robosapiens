@@ -188,6 +188,7 @@ RmfTaskConversion convertTaskSteps(
 }) {
   final activities = <RmfTaskActivity>[];
   final skipped = <String>[];
+  String? lastPlace;
   for (var index = 0; index < steps.length; index++) {
     final step = steps[index];
     final number = index + 1;
@@ -199,6 +200,7 @@ RmfTaskConversion convertTaskSteps(
           continue;
         }
         activities.add(RmfTaskActivity.goToPlace(place));
+        lastPlace = place;
       case 'returnHome':
         final place = (step.placeName?.trim().isNotEmpty ?? false)
             ? step.placeName!.trim()
@@ -208,10 +210,16 @@ RmfTaskConversion convertTaskSteps(
           continue;
         }
         activities.add(RmfTaskActivity.goToPlace(place));
+        lastPlace = place;
       case 'armLoad':
+        if (lastPlace == null) {
+          skipped.add('$number번째 로봇팔 적재 — 먼저 픽업 위치로 이동해야 합니다');
+          continue;
+        }
         activities.add(
           RmfTaskActivity.performAction(
             armLoadCategory,
+            description: {'target_guid': lastPlace},
             durationSeconds: step.durationSeconds > 0
                 ? step.durationSeconds
                 : 60,

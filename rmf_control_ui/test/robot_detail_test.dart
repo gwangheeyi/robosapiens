@@ -86,7 +86,7 @@ void main() {
     // 오다가 끊긴 것처럼 보인다.
     expect(find.text('주고받는 토픽'), findsOneWidget);
     expect(find.textContaining('앱 Mock 로봇은 토픽을 쓰지 않습니다'), findsOneWidget);
-    // 라이다·카메라 그림도 없다.
+    // 라이다 그림도 없다.
     expect(find.text('보고 있는 것'), findsNothing);
   });
 
@@ -108,12 +108,12 @@ void main() {
     // 이름만으로는 무엇인지 모르는 사람이 많다. 형식과 뜻을 함께 적는다.
     expect(find.textContaining('/pk-01/scan'.toLowerCase()), findsNothing);
     expect(find.textContaining('/scan'), findsWidgets);
-    expect(find.textContaining('/camera/image_raw'), findsWidgets);
+    expect(find.textContaining('/camera/image_raw'), findsNothing);
     expect(find.textContaining('/cmd_vel'), findsWidgets);
     expect(find.textContaining('sensor_msgs/LaserScan'), findsWidgets);
     // 아직 값이 안 들어왔으므로 왜 비었는지 알린다.
     expect(find.text('보고 있는 것'), findsOneWidget);
-    expect(find.textContaining('아직 라이다도 카메라도'), findsOneWidget);
+    expect(find.textContaining('아직 라이다가'), findsOneWidget);
   });
 
   testWidgets('배치하지 않은 로봇도 열린다', (tester) async {

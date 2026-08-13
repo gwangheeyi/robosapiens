@@ -69,10 +69,7 @@ void main() {
 
     test('도면에서 구운 격자는 맞는다', () {
       // 주행 그래프와 같은 도면에서 나오므로 어긋날 수가 없다.
-      final result = checkNav2MapAlignment(
-        map: fromDrawing,
-        waypoints: graph,
-      );
+      final result = checkNav2MapAlignment(map: fromDrawing, waypoints: graph);
       expect(result.isAligned, isTrue);
       expect(result.outsideWaypoints, isEmpty);
       expect(result.marginMeters, greaterThan(minAlignmentMargin));

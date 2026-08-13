@@ -112,7 +112,10 @@ robots:
 
     test('빈 출력이면 빈 목록이다', () {
       expect(parseFleetStateRobots(''), isEmpty);
-      expect(parseFleetStateRobots('name: project1_pinky\nrobots: []\n'), isEmpty);
+      expect(
+        parseFleetStateRobots('name: project1_pinky\nrobots: []\n'),
+        isEmpty,
+      );
     });
 
     test('같은 로봇이 여러 번 나와도 한 번만 센다', () {

@@ -13,6 +13,8 @@ class RobotTelemetryBridge {
 
   Stream<RobotTelemetryStatus> get updates => const Stream.empty();
 
+  Set<String> get attachedRobotIds => const {};
+
   bool get subscribing => false;
 
   Map<String, RobotPose> get poses => const {};

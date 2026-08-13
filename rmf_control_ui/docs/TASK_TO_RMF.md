@@ -100,7 +100,7 @@ nav graph는 이제 실행 스크립트가 스스로 다시 만듭니다 —
 |---|---|
 | `navigate` | `go_to_place` (Waypoint 이름) |
 | `returnHome` | `go_to_place` (로봇의 충전 자리) |
-| `armLoad` | `perform_action` |
+| `armLoad` | `perform_action` + 직전 이동 위치의 워크셀 요청 |
 | `wait` | `wait_for` |
 
 여기 없는 것이 오면 **조용히 버리지 않고** 이유를 남깁니다.
@@ -199,15 +199,142 @@ Publisher count: 0 → 6      (/pinky_01/cmd_vel)
 
 ---
 
-## 8. 아직 안 된 것
+## 8. `armLoad`와 OMX 워크셀 연결
 
-**매니퓰레이터를 실제로 부르지 않습니다.** OMX 쪽에 RMF 요청을 받는 노드가
-없습니다. 지금은 예상 시간만큼 기다리고 끝났다고 알립니다. 어댑터의
-`execute_action`에 그 자리를 뚫어 두고 주석으로 밝혀 놨습니다.
+### 이전 동작과 문제
 
-**실물 로봇은 확인하지 못했습니다.** 하드웨어가 없습니다. 설계상 이 문서의 어느
-줄도 바뀌지 않지만 — 어댑터는 Nav2와만 이야기하고 Nav2 아래가 Gazebo인지 진짜
-모터인지 모릅니다 — 확인하지 않은 것을 확인했다고 적지 않습니다.
+이전 `armLoad`는 로봇팔 명령이 아니었다. Fleet adapter의 `execute_action()`이
+설정된 시간만 기다린 뒤 `execution.finished()`를 호출하는 가상 동작이었다.
+따라서 Pinky가 픽업3에 도착해도 다음 로그만 남고 OMX는 움직이지 않았다.
+
+```text
+[pinky_02] 도착했습니다.
+[pinky_02] 동작 [armLoad] · 9.6초
+[pinky_02] 동작 [armLoad] 끝.
+```
+
+`project1_workcell` 노드가 실행 중이어도 결과는 같았다. 워크셀 노드는
+`/dispenser_requests`를 기다리지만 기존 `armLoad`는 이 토픽을 발행하지 않았기
+때문이다. 당시 로그에도 `픽업3 요청 받음`, ACK, SUCCESS 또는 OMX 관절 궤적
+전송 기록이 없었다.
+
+### 현재 동작
+
+이제 작업 변환기가 `armLoad` 바로 앞 이동 단계의 Waypoint를
+`target_guid`로 넣는다.
+
+```json
+{
+  "category": "armLoad",
+  "description": {
+    "target_guid": "픽업3",
+    "seconds": 9.6
+  }
+}
+```
+
+Fleet adapter는 고유한 `request_guid`를 만든 뒤 다음 요청을 발행한다.
+
+```text
+/dispenser_requests
+  request_guid: pinky_02-<UUID>
+  target_guid: 픽업3
+  transporter_type: pinky_02
+```
+
+전체 실행 흐름은 다음과 같다.
+
+```text
+Pinky가 픽업3 도착
+  → armLoad execute_action
+  → /dispenser_requests(target_guid=픽업3)
+  → project1_workcell이 픽업3 담당 omx_03 선택
+  → /omx_03/arm_controller/joint_trajectory
+  → /dispenser_results(ACKNOWLEDGED)
+  → OMX 동작 및 복귀
+  → /dispenser_results(SUCCESS)
+  → execution.finished()
+  → RMF가 다음 단계 시작
+```
+
+고정 타이머가 끝났다는 이유만으로 `armLoad`를 완료하지 않는다. 같은
+`request_guid`의 SUCCESS를 받아야만 Fleet adapter가 RMF에 완료를 알린다.
+워크셀은 RMF의 재전송으로 같은 요청을 여러 번 받아도 팔을 중복 동작시키지
+않는다.
+
+### 픽업 위치와 OMX 대응
+
+project1의 현재 대응은 다음과 같다.
+
+| `target_guid` | 워크셀 | 관절 명령 토픽 |
+|---|---|---|
+| `픽업1` | `omx_01` | `/omx_01/arm_controller/joint_trajectory` |
+| `픽업2` | `omx_02` | `/omx_02/arm_controller/joint_trajectory` |
+| `픽업3` | `omx_03` | `/omx_03/arm_controller/joint_trajectory` |
+
+이 대응은 생성된 `<맵>_workcell.py`의 `WORKCELLS`에 들어 있다. 맵에서 픽업
+Waypoint나 설비 배치를 바꾸면 프로젝트를 다시 배포하여 생성물을 갱신한다.
+
+### 작업 작성 조건
+
+로봇팔 적재 단계 앞에는 반드시 픽업 위치 이동 단계가 있어야 한다.
+
+```text
+올바름: 픽업3 이동 → OMX-AI 픽업/적재 → 드랍오프 이동
+잘못됨: OMX-AI 픽업/적재 → 픽업3 이동
+```
+
+앞선 이동 위치가 없으면 작업 변환기는 해당 단계를 보내지 않고
+`먼저 픽업 위치로 이동해야 합니다`라는 사유를 남긴다. `armLoad` 앞의 마지막
+이동 위치가 `target_guid`가 되므로 실제 워크셀이 맡은 픽업 Waypoint를 지정해야
+한다.
+
+### 재시작과 테스트
+
+Python 스크립트를 수정해도 이미 실행 중인 프로세스에는 자동 반영되지 않는다.
+다음 순서를 지킨다.
+
+1. 실행 중인 프로젝트와 Flutter 앱을 종료한다.
+2. 프로젝트를 다시 실행한다.
+3. Flutter 앱을 다시 실행한다.
+4. 기존 접수 작업을 재사용하지 않고 새 작업을 제출한다.
+
+정상이면 로그에 다음 순서가 나타난다.
+
+```text
+[pinky_02] 동작 [armLoad] → 워크셀 [픽업3] 요청 (...)
+[omx_03] 픽업3 요청 받음 (...)
+[pinky_02] 워크셀 [픽업3]이 요청을 받았습니다.
+[omx_03] 픽업3 끝.
+[pinky_02] 워크셀 [픽업3] 동작 완료.
+```
+
+토픽과 노드는 다음과 같이 확인한다.
+
+```bash
+ros2 node list | rg project1_workcell
+ros2 topic info --verbose /dispenser_requests
+ros2 topic info --verbose /dispenser_results
+ros2 topic info --verbose /omx_03/arm_controller/joint_trajectory
+ros2 control list_controllers -c /omx_03/controller_manager
+```
+
+`project1_workcell`만 보인다고 연결이 확인된 것은 아니다. 최소한 다음 조건이
+모두 충족되어야 한다.
+
+- `/dispenser_requests`에 Fleet adapter publisher와 workcell subscriber가 있음
+- `/dispenser_results`에 workcell publisher와 Fleet adapter subscriber가 있음
+- `omx_03`의 `arm_controller`가 `active`
+- 로그에 같은 `request_guid`의 요청, ACK, SUCCESS가 순서대로 나타남
+
+요청 로그가 없으면 새 작업 JSON에 `target_guid`가 포함됐는지 확인한다. 요청은
+있지만 `픽업3 요청 받음`이 없으면 워크셀 매핑과 QoS를 확인한다. ACK 이후 팔이
+안 움직이면 `arm_controller` 상태와 관절 명령 토픽 연결을 확인한다. SUCCESS가
+없으면 RMF 작업은 다음 단계로 넘어가지 않는 것이 정상이다.
+
+**실물 로봇은 확인하지 못했다.** 현재 검증 범위는 생성 코드, ROS 메시지 구조,
+Python 문법 검사와 관련 Flutter 단위 테스트다. Gazebo 또는 실물에서 위 로그
+순서와 실제 관절 움직임을 마지막으로 확인해야 한다.
 
 ---
 

@@ -83,18 +83,6 @@ List<RobotTopic> robotTopicDetails(RmfProjectRobot? robot) {
       what: '라이다. 둘레의 거리',
     ),
     RobotTopic(
-      name: '$ns/camera/image_raw',
-      type: 'sensor_msgs/Image',
-      incoming: true,
-      what: '앞을 보는 카메라',
-    ),
-    RobotTopic(
-      name: '$ns/camera/camera_info',
-      type: 'sensor_msgs/CameraInfo',
-      incoming: true,
-      what: '카메라의 렌즈 값',
-    ),
-    RobotTopic(
       name: '$ns/imu_raw',
       type: 'sensor_msgs/Imu',
       incoming: true,

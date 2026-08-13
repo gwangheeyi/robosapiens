@@ -102,8 +102,6 @@ void main() {
       expect(topics.incoming, [
         '/pinky_01/odom',
         '/pinky_01/scan',
-        '/pinky_01/camera/image_raw',
-        '/pinky_01/camera/camera_info',
         '/pinky_01/imu_raw',
         '/pinky_01/joint_states',
       ]);
@@ -181,10 +179,15 @@ void main() {
       );
       final topics = robotTopics(pinky);
       for (final topic in [...topics.incoming, ...topics.outgoing]) {
+        // 화면에는 Nav2가 내는 원본 명령을 보여 준다. Gazebo 다리는 그 명령을
+        // 직접 받지 않고 velocity_smoother의 최종 출력만 받아야 한다.
+        final bridgedTopic = topic.endsWith('/cmd_vel')
+            ? '${topic}_smoothed'
+            : topic;
         expect(
           bridge,
-          contains('ros_topic_name: "$topic"'),
-          reason: '$topic 이 다리 설정에 없다',
+          contains('ros_topic_name: "$bridgedTopic"'),
+          reason: '$bridgedTopic 이 다리 설정에 없다',
         );
       }
     });

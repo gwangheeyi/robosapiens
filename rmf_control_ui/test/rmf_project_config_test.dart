@@ -297,7 +297,12 @@ void main() {
         mapName: 'gwanghee',
         robots: robots,
       );
-      for (final topic in ['odom', 'cmd_vel', 'scan', 'joint_states']) {
+      for (final topic in [
+        'odom',
+        'cmd_vel_smoothed',
+        'scan',
+        'joint_states',
+      ]) {
         expect(yaml, contains('ros_topic_name: "/pinky_01/$topic"'));
         expect(yaml, contains('ros_topic_name: "/pinky_02/$topic"'));
       }
@@ -306,7 +311,7 @@ void main() {
       expect(yaml, isNot(contains('ros_topic_name: "cmd_vel"')));
     });
 
-    test('양쪽 이름이 같아야 다리가 이어진다', () {
+    test('센서 이름은 같고 속도 명령만 smoother 출력을 Gazebo 입력에 잇는다', () {
       final yaml = buildProjectGzBridgeYaml(
         mapName: 'gwanghee',
         robots: robots,
@@ -318,7 +323,14 @@ void main() {
         r'gz_topic_name: "([^"]+)"',
       ).allMatches(yaml).map((m) => m.group(1)).toList();
       expect(ros, isNotEmpty);
-      expect(gz, ros);
+      expect(ros.length, gz.length);
+      for (var i = 0; i < ros.length; i++) {
+        if (ros[i]!.endsWith('/cmd_vel_smoothed')) {
+          expect(gz[i], ros[i]!.replaceFirst('/cmd_vel_smoothed', '/cmd_vel'));
+        } else {
+          expect(gz[i], ros[i]);
+        }
+      }
     });
 
     test('clock 과 tf 는 로봇별로 나누지 않는다', () {
@@ -342,6 +354,21 @@ void main() {
         expect(lines[i - 4], contains('cmd_vel'));
       }
       expect('ROS_TO_GZ'.allMatches(yaml).length, robots.length);
+      expect(yaml, contains('ros_topic_name: "/pinky_01/cmd_vel_smoothed"'));
+      expect(yaml, contains('gz_topic_name: "/pinky_01/cmd_vel"'));
+      expect(yaml, isNot(contains('ros_topic_name: "/pinky_01/cmd_vel"')));
+    });
+
+    test('핑키 카메라를 ROS로 옮기지 않는다', () {
+      final yaml = buildProjectGzBridgeYaml(
+        mapName: 'gwanghee',
+        robots: robots,
+      );
+      expect(yaml, isNot(contains('/camera/image_raw')));
+      expect(yaml, isNot(contains('/camera/camera_info')));
+
+      final relay = buildSensorRelayScript(mapName: 'gwanghee', robots: robots);
+      expect(relay, isNot(contains("Image, f'/{namespace}/camera/image_raw'")));
     });
   });
 
@@ -973,7 +1000,11 @@ void main() {
         mapDirectory: '/maps/mixed',
         robots: const [pinky],
       );
-      expect(script, contains(r'if ($0 == last) {'));
+      expect(script, contains('if (signature == last_signature) {'));
+      expect(
+        script,
+        contains(r'gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)'),
+      );
       expect(script, contains('같은 줄 " dup "번 더'));
       // 넘치면 한 번 밀어 두고 새로 쓴다. 최대 두 배까지만 남는다.
       expect(script, contains(r'LOG_MAX_MB="${LOG_MAX_MB:-200}"'));
@@ -1150,12 +1181,7 @@ void main() {
         ),
       );
       // building_map_server 가 이 맵의 building.yaml 을 물어야 한다.
-      expect(
-        xml,
-        contains(
-          r'args="$(var map_dir)/gwanghee.building.yaml"',
-        ),
-      );
+      expect(xml, contains(r'args="$(var map_dir)/gwanghee.building.yaml"'));
       expect(
         xml,
         contains(
@@ -1273,6 +1299,12 @@ void main() {
       expect(
         script.indexOf('gwanghee.launch.xml'),
         lessThan(script.indexOf('gwanghee_nav2.launch.xml')),
+      );
+      expect(script, contains('flock -n 9'));
+      expect(script, contains('last_signature'));
+      expect(
+        script,
+        contains(r'gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)'),
       );
     });
 

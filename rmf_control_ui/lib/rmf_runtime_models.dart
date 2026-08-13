@@ -96,7 +96,10 @@ Set<String> parseFleetStateRobots(String stdout) {
     if (!inRobots) continue;
     final match = entry.firstMatch(line);
     if (match == null) continue;
-    final name = match.group(1)!.trim().replaceAll(RegExp('^[\'"]|[\'"]\$'), '');
+    final name = match
+        .group(1)!
+        .trim()
+        .replaceAll(RegExp('^[\'"]|[\'"]\$'), '');
     if (name.isNotEmpty) names.add(name);
   }
   return names;
@@ -155,10 +158,7 @@ Map<String, ({double x, double y, double yaw})> parseFleetStatePoses(
       // 목록 항목의 시작. 로봇 항목인지 path 안쪽인지는 들여쓰기로 가린다.
       if (robot == null || item.group(1)!.length <= itemIndent) {
         flush();
-        robot = item.group(2)!.trim().replaceAll(
-          RegExp('^[\'"]|[\'"]\$'),
-          '',
-        );
+        robot = item.group(2)!.trim().replaceAll(RegExp('^[\'"]|[\'"]\$'), '');
         itemIndent = item.group(1)!.length;
         inLocation = false;
       }

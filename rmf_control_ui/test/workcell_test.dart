@@ -168,6 +168,25 @@ void main() {
       expect(code, contains('DispenserResult.SUCCESS'));
     });
 
+    test('같은 RMF 요청으로 팔을 두 번 움직이지 않는다', () {
+      final code = script();
+      expect(code, contains('self.completed_requests = set()'));
+      expect(code, contains('msg.request_guid in cell.completed_requests'));
+      expect(code, contains('cell.active_request == msg.request_guid'));
+      expect(code, contains('cell.completed_requests.add(msg.request_guid)'));
+    });
+
+    test('느게 뜨어도 이미 보낸 픽업 요청을 받는다', () {
+      final code = script();
+      expect(
+        code,
+        contains(
+          "DispenserRequest, '/dispenser_requests',\n"
+          '            lambda msg: self.on_request(msg, dispenser=True), state_qos',
+        ),
+      );
+    });
+
     test('팔에 궤적을 보낸다', () {
       final code = script();
       expect(code, contains('arm_controller/joint_trajectory'));

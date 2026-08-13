@@ -94,15 +94,25 @@ void main() {
       expect(script, contains('Nav2 가 거절했습니다'));
     });
 
-    test('이동이 아닌 단계도 끝났다고 알린다', () {
-      // 붙잡고만 있으면 작업이 영영 안 끝난다. RMF 는 이 동작이 무엇인지
-      // 모르므로 끝을 알리는 것은 어댑터 몫이다.
+    test('선점된 예전 목표의 취소 결과가 현재 실행을 끝내지 않는다', () {
+      expect(script, contains('self.goal_generation += 1'));
+      expect(script, contains('generation != self.goal_generation'));
+      expect(script, contains('self.execution is not execution'));
+      expect(
+        script,
+        contains(
+          'lambda done: self.on_goal_result(done, generation, execution)',
+        ),
+      );
+    });
+
+    test('armLoad를 워크셀 요청으로 보내고 성공 뒤 끝낸다', () {
       expect(script, contains('def execute_action'));
       expect(script, contains('execution.finished()'));
-      // RMF 는 안쪽 description 만 넘겨 준다. 바깥의 밀리초 값은 여기까지
-      // 닿지 않아, 5초짜리 동작이 1초 만에 끝났다.
-      expect(script, contains("description.get(key)"));
-      expect(script, contains("('seconds', 1.0)"));
+      expect(script, contains("DispenserRequest, '/dispenser_requests'"));
+      expect(script, contains("DispenserResult, '/dispenser_results'"));
+      expect(script, contains("target_guid = description.get('target_guid')"));
+      expect(script, contains('result.status != DispenserResult.SUCCESS'));
     });
 
     test('진행 상황을 앱이 읽을 수 있게 낸다', () {
@@ -140,7 +150,10 @@ void main() {
     test('실패해도 붙잡고 있지 않는다', () {
       // 안 알리면 그 작업이 영영 안 끝난다.
       final tail = script.substring(script.indexOf('def on_goal_result'));
-      expect(tail.substring(0, 900), contains('self.finish()'));
+      expect(
+        tail.substring(0, 1400),
+        contains('self.finish(generation, execution)'),
+      );
     });
   });
 }

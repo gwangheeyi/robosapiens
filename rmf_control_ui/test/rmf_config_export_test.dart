@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rmf_control_ui/map_project_models.dart';
 import 'package:rmf_control_ui/rmf_config_export_io.dart';
 
 /// 설정 파일을 디스크로 내보낼 때 쓰는 경로 규칙.
@@ -7,6 +10,8 @@ import 'package:rmf_control_ui/rmf_config_export_io.dart';
 /// ID 에서 만들어지고 로봇 ID 는 사람이 타자로 친다. `..` 이 섞이면 배포
 /// 디렉터리 밖에 파일을 쓰게 된다.
 void main() {
+  tearDown(() => debugRmfConfigRootOverride = null);
+
   group('내보낼 경로', () {
     test('로봇 디렉터리를 그대로 지킨다', () {
       expect(
@@ -51,5 +56,39 @@ void main() {
       expect(safeMapDirectoryName('창고 A/B'), isNot(contains('/')));
       expect(safeMapDirectoryName(''), 'map');
     });
+  });
+
+  test('다시 내보낼 때 사라진 로봇의 앱 생성 디렉터리만 지운다', () async {
+    final root = await Directory.systemTemp.createTemp('rmf-export-test-');
+    addTearDown(() => root.delete(recursive: true));
+    debugRmfConfigRootOverride = root.path;
+    final robots = Directory('${root.path}/rmf_maps/demo/robots');
+    final stale = Directory('${robots.path}/old_robot');
+    final custom = Directory('${robots.path}/custom_robot');
+    await stale.create(recursive: true);
+    await custom.create(recursive: true);
+    await File(
+      '${stale.path}/spawn.launch.xml',
+    ).writeAsString('<!-- rmf_control_ui 가 맵 프로젝트에서 생성했다 -->');
+    await File(
+      '${custom.path}/spawn.launch.xml',
+    ).writeAsString('<!-- 사용자 파일 -->');
+
+    final result = await exportProjectConfigFiles(
+      mapName: 'demo',
+      files: [
+        MapProjectFile(
+          fileName: 'robots/pinky_01/spawn.launch.xml',
+          kind: 'launch',
+          content: '<!-- rmf_control_ui 가 맵 프로젝트에서 생성했다 -->',
+          generatedAt: DateTime(2026),
+        ),
+      ],
+    );
+
+    expect(result.success, isTrue);
+    expect(stale.existsSync(), isFalse);
+    expect(custom.existsSync(), isTrue);
+    expect(Directory('${robots.path}/pinky_01').existsSync(), isTrue);
   });
 }
