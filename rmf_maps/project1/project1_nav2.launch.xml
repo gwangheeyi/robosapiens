@@ -32,16 +32,16 @@
     <param name="node_names" value="[map_server]"/>
   </node>
 
-  <!-- PK_01 · 핑키 1호 -->
+  <!-- pinky_01 · PK-01 -->
   <group>
-    <include file="$(var map_dir)/robots/PK_01/nav2.launch.xml">
+    <include file="$(var map_dir)/robots/pinky_01/nav2.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
     </include>
   </group>
 
-  <!-- PK_02 · 핑키 2호 -->
+  <!-- pinky_02 · PK-02 -->
   <group>
-    <include file="$(var map_dir)/robots/PK_02/nav2.launch.xml">
+    <include file="$(var map_dir)/robots/pinky_02/nav2.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
     </include>
   </group>

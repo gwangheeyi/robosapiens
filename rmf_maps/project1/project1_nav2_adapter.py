@@ -16,6 +16,7 @@ import json
 import math
 import sys
 import threading
+import uuid
 
 import rclpy
 import rclpy.node
@@ -30,6 +31,8 @@ import rmf_adapter.easy_full_control as rmf_easy
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
+from rmf_dispenser_msgs.msg import DispenserRequest, DispenserRequestItem, DispenserResult
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from std_msgs.msg import String as StringMsg
 import tf2_ros
 
@@ -52,8 +55,8 @@ def report(**fields):
 
 # RMF 가 아는 이름 -> ROS 네임스페이스.
 ROBOT_NAMESPACES = {
-    'PK_01': 'pinky_01',
-    'PK_02': 'pinky_02',
+    'pinky_01': 'pinky_01',
+    'pinky_02': 'pinky_02',
 }
 
 # 건물 층 이름. nav graph 의 level 과 같아야 한다.
@@ -78,10 +81,26 @@ class RobotAdapter:
         self.update_handle = None
         self.execution = None
         self.goal_handle = None
+        # Nav2 액션 결과는 비동기로 늦게 돌아온다. 새 목적지가 옛 목적지를
+        # 선점한 뒤 옛 취소 결과가 도착해도 현재 RMF 실행을 끝내면 안 된다.
+        self.goal_generation = 0
         self.warned = False
         self.lock = threading.Lock()
         self.nav = ActionClient(
             node, NavigateToPose, f'/{namespace}/navigate_to_pose')
+        request_qos = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.dispenser_requests = node.create_publisher(
+            DispenserRequest, '/dispenser_requests', request_qos)
+        self.dispenser_result_subscription = node.create_subscription(
+            DispenserResult, '/dispenser_results',
+            self.on_dispenser_result, 10)
+        self.dispenser_execution = None
+        self.dispenser_request_guid = None
+        self.dispenser_target_guid = None
 
     # ── RMF 가 부르는 쪽 ────────────────────────────────────────────────
 
@@ -96,6 +115,8 @@ class RobotAdapter:
     def navigate(self, destination, execution):
         """RMF 가 준 목적지로 Nav2 를 보낸다."""
         with self.lock:
+            self.goal_generation += 1
+            generation = self.goal_generation
             self.execution = execution
         x, y, yaw = destination.position
         self.node.get_logger().info(
@@ -108,7 +129,7 @@ class RobotAdapter:
             self.node.get_logger().error(
                 f'[{self.name}] Nav2 가 없습니다. '
                 f'/{self.namespace}/navigate_to_pose 를 확인하세요.')
-            self.finish()
+            self.finish(generation, execution)
             return
 
         goal = NavigateToPose.Goal()
@@ -121,25 +142,38 @@ class RobotAdapter:
         goal.pose.pose.orientation.w = math.cos(yaw / 2)
 
         future = self.nav.send_goal_async(goal)
-        future.add_done_callback(self.on_goal_response)
+        future.add_done_callback(
+            lambda done: self.on_goal_response(done, generation, execution))
 
-    def on_goal_response(self, future):
+    def on_goal_response(self, future, generation, execution):
         handle = future.result()
         if handle is None or not handle.accepted:
+            with self.lock:
+                current = generation == self.goal_generation
+            if not current:
+                return
             self.node.get_logger().error(f'[{self.name}] Nav2 가 거절했습니다.')
-            self.finish()
+            self.finish(generation, execution)
             return
         with self.lock:
+            if generation != self.goal_generation:
+                handle.cancel_goal_async()
+                return
             self.goal_handle = handle
-        handle.get_result_async().add_done_callback(self.on_goal_result)
+        handle.get_result_async().add_done_callback(
+            lambda done: self.on_goal_result(done, generation, execution))
 
-    def on_goal_result(self, future):
+    def on_goal_result(self, future, generation, execution):
         # 결과를 봐야 한다. 안 보고 끝났다고 알리면 RMF 는 그 자리에 닿은 줄
         # 알고 다음 단계로 넘어간다 — 픽업에 가지도 않았는데 드랍오프로 가는
         # 것이 이것 때문이었다.
         status = getattr(future.result(), 'status', None)
         ok = status == GoalStatus.STATUS_SUCCEEDED
         with self.lock:
+            # 새 목표가 이 목표를 선점했다. Nav2의 CANCELED/ABORTED는 옛 목표의
+            # 결과이지 현재 RMF 실행의 실패가 아니다.
+            if generation != self.goal_generation:
+                return
             self.goal_handle = None
         if ok:
             self.node.get_logger().info(f'[{self.name}] 도착했습니다.')
@@ -150,15 +184,16 @@ class RobotAdapter:
                 f'{status}). 도착 반경이 코스트맵 한 칸보다 촘촘하면 영영 '
                 f'못 맞춥니다.')
             report(robot=self.name, event='navigate_failed', status=status)
-        self.finish()
+        self.finish(generation, execution)
 
-    def finish(self):
+    def finish(self, generation, execution):
         """RMF 에 이 명령이 끝났다고 알린다."""
         with self.lock:
-            execution = self.execution
+            if (generation != self.goal_generation or
+                    self.execution is not execution):
+                return
             self.execution = None
-        if execution is not None:
-            execution.finished()
+        execution.finished()
 
     def stop(self, activity):
         """RMF 가 멈추라고 한다. 지금 가고 있는 것만 멈춘다."""
@@ -171,26 +206,24 @@ class RobotAdapter:
         if handle is not None:
             handle.cancel_goal_async()
         with self.lock:
+            self.goal_generation += 1
             self.execution = None
             self.goal_handle = None
+            if self.dispenser_execution is execution:
+                self.dispenser_execution = None
+                self.dispenser_request_guid = None
+                self.dispenser_target_guid = None
 
     def execute_action(self, category, description, execution):
-        """RMF 가 이동이 아닌 단계를 맡길 때 부른다.
-
-        앱의 연속 작업에서 `armLoad` 가 여기로 온다. RMF 는 이 동작이 무엇인지
-        모르고, 끝났다고 알려 주는 것은 이쪽 몫이다. 붙잡고만 있으면 작업이
-        영영 안 끝난다.
-
-        **아직 매니퓰레이터에게 실제로 시키지는 않는다.** OMX 쪽에 이 요청을
-        받는 노드가 없다. 지금은 예상 시간만큼 기다리고 끝났다고 알린다.
-        여기가 그 노드를 부를 자리다.
-        """
-        # RMF 는 안쪽 description 만 넘겨 준다. 바깥의
-        # unix_millis_action_duration_estimate 는 여기까지 닿지 않으므로
-        # 앱이 안쪽에도 `seconds` 를 적어 준다. 그래도 없으면 1초로 본다 —
-        # 5초짜리가 1초 만에 끝난 일이 이것 때문이었다.
+        """armLoad 를 해당 픽업 자리의 RMF 워크셀 요청으로 바꾼다."""
         seconds = 1.0
+        target_guid = None
+        item_type = 'policy_1'
+        quantity = 1
         if isinstance(description, dict):
+            target_guid = description.get('target_guid')
+            item_type = str(description.get('item_type') or 'policy_1')
+            quantity = max(1, int(description.get('quantity') or 1))
             for key, scale in (('seconds', 1.0),
                                ('unix_millis_action_duration_estimate',
                                 0.001)):
@@ -198,18 +231,61 @@ class RobotAdapter:
                 if isinstance(value, (int, float)) and value > 0:
                     seconds = float(value) * scale
                     break
+        if category != 'armLoad' or not target_guid:
+            self.node.get_logger().error(
+                f'[{self.name}] 동작 [{category}]에 워크셀 위치가 없습니다.')
+            report(robot=self.name, event='action_failed', category=category)
+            execution.finished()
+            return
+
+        request_guid = f'{self.name}-{uuid.uuid4()}'
+        with self.lock:
+            self.execution = execution
+            self.dispenser_execution = execution
+            self.dispenser_request_guid = request_guid
+            self.dispenser_target_guid = str(target_guid)
         self.node.get_logger().info(
-            f'[{self.name}] 동작 [{category}] · {seconds:.1f}초')
+            f'[{self.name}] 동작 [{category}] → 워크셀 [{target_guid}] 요청 '
+            f'({request_guid})')
         report(robot=self.name, event='action_start',
                category=category, seconds=seconds)
+        request = DispenserRequest()
+        request.time = self.node.get_clock().now().to_msg()
+        request.request_guid = request_guid
+        request.target_guid = str(target_guid)
+        request.transporter_type = self.name
+        item = DispenserRequestItem()
+        item.type_guid = item_type
+        item.quantity = quantity
+        item.compartment_name = 'pinky_tray'
+        request.items = [item]
+        self.dispenser_requests.publish(request)
 
-        def done():
-            timer.cancel()
-            self.node.get_logger().info(f'[{self.name}] 동작 [{category}] 끝.')
-            report(robot=self.name, event='action_done', category=category)
-            execution.finished()
-
-        timer = self.node.create_timer(seconds, done)
+    def on_dispenser_result(self, result):
+        with self.lock:
+            if (result.request_guid != self.dispenser_request_guid or
+                    self.dispenser_execution is None):
+                return
+            if result.status == DispenserResult.ACKNOWLEDGED:
+                self.node.get_logger().info(
+                    f'[{self.name}] 워크셀 [{self.dispenser_target_guid}]이 '
+                    '요청을 받았습니다.')
+                return
+            if result.status != DispenserResult.SUCCESS:
+                self.node.get_logger().error(
+                    f'[{self.name}] 워크셀 요청 실패 (status={result.status})')
+                return
+            execution = self.dispenser_execution
+            target = self.dispenser_target_guid
+            self.dispenser_execution = None
+            self.dispenser_request_guid = None
+            self.dispenser_target_guid = None
+            if self.execution is execution:
+                self.execution = None
+        self.node.get_logger().info(
+            f'[{self.name}] 워크셀 [{target}] 동작 완료.')
+        report(robot=self.name, event='action_done', category='armLoad')
+        execution.finished()
 
     # ── RMF 에 알리는 쪽 ────────────────────────────────────────────────
 

@@ -25,8 +25,9 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # 로봇 ID, ROS 네임스페이스, 맡은 픽업 자리, 맡은 드랍오프 자리.
 WORKCELLS = [
-    ('OMX_01', 'omx_01', ['픽업1'], []),
-    ('OMX_02', 'omx_02', ['픽업2'], []),
+    ('omx_01', 'omx_01', ['픽업1'], []),
+    ('omx_02', 'omx_02', ['픽업2'], []),
+    ('omx_03', 'omx_03', ['픽업3'], []),
 ]
 
 # 팔이 한 번 움직이는 데 걸리는 시간 [s].
@@ -34,13 +35,17 @@ WORKCELLS = [
 # RMF 는 이 시간을 모른다. 우리가 끝났다고 알릴 때까지 기다릴 뿐이다.
 ACTION_SECONDS = 4.0
 
-# 집는 자세와 놓는 자세. OpenMANIPULATOR-X 의 관절 넷이다.
-#
-# 실제 물건 자리에 맞춰 고쳐야 한다. 지금 값은 팔을 앞으로 뻗었다 세우는
-# 것뿐이라, 물건을 집지는 않고 **움직임이 실제로 나가는지** 보는 용도다.
+# 물품 종류별 가상 모방학습 policy. 모든 OMX가 같은 다섯 policy를 제공한다.
+# 각 값은 시간 비율과 joint1~4 자세이며 실제 추론기 연결 전 동작 검증용이다.
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4']
-PICK_POSE = [0.0, 0.6, -0.4, 0.8]
 HOME_POSE = [0.0, -1.0, 0.3, 0.7]
+POLICY_MOTIONS = {
+    'policy_1': [[0.00, 0.45, -0.30, 0.65], [0.00, 0.75, -0.55, 0.90]],
+    'policy_2': [[0.35, 0.35, -0.20, 0.55], [0.55, 0.70, -0.45, 0.80]],
+    'policy_3': [[-0.35, 0.35, -0.20, 0.55], [-0.55, 0.70, -0.45, 0.80]],
+    'policy_4': [[0.20, 0.15, 0.05, 0.45], [0.35, 0.55, -0.20, 0.70]],
+    'policy_5': [[-0.20, 0.15, 0.05, 0.45], [-0.35, 0.55, -0.20, 0.70]],
+}
 
 
 def now_msg(node):
@@ -58,6 +63,8 @@ class Workcell:
         self.dispensers = dispensers
         self.ingestors = ingestors
         self.busy = False
+        self.active_request = None
+        self.completed_requests = set()
         self.lock = threading.Lock()
         self.arm = node.create_publisher(
             JointTrajectory, f'/{namespace}/arm_controller/joint_trajectory', 10)
@@ -65,15 +72,18 @@ class Workcell:
     def serves(self, guid):
         return guid in self.dispensers or guid in self.ingestors
 
-    def move(self, pose, seconds):
-        """팔에 관절 궤적을 보낸다."""
+    def run_policy(self, policy_id, seconds):
+        """선택한 가상 policy의 관절 궤적 전체를 한 번에 보낸다."""
         message = JointTrajectory()
         message.joint_names = list(JOINT_NAMES)
-        point = JointTrajectoryPoint()
-        point.positions = list(pose)
-        point.time_from_start.sec = int(seconds)
-        point.time_from_start.nanosec = int((seconds % 1) * 1e9)
-        message.points = [point]
+        poses = [*POLICY_MOTIONS[policy_id], HOME_POSE]
+        for index, pose in enumerate(poses, start=1):
+            point = JointTrajectoryPoint()
+            point.positions = list(pose)
+            at = seconds * index / len(poses)
+            point.time_from_start.sec = int(at)
+            point.time_from_start.nanosec = int((at % 1) * 1e9)
+            message.points.append(point)
         self.arm.publish(message)
 
 
@@ -103,12 +113,14 @@ class WorkcellAdapter(rclpy.node.Node):
             for robot_id, namespace, dispensers, ingestors in WORKCELLS
         ]
 
+        # Fleet adapter의 요청은 transient local이다. 워크셀이 늦게 떠도 이미
+        # 보낸 픽업 요청을 받아야 하므로 같은 QoS로 구독한다.
         self.create_subscription(
             DispenserRequest, '/dispenser_requests',
-            lambda msg: self.on_request(msg, dispenser=True), 10)
+            lambda msg: self.on_request(msg, dispenser=True), state_qos)
         self.create_subscription(
             IngestorRequest, '/ingestor_requests',
-            lambda msg: self.on_request(msg, dispenser=False), 10)
+            lambda msg: self.on_request(msg, dispenser=False), state_qos)
 
         # 상태를 안 내면 RMF 가 이 워크셀을 없는 것으로 보고 요청조차 안 한다.
         self.create_timer(1.0, self.publish_states)
@@ -138,24 +150,50 @@ class WorkcellAdapter(rclpy.node.Node):
             # 우리 것이 아니다. 남의 워크셀 요청일 수 있으므로 조용히 넘긴다.
             return
 
-        # 같은 요청이 여러 번 온다. RMF 는 답이 올 때까지 되풀이해 부른다.
+        # 같은 요청은 답을 받을 때까지 반복된다. 같은 GUID로 팔을 두 번
+        # 움직이지 않고, 현재 상태만 다시 답한다.
         with cell.lock:
-            if cell.busy:
+            if msg.request_guid in cell.completed_requests:
+                repeated_status = DispenserResult.SUCCESS
+            elif cell.active_request == msg.request_guid:
+                repeated_status = DispenserResult.ACKNOWLEDGED
+            else:
+                repeated_status = None
+            if repeated_status is not None:
+                pass
+            elif cell.busy:
                 return
-            cell.busy = True
+            else:
+                cell.busy = True
+                cell.active_request = msg.request_guid
+        if repeated_status is not None:
+            self.answer(msg, dispenser, repeated_status)
+            return
 
         self.get_logger().info(
             f'[{cell.robot_id}] {msg.target_guid} 요청 받음 '
             f'({msg.request_guid})')
         self.answer(msg, dispenser, DispenserResult.ACKNOWLEDGED)
 
-        cell.move(PICK_POSE, ACTION_SECONDS / 2)
+        policy_id = msg.items[0].type_guid if msg.items else 'policy_1'
+        if policy_id not in POLICY_MOTIONS:
+            self.get_logger().error(
+                f'[{cell.robot_id}] 알 수 없는 물품 policy [{policy_id}]')
+            with cell.lock:
+                cell.busy = False
+                cell.active_request = None
+            self.answer(msg, dispenser, DispenserResult.FAILED)
+            return
+        self.get_logger().info(
+            f'[{cell.robot_id}] 물품 [{policy_id}] 가상 policy 실행')
+        cell.run_policy(policy_id, ACTION_SECONDS)
 
         def finish():
             timer.cancel()
-            cell.move(HOME_POSE, ACTION_SECONDS / 2)
             with cell.lock:
                 cell.busy = False
+                cell.active_request = None
+                cell.completed_requests.add(msg.request_guid)
             self.get_logger().info(f'[{cell.robot_id}] {msg.target_guid} 끝.')
             self.answer(msg, dispenser, DispenserResult.SUCCESS)
 

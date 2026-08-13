@@ -388,12 +388,14 @@ class _MockTaskStep {
     this.destination,
     this.destinationName,
     this.durationSeconds = 0,
+    this.policyId = 'policy_1',
   });
 
   final _TaskStepType type;
   Offset? destination;
   String? destinationName;
   final double durationSeconds;
+  final String policyId;
   _TaskStepStatus status = _TaskStepStatus.pending;
   double remainingSeconds = 0;
   String? failureReason;
@@ -401,7 +403,7 @@ class _MockTaskStep {
   String get label => switch (type) {
     _TaskStepType.navigate => 'Pinky 이동 · $destinationName',
     _TaskStepType.returnHome => '홈 복귀(자동) · ${destinationName ?? '배정 대기'}',
-    _TaskStepType.armLoad => 'OMX-AI 픽업/적재',
+    _TaskStepType.armLoad => 'OMX-AI 픽업/적재 · $policyId',
     _TaskStepType.wait => '대기 · ${durationSeconds.toStringAsFixed(0)}초',
   };
 }
@@ -461,11 +463,17 @@ class _MockTask {
 }
 
 class _TaskStepDraft {
-  _TaskStepDraft(this.type, {this.destination, this.durationSeconds = 3});
+  _TaskStepDraft(
+    this.type, {
+    this.destination,
+    this.durationSeconds = 3,
+    this.policyId = 'policy_1',
+  });
 
   _TaskStepType type;
   Offset? destination;
   double durationSeconds;
+  String policyId;
 }
 
 class _TaskEditorResult {
@@ -661,14 +669,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 자리마다 이름을 둔다. 숫자를 그냥 흩어 두면 메뉴를 가운데 하나 끼울 때
   /// 뒤의 숫자를 전부 같이 밀어야 하고, 한 군데만 놓치면 엉뚱한 화면이 열린다.
   /// 순서는 일하는 차례다 — 맵을 만들고, 그 도면에서 지도를 굽고, 로봇을
-  /// 올리고, 설정을 내보내고, 작업을 시킨다.
+  /// 올리고, 작업을 관리하고, ROS2 상태를 확인한 뒤 설정 파일을 다룬다.
   static const _menuDashboard = 0;
   static const _menuMap = 1;
   static const _menuGrid = 2;
   static const _menuRobots = 3;
-  static const _menuFiles = 4;
+  static const _menuTasks = 4;
   static const _menuRos2 = 5;
-  static const _menuTasks = 6;
+  static const _menuFiles = 6;
   static const _menuLog = 7;
   static const _menuAnalytics = 8;
 
@@ -889,6 +897,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 destination: step.destination,
                 destinationName: step.destinationName,
                 durationSeconds: step.durationSeconds,
+                policyId: step.policyId,
               ),
           ],
         );
@@ -972,6 +981,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
               : {'x': step.destination!.dx, 'y': step.destination!.dy},
           'destinationName': step.destinationName,
           'durationSeconds': step.durationSeconds,
+          'policyId': step.policyId,
           'status': step.status.name,
           'remainingSeconds': step.remainingSeconds,
           'failureReason': step.failureReason,
@@ -1012,6 +1022,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 destinationName: raw['destinationName'] as String?,
                 durationSeconds:
                     (raw['durationSeconds'] as num?)?.toDouble() ?? 0,
+                policyId: raw['policyId'] as String? ?? 'policy_1',
               )
               ..status = _TaskStepStatus.values.byName(
                 raw['status'] as String? ?? _TaskStepStatus.pending.name,
@@ -6690,6 +6701,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           kind: step.type.name,
           placeName: step.destinationName,
           durationSeconds: step.durationSeconds,
+          policyId: step.policyId,
         ),
     ], homePlaceName: registered?.chargerWaypoint);
     if (converted.isEmpty) {
@@ -7510,6 +7522,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         durationSeconds: draft.type == _TaskStepType.armLoad
             ? 9.6
             : draft.durationSeconds,
+        policyId: draft.policyId,
       );
     }).toList();
     final task = _MockTask(
@@ -7567,6 +7580,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 step.type,
                 destination: step.destination,
                 durationSeconds: step.durationSeconds,
+                policyId: step.policyId,
               ),
             )
             .toList(),
@@ -7610,6 +7624,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         durationSeconds: draft.type == _TaskStepType.armLoad
             ? 9.6
             : draft.durationSeconds,
+        policyId: draft.policyId,
       );
     }).toList();
     final previousRobot = _mockRobots
@@ -12131,9 +12146,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '맵 관리',
                         '그리드맵',
                         '로봇',
-                        '설정 파일',
-                        'ROS2 확인',
                         '작업',
+                        'ROS2 확인',
+                        '설정 파일',
                         '로그 분석',
                         '운영 분석',
                       ][_selectedMenu],
@@ -12939,6 +12954,7 @@ class _SequentialTaskEditorDialogState
                   step.type,
                   destination: _normalizedDestination(step.destination),
                   durationSeconds: step.durationSeconds,
+                  policyId: step.policyId,
                 ),
               )
               .toList()
@@ -13217,10 +13233,29 @@ class _SequentialTaskEditorDialogState
                                           fontWeight: FontWeight.w700,
                                         ),
                                       )
-                                    : const Text(
-                                        '현재 위치에서 화물을 집어 Pinky 데크에 적재',
-                                        style: TextStyle(
-                                          color: Color(0xFF475569),
+                                    : DropdownButtonFormField<String>(
+                                        initialValue: step.policyId,
+                                        decoration: const InputDecoration(
+                                          labelText: '물품 정책',
+                                          helperText: '물품 종류에 맞는 가상 policy',
+                                          isDense: true,
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: [
+                                          for (
+                                            var policy = 1;
+                                            policy <= 5;
+                                            policy++
+                                          )
+                                            DropdownMenuItem(
+                                              value: 'policy_$policy',
+                                              child: Text(
+                                                '물품 $policy · policy_$policy',
+                                              ),
+                                            ),
+                                        ],
+                                        onChanged: (value) => setState(
+                                          () => step.policyId = value!,
                                         ),
                                       ),
                               ),
@@ -17889,9 +17924,8 @@ class _NavigationRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 일하는 차례대로 둔다. 맵을 만들고 → 로봇을 등록하고 → 설정을 내보내고
-    // → 백엔드를 띄우고 → 로봇을 올리고 → 작업을 시킨다. 가운데 셋은 로봇
-    // 화면 안에 있으므로, 큰 차례는 맵 → 로봇 → 설정 → 작업이 된다.
+    // 주요 운영 메뉴는 로봇 등록 → 작업 관리 → ROS2 확인 → 설정 파일
+    // 순서로 둔다.
     // 그리드맵은 맵 바로 뒤에 둔다. 도면에서 파생되는 산출물이고, 이것이
     // 없으면 뒤의 로봇·작업이 아예 돌지 않는다.
     const items = [
@@ -17899,10 +17933,9 @@ class _NavigationRail extends StatelessWidget {
       (Icons.map_outlined, '맵 관리'),
       (Icons.grid_on_outlined, '그리드맵'),
       (Icons.smart_toy_outlined, '로봇'),
-      (Icons.description_outlined, '설정 파일'),
-      // 설정 파일 바로 뒤다. 내보낸 설정으로 뜬 것이 실제로 무엇인지 보는 자리다.
-      (Icons.hub_outlined, 'ROS2 확인'),
       (Icons.assignment_outlined, '작업'),
+      (Icons.hub_outlined, 'ROS2 확인'),
+      (Icons.description_outlined, '설정 파일'),
       (Icons.receipt_long_outlined, '로그 분석'),
       (Icons.analytics_outlined, '운영 분석'),
     ];

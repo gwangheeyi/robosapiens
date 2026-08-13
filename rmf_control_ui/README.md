@@ -9,6 +9,8 @@
 - [앱 전용 Mock 로봇 가이드](docs/APP_MOCK_ROBOTS.md)
 - [Mock 로봇 작업 관리 가이드](docs/MOCK_TASKS.md)
 - [식품 주문 · Pinky · OMX-AI 연동 설계](docs/FOOD_ORDER_PINKY_OMX_WORKFLOW.md)
+- [OMX 물품별 Policy와 모방학습 데이터 운영](docs/OMX_POLICY_AND_IMITATION_LEARNING.md)
+- [실제 Pinky 최초 기동과 수동 주행 절차](docs/PHYSICAL_PINKY_FIRST_RUN.md)
 - [ROS 관제 시스템 Waypoint 아키텍처 매핑](docs/ROS_CONTROL_WAYPOINT_ARCHITECTURE.md)
 - [Waypoint·Lane 혼합형 자동 경로 지정 가이드](docs/HYBRID_ROUTE_AUTO_PLANNING.md)
 - [Pinky 가상 로봇 · Fleet Adapter 연동](docs/PINKY_FLEET_INTEGRATION.md)

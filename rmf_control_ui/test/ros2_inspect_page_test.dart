@@ -19,7 +19,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('설정 파일 바로 뒤에 있다', (tester) async {
+  testWidgets('작업 관리와 설정 파일 사이에 있다', (tester) async {
     tester.view.physicalSize = const Size(1600, 1100);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -27,12 +27,12 @@ void main() {
     await tester.pumpWidget(const RmfControlApp());
     await tester.pumpAndSettle();
 
-    // 사이드바에서 설정 파일 → ROS2 확인 → 작업 순서다.
+    // 사이드바에서 작업 → ROS2 확인 → 설정 파일 순서다.
     final files = tester.getTopLeft(find.text('설정 파일')).dy;
     final ros2 = tester.getTopLeft(find.text('ROS2 확인')).dy;
     final tasks = tester.getTopLeft(find.text('작업').first).dy;
-    expect(files, lessThan(ros2));
-    expect(ros2, lessThan(tasks));
+    expect(tasks, lessThan(ros2));
+    expect(ros2, lessThan(files));
   });
 
   testWidgets('네 탭이 있다', (tester) async {

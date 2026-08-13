@@ -382,17 +382,17 @@ void main() {
   });
 
   group('메뉴 차례', () {
-    // 일하는 차례대로 둔다 — 맵을 만들고 → 로봇을 등록하고 → 설정을 내보내고
-    // → 백엔드를 띄우고 → 로봇을 올리고 → 작업을 시킨다.
-    test('사이드바가 설정 파일을 작업보다 앞에 둔다', () {
+    // 주요 운영 메뉴는 로봇 등록 → 작업 관리 → ROS2 확인 → 설정 파일이다.
+    test('사이드바가 요청한 운영 순서를 따른다', () {
       final source = File('lib/main.dart').readAsStringSync();
       final menu = source.substring(
         source.indexOf("(Icons.grid_view_rounded, '대시보드')"),
         source.indexOf("(Icons.analytics_outlined, '운영 분석')"),
       );
       expect(menu.indexOf('맵 관리'), lessThan(menu.indexOf('로봇')));
-      expect(menu.indexOf('로봇'), lessThan(menu.indexOf('설정 파일')));
-      expect(menu.indexOf('설정 파일'), lessThan(menu.indexOf('작업')));
+      expect(menu.indexOf('로봇'), lessThan(menu.indexOf('작업')));
+      expect(menu.indexOf('작업'), lessThan(menu.indexOf('ROS2 확인')));
+      expect(menu.indexOf('ROS2 확인'), lessThan(menu.indexOf('설정 파일')));
     });
 
     test('제목 차례가 사이드바와 같다', () {
@@ -402,7 +402,8 @@ void main() {
         source.indexOf("title: const ["),
         source.indexOf("][_selectedMenu]"),
       );
-      expect(titles.indexOf('설정 파일'), lessThan(titles.indexOf('작업')));
+      expect(titles.indexOf('작업'), lessThan(titles.indexOf('ROS2 확인')));
+      expect(titles.indexOf('ROS2 확인'), lessThan(titles.indexOf('설정 파일')));
     });
 
     test('메뉴 자리마다 이름이 있다', () {
@@ -507,20 +508,20 @@ void main() {
   });
 
   group('로그 분석 메뉴', () {
-    test('작업 바로 뒤에 온다', () {
+    test('설정 파일 뒤에 온다', () {
       final source = File('lib/main.dart').readAsStringSync();
       final menu = source.substring(
         source.indexOf("(Icons.grid_view_rounded, '대시보드')"),
         source.indexOf("(Icons.analytics_outlined, '운영 분석')"),
       );
-      expect(menu.indexOf('작업'), lessThan(menu.indexOf('로그 분석')));
+      expect(menu.indexOf('설정 파일'), lessThan(menu.indexOf('로그 분석')));
     });
 
-    test('작업 다음 자리다', () {
+    test('설정 파일 다음 자리다', () {
       final source = File('lib/main.dart').readAsStringSync();
       expect(
         _menuSlot(source, '_menuLog'),
-        _menuSlot(source, '_menuTasks') + 1,
+        _menuSlot(source, '_menuFiles') + 1,
       );
     });
   });

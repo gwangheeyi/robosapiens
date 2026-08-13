@@ -155,6 +155,7 @@ class RmfTaskStepInput {
     required this.kind,
     this.placeName,
     this.durationSeconds = 0,
+    this.policyId = 'policy_1',
   });
 
   /// `navigate` · `returnHome` · `armLoad` · `wait` 중 하나.
@@ -163,6 +164,9 @@ class RmfTaskStepInput {
   /// 이동 단계의 목적지 Waypoint 이름.
   final String? placeName;
   final double durationSeconds;
+
+  /// 워크셀이 실행할 물품별 가상 정책. DispenserRequest item type으로 전달된다.
+  final String policyId;
 }
 
 /// 옮기면서 버린 것. 조용히 버리면 화면과 실제가 어긋난다.
@@ -219,7 +223,11 @@ RmfTaskConversion convertTaskSteps(
         activities.add(
           RmfTaskActivity.performAction(
             armLoadCategory,
-            description: {'target_guid': lastPlace},
+            description: {
+              'target_guid': lastPlace,
+              'item_type': step.policyId,
+              'quantity': 1,
+            },
             durationSeconds: step.durationSeconds > 0
                 ? step.durationSeconds
                 : 60,

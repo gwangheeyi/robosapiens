@@ -227,6 +227,10 @@ RMF의 `building_map_server`가 이미 그 이름으로 `BuildingMap`을 냅니�
 
 ## 6. ④ 실물 핑키 — 마지막
 
+실물 하드웨어를 처음 켜는 날에는 Nav2보다 먼저
+[실제 Pinky 최초 기동과 수동 주행 절차](PHYSICAL_PINKY_FIRST_RUN.md)에 따라
+모터, `/odom`, `/scan`, TF와 정지를 검증합니다.
+
 바뀌는 것은 맨 아래 한 겹입니다.
 
 1. Gazebo 대신 `pinky_bringup`으로 진짜 모터·라이다를 띄웁니다

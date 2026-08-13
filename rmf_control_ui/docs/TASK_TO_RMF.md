@@ -340,6 +340,7 @@ Python 문법 검사와 관련 Flutter 단위 테스트다. Gazebo 또는 실물
 
 ## 관련 문서
 
+* [OMX_POLICY_AND_IMITATION_LEARNING.md](OMX_POLICY_AND_IMITATION_LEARNING.md) — 물품별 가상 policy와 실제 모방학습 연결
 * [THREE_SOURCES.md](THREE_SOURCES.md) — Mock · Gazebo · 실물 세 출처
 * [NAV2_PATH.md](NAV2_PATH.md) — Nav2를 붙이기까지
 * [MULTI_ROBOT_NAMESPACES.md](MULTI_ROBOT_NAMESPACES.md) — 여러 대를 가르는 법과 함정

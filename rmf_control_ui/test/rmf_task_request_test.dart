@@ -126,6 +126,19 @@ void main() {
       expect(converted.skipped.single, contains('먼저 픽업 위치로 이동'));
     });
 
+    test('선택한 물품 policy를 워크셀 요청 설명에 넣는다', () {
+      const steps = [
+        RmfTaskStepInput(kind: 'navigate', placeName: '픽업3'),
+        RmfTaskStepInput(kind: 'armLoad', policyId: 'policy_4'),
+      ];
+      final converted = convertTaskSteps(steps);
+      final action = converted.activities.last.description! as Map;
+      final description = action['description'] as Map;
+      expect(description['target_guid'], '픽업3');
+      expect(description['item_type'], 'policy_4');
+      expect(description['quantity'], 1);
+    });
+
     test('홈 복귀는 로봇의 자리로 간다', () {
       // 홈 복귀 단계는 배정 전에는 목적지가 비어 있다.
       const steps = [RmfTaskStepInput(kind: 'returnHome')];

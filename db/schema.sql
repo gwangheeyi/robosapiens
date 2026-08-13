@@ -363,7 +363,8 @@ CREATE TABLE IF NOT EXISTS `map_project_robots` (
   -- mock 은 fleet adapter 에도 Gazebo bringup 에도 들어가지 않는다.
   -- real 은 fleet adapter 에는 가지만 Gazebo 에는 안 간다.
   `data_source`      VARCHAR(16)  NOT NULL DEFAULT 'mock',
-  -- Gazebo 모델 이름. 토픽 네임스페이스로도 쓰인다(/<gz_name>/odom).
+  -- system ID의 호환 사본. robot_id와 항상 같으며 Gazebo 모델명 및
+  -- 토픽 네임스페이스로 쓴다(/<gz_name>/odom).
   `gz_name`          VARCHAR(64)  NOT NULL,
   -- TempZone.name 을 콤마로 이어 붙인 값. 예: 'ambient,chilled'
   `zones`            VARCHAR(64)  NOT NULL,
@@ -510,6 +511,8 @@ CREATE TABLE IF NOT EXISTS `map_project_changes` (
 --     본다. v8 은 db/migrate_v8_to_v9.sql 을 적용한다.
 -- v10: 로봇마다 값의 출처(Mock/Gazebo/실물)를 적는다. 실행에 들어가는 자리가
 --      여기서 갈린다. v9 는 db/migrate_v9_to_v10.sql 을 적용한다.
+-- v11: robot_id를 Gazebo 모델명/ROS namespace와 같은 system ID로 통일한다.
+--      v10 은 db/migrate_v10_to_v11.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 10, NOW(6))
+VALUES (1, 11, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

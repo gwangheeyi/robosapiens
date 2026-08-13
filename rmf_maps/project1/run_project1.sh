@@ -113,6 +113,16 @@ fi
 LOG_FILE="$MAP_DIR/project1.log"
 ERR_FILE="$MAP_DIR/project1.err.log"
 LOG_MAX_MB="${LOG_MAX_MB:-200}"
+
+# UI의 두 실행 경로가 거의 동시에 눌려도 두 번째 스크립트가 기존 로그를
+# 비우거나 같은 월드를 한 벌 더 띄우지 못하게 한다. 잠금 FD는 이 셸이 끝날
+# 때까지 유지된다.
+LOCK_FILE="$MAP_DIR/.project1.run.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "project1 프로젝트가 이미 실행 중입니다." >&2
+  exit 1
+fi
 : > "$ERR_FILE"
 
 # 이 awk 는 파이프를 쉬지 않고 읽는다. 읽는 쪽이 있어야 위의 교착이 안 난다.
@@ -134,7 +144,11 @@ function fold() {
 }
 {
   if ($0 ~ /^\[[^]]+\] *$/) next
-  if ($0 == last) {
+  signature = $0
+  # ROS 시각만 다른 같은 경고도 접는다. Nav2 충돌 경고는 20Hz라서 원문
+  # 비교만 하면 한 줄도 접히지 않고 로깅 자체가 CPU를 먹는다.
+  gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)
+  if (signature == last_signature) {
     dup++
     # 오래 접혀 있으면 로그가 멎은 것처럼 보인다. 가끔 살아 있다고 알린다.
     if (dup % 100000 == 0) put("  ↑ 같은 줄 " dup "번째, 계속 접는 중")
@@ -143,6 +157,7 @@ function fold() {
   fold()
   put($0)
   last = $0
+  last_signature = signature
   if ($0 ~ /ERROR|error:|Error|Traceback|Warning|WARN|없는 파일|실패/) {
     print $0 > err
     fflush(err)

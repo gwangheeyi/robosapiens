@@ -31,17 +31,20 @@
     </include>
   </group>
 
-  <!-- PK_01 · 핑키 1호 · 이동 로봇 @ 충전1 -->
-  <include file="$(var map_dir)/robots/PK_01/spawn.launch.xml"/>
+  <!-- pinky_01 · PK-01 · 이동 로봇 @ 충전1 -->
+  <include file="$(var map_dir)/robots/pinky_01/spawn.launch.xml"/>
 
-  <!-- PK_02 · 핑키 2호 · 이동 로봇 @ 충전2 -->
-  <include file="$(var map_dir)/robots/PK_02/spawn.launch.xml"/>
+  <!-- pinky_02 · PK-02 · 이동 로봇 @ 충전2 -->
+  <include file="$(var map_dir)/robots/pinky_02/spawn.launch.xml"/>
 
-  <!-- OMX_01 · 매니퓰레이터 1호 · 설치 로봇 @ 설비1 -->
-  <include file="$(var map_dir)/robots/OMX_01/spawn.launch.xml"/>
+  <!-- omx_01 · OMX-01 · 설치 로봇 @ 설비1 -->
+  <include file="$(var map_dir)/robots/omx_01/spawn.launch.xml"/>
 
-  <!-- OMX_02 · 매니퓰레이터 2호 · 설치 로봇 @ 설비2 -->
-  <include file="$(var map_dir)/robots/OMX_02/spawn.launch.xml"/>
+  <!-- omx_02 · OMX-02 · 설치 로봇 @ 설비2 -->
+  <include file="$(var map_dir)/robots/omx_02/spawn.launch.xml"/>
+
+  <!-- omx_03 · OMX-03 · 설치 로봇 @ 설비3 -->
+  <include file="$(var map_dir)/robots/omx_03/spawn.launch.xml"/>
 
   <!-- 다리는 하나로 묶는다. 설정에 이름이 절대 경로로 적혀
        있어 로봇이 몇 대든 겹치지 않는다. -->

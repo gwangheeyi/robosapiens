@@ -2261,7 +2261,7 @@ import rmf_adapter.easy_full_control as rmf_easy
 from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
-from rmf_dispenser_msgs.msg import DispenserRequest, DispenserResult
+from rmf_dispenser_msgs.msg import DispenserRequest, DispenserRequestItem, DispenserResult
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from std_msgs.msg import String as StringMsg
 import tf2_ros
@@ -2447,8 +2447,12 @@ class RobotAdapter:
         """armLoad 를 해당 픽업 자리의 RMF 워크셀 요청으로 바꾼다."""
         seconds = 1.0
         target_guid = None
+        item_type = 'policy_1'
+        quantity = 1
         if isinstance(description, dict):
             target_guid = description.get('target_guid')
+            item_type = str(description.get('item_type') or 'policy_1')
+            quantity = max(1, int(description.get('quantity') or 1))
             for key, scale in (('seconds', 1.0),
                                ('unix_millis_action_duration_estimate',
                                 0.001)):
@@ -2479,6 +2483,11 @@ class RobotAdapter:
         request.request_guid = request_guid
         request.target_guid = str(target_guid)
         request.transporter_type = self.name
+        item = DispenserRequestItem()
+        item.type_guid = item_type
+        item.quantity = quantity
+        item.compartment_name = 'pinky_tray'
+        request.items = [item]
         self.dispenser_requests.publish(request)
 
     def on_dispenser_result(self, result):
@@ -3598,13 +3607,17 @@ $entries
 # RMF 는 이 시간을 모른다. 우리가 끝났다고 알릴 때까지 기다릴 뿐이다.
 ACTION_SECONDS = 4.0
 
-# 집는 자세와 놓는 자세. OpenMANIPULATOR-X 의 관절 넷이다.
-#
-# 실제 물건 자리에 맞춰 고쳐야 한다. 지금 값은 팔을 앞으로 뻗었다 세우는
-# 것뿐이라, 물건을 집지는 않고 **움직임이 실제로 나가는지** 보는 용도다.
+# 물품 종류별 가상 모방학습 policy. 모든 OMX가 같은 다섯 policy를 제공한다.
+# 각 값은 시간 비율과 joint1~4 자세이며 실제 추론기 연결 전 동작 검증용이다.
 JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4']
-PICK_POSE = [0.0, 0.6, -0.4, 0.8]
 HOME_POSE = [0.0, -1.0, 0.3, 0.7]
+POLICY_MOTIONS = {
+    'policy_1': [[0.00, 0.45, -0.30, 0.65], [0.00, 0.75, -0.55, 0.90]],
+    'policy_2': [[0.35, 0.35, -0.20, 0.55], [0.55, 0.70, -0.45, 0.80]],
+    'policy_3': [[-0.35, 0.35, -0.20, 0.55], [-0.55, 0.70, -0.45, 0.80]],
+    'policy_4': [[0.20, 0.15, 0.05, 0.45], [0.35, 0.55, -0.20, 0.70]],
+    'policy_5': [[-0.20, 0.15, 0.05, 0.45], [-0.35, 0.55, -0.20, 0.70]],
+}
 
 
 def now_msg(node):
@@ -3631,15 +3644,18 @@ class Workcell:
     def serves(self, guid):
         return guid in self.dispensers or guid in self.ingestors
 
-    def move(self, pose, seconds):
-        """팔에 관절 궤적을 보낸다."""
+    def run_policy(self, policy_id, seconds):
+        """선택한 가상 policy의 관절 궤적 전체를 한 번에 보낸다."""
         message = JointTrajectory()
         message.joint_names = list(JOINT_NAMES)
-        point = JointTrajectoryPoint()
-        point.positions = list(pose)
-        point.time_from_start.sec = int(seconds)
-        point.time_from_start.nanosec = int((seconds % 1) * 1e9)
-        message.points = [point]
+        poses = [*POLICY_MOTIONS[policy_id], HOME_POSE]
+        for index, pose in enumerate(poses, start=1):
+            point = JointTrajectoryPoint()
+            point.positions = list(pose)
+            at = seconds * index / len(poses)
+            point.time_from_start.sec = int(at)
+            point.time_from_start.nanosec = int((at % 1) * 1e9)
+            message.points.append(point)
         self.arm.publish(message)
 
 
@@ -3731,11 +3747,21 @@ class WorkcellAdapter(rclpy.node.Node):
             f'({msg.request_guid})')
         self.answer(msg, dispenser, DispenserResult.ACKNOWLEDGED)
 
-        cell.move(PICK_POSE, ACTION_SECONDS / 2)
+        policy_id = msg.items[0].type_guid if msg.items else 'policy_1'
+        if policy_id not in POLICY_MOTIONS:
+            self.get_logger().error(
+                f'[{cell.robot_id}] 알 수 없는 물품 policy [{policy_id}]')
+            with cell.lock:
+                cell.busy = False
+                cell.active_request = None
+            self.answer(msg, dispenser, DispenserResult.FAILED)
+            return
+        self.get_logger().info(
+            f'[{cell.robot_id}] 물품 [{policy_id}] 가상 policy 실행')
+        cell.run_policy(policy_id, ACTION_SECONDS)
 
         def finish():
             timer.cancel()
-            cell.move(HOME_POSE, ACTION_SECONDS / 2)
             with cell.lock:
                 cell.busy = False
                 cell.active_request = None

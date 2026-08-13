@@ -112,7 +112,7 @@ Visualization Manager:
         Value: /building_systems_markers
       Value: true
     - Class: rviz_default_plugins/LaserScan
-      Name: 라이다 PK_01
+      Name: 라이다 pinky_01
       Enabled: true
       Alpha: 1
       Color: 255; 85; 0
@@ -129,7 +129,7 @@ Visualization Manager:
         Value: /pinky_01/scan
       Value: true
     - Class: rviz_default_plugins/LaserScan
-      Name: 라이다 PK_02
+      Name: 라이다 pinky_02
       Enabled: true
       Alpha: 1
       Color: 255; 85; 0

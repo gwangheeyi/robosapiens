@@ -190,6 +190,11 @@ void main() {
     test('팔에 궤적을 보낸다', () {
       final code = script();
       expect(code, contains('arm_controller/joint_trajectory'));
+      expect(code, contains("'policy_1':"));
+      expect(code, contains("'policy_5':"));
+      expect(code, contains('msg.items[0].type_guid'));
+      expect(code, contains('cell.run_policy(policy_id, ACTION_SECONDS)'));
+      expect(code, contains('DispenserResult.FAILED'));
     });
 
     test('handle 이라는 이름을 쓰지 않는다', () {

@@ -75,7 +75,7 @@ RMF_HEADLESS=true ./openrmf/scripts/run_office_flutter.sh
 정상적으로 연결되면 Flutter 상단에 `API ONLINE`이 표시되고 office 지도 위에
 `tinyRobot1`, `tinyRobot2`가 나타납니다.
 
-Flutter 앱의 상단 탭에서 다음 기능을 사용할 수 있습니다.
+Flutter 앱의 1상단 탭에서 다음 기능을 사용할 수 있습니다.
 
 - `지도`: 다층 지도, 로봇 위치와 RMF 예상 궤적
 - `태스크`: patrol/delivery/clean/custom compose 요청, 취소, 로그, 반복 예약

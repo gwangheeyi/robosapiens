@@ -112,6 +112,9 @@ void main() {
       expect(script, contains("DispenserRequest, '/dispenser_requests'"));
       expect(script, contains("DispenserResult, '/dispenser_results'"));
       expect(script, contains("target_guid = description.get('target_guid')"));
+      expect(script, contains("item_type = str(description.get('item_type')"));
+      expect(script, contains('DispenserRequestItem()'));
+      expect(script, contains('request.items = [item]'));
       expect(script, contains('result.status != DispenserResult.SUCCESS'));
     });
 
