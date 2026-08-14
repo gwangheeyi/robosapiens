@@ -1,0 +1,14 @@
+[ERROR] [gazebo-1]: process has died [pid 218597, exit code 255, cmd 'ruby /opt/ros/jazzy/opt/gz_tools_vendor/bin/gz sim -r -s -v2 --headless-rendering /home/gyi/robosapiens/rmf_maps/project1-ver2/project1-ver2.world --force-version 8'].
+[ERROR] [create-5]: process has died [pid 218602, exit code 255, cmd '/opt/ros/jazzy/lib/ros_gz_sim/create -name pinky_01 -topic /pinky_01/robot_description -x 1.612 -y -0.717 -z 0.1 -Y 0.000 --ros-args -r __ns:=/pinky_01 --params-file /tmp/launch_params_6cm4rb5d'].
+[ERROR] [create-7]: process has died [pid 218605, exit code 255, cmd '/opt/ros/jazzy/lib/ros_gz_sim/create -name omx_01 -topic robot_description -x 1.158 -y -2.253 -z 0.0 -Y 0.000 -allow_renaming true --ros-args -r __ns:=/omx_01 --params-file /tmp/launch_params_nra_xm2e'].
+[ERROR] [spawner-10]: process[spawner-10] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[ERROR] [spawner-9]: process[spawner-9] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[ERROR] [spawner-8]: process[spawner-8] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[ERROR] [joint_state_publisher-4]: process[joint_state_publisher-4] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[ERROR] [gazebo-2]: process[gazebo-2] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+[ERROR] [spawner-10]: process has died [pid 218608, exit code -15, cmd '/opt/ros/jazzy/lib/controller_manager/spawner gripper_controller --ros-args -r __ns:=/omx_01'].
+[ERROR] [gazebo-2]: process has died [pid 218598, exit code -15, cmd 'ruby /opt/ros/jazzy/opt/gz_tools_vendor/bin/gz sim -g -v2 --force-version 8'].
+[ERROR] [spawner-8]: process has died [pid 218606, exit code -15, cmd '/opt/ros/jazzy/lib/controller_manager/spawner joint_state_broadcaster --ros-args -r __ns:=/omx_01'].
+[ERROR] [spawner-9]: process has died [pid 218607, exit code -15, cmd '/opt/ros/jazzy/lib/controller_manager/spawner arm_controller --ros-args -r __ns:=/omx_01'].
+[joint_state_publisher-4] Traceback (most recent call last):
+[ERROR] [joint_state_publisher-4]: process has died [pid 218601, exit code 1, cmd '/opt/ros/jazzy/lib/joint_state_publisher/joint_state_publisher --ros-args -r __node:=joint_state_publisher -r __ns:=/pinky_01 --params-file /tmp/launch_params_a2y9uo9e --params-file /tmp/launch_params_r8xbsaj9 --params-file /tmp/launch_params_odwh6r_u'].

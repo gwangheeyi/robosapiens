@@ -8,14 +8,13 @@ library;
 import 'dart:io';
 
 import 'ros2_inspect_models.dart';
+import 'workspace_paths_io.dart';
 
 /// ROS 환경을 읽어 들인 뒤 [command] 를 실행하는 셸 한 줄.
 String _withRosEnvironment(String command) {
   final rosSetup =
       Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
-  final workspace =
-      Platform.environment['RMF_WS'] ??
-      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+  final workspace = bundledRmfWorkspace();
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '

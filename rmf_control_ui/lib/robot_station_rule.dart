@@ -70,8 +70,9 @@ String? stationRequirementMessage(
   StationRequirement.notNeeded => null,
   StationRequirement.satisfied => null,
   StationRequirement.missing =>
-    '자리를 골라야 저장할 수 있습니다. 이 자리가 Gazebo spawn 좌표 · '
-        'AMCL 초기 자세 · RMF 충전 지점이 됩니다.',
+    '자리를 골라야 저장할 수 있습니다. 이 자리는 RMF 충전 복귀 지점이며, '
+        '새 로봇의 Gazebo Spawn · AMCL 초기 자세 기본값으로 사용됩니다. '
+        '등록 후에는 별도의 시작 Waypoint를 선택할 수 있습니다.',
   StationRequirement.unavailable =>
     '맵에 $category 카테고리 Waypoint 가 없어 자리를 고를 수 없습니다. '
         '지금 저장하면 이 로봇은 지도 원점(0,0)에 놓입니다 — 맵을 불러온 뒤 '

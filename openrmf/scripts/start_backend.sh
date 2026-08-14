@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
+RMF_WS="${RMF_WS:-$ROOT_DIR/rmf_ws}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 if [[ -z "${RMW_IMPLEMENTATION:-}" ]]; then
   if [[ -f /opt/ros/jazzy/lib/librmw_fastrtps_cpp.so ]]; then

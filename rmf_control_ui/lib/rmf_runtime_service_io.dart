@@ -8,6 +8,7 @@ import 'dart:io';
 
 import 'rmf_config_export.dart';
 import 'rmf_runtime_models.dart';
+import 'workspace_paths_io.dart';
 
 /// 노드 이름이 이 조각을 담고 있으면 RMF 백엔드로 본다.
 ///
@@ -167,8 +168,7 @@ Future<String> sweepOrphanBackends(String rootPath) async {
     return '테스트에서는 쓸어내지 않습니다.';
   }
   final rmfWorkspace =
-      Platform.environment['RMF_WS'] ??
-      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+      Platform.environment['RMF_WS'] ?? '$rootPath/rmf_ws';
   try {
     final result = await Process.run('bash', [
       '-c',
@@ -299,9 +299,7 @@ fi
 String _withRosEnvironment(String command) {
   final rosSetup =
       Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
-  final workspace =
-      Platform.environment['RMF_WS'] ??
-      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+  final workspace = bundledRmfWorkspace();
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '

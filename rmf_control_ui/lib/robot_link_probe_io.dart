@@ -8,14 +8,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'workspace_paths_io.dart';
+
 export 'robot_link_check.dart';
 
 String _withRosEnvironment(String command) {
   final rosSetup =
       Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
-  final workspace =
-      Platform.environment['RMF_WS'] ??
-      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+  final workspace = bundledRmfWorkspace();
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '

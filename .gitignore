@@ -4,12 +4,20 @@
 
 # 벤더 ROS 패키지. 각 상위 저장소에서 받는다.
 # rmf_control_ui/docs/PINKY_FLEET_INTEGRATION.md 참고.
-/pinky_pro/
-/open_manipulator/
+/robot_model/
+# 이전 실행 스크립트와 외부 문서를 위한 호환 링크.
+/pinky_pro
+/open_manipulator
 
 # 맵 배포 산출물. 앱의 `배포하기`로 다시 만든다.
 /rmf_maps/*/nav_graphs/
 /rmf_maps/*/generated_models/
 
+# 프로젝트별로 업로드·배포한 WorkCell Policy 모델과 ZIP 산출물.
+/rmf_maps/*/policies/
+
 # 실행 중 남는 PID·로그
 /openrmf/.runtime/
+
+# 로컬 Open-RMF 빌드 워크스페이스. 의존성·빌드 산출물이 크고 환경마다 다르다.
+/rmf_ws/

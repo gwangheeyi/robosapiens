@@ -171,8 +171,9 @@ ros2 topic hz /pinky_01/scan   # 설정 10 Hz 인데 1.08 Hz 로 나왔습니다
 - `always_on: 1` 은 **아무도 안 볼 때도 계속 그린다**는 뜻입니다. 관제를 RViz 로
   본다면 카메라 그림을 쓰는 곳이 없습니다.
 
-이 workspace 는 `colcon build --symlink-install` 로 지어 두었습니다. xacro 를
-고치면 **다시 빌드하지 않아도** 됩니다 — 로봇만 다시 스폰하면 반영됩니다.
+이 workspace 는 `colcon build` 로 지어 둡니다. 설치 트리가 소스 디렉터리의
+심볼릭 링크에 의존하지 않으므로 xacro 를 고친 뒤에는 **다시 빌드해야** 합니다.
+빌드가 끝나면 로봇을 다시 스폰해 변경을 반영합니다.
 
 ### 3.4 Gazebo GUI
 

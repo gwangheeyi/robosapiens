@@ -11,7 +11,7 @@ import 'dart:io';
 const String nav2ParamsEnvironmentKey = 'PINKY_NAV2_PARAMS';
 
 const String _defaultRelativePath =
-    'pinky_pro/pinky_navigation/params/nav2_params.yaml';
+    'robot_model/pinky_pro/pinky_navigation/params/nav2_params.yaml';
 
 Directory? _findProjectRoot() {
   var directory = Directory.current.absolute;

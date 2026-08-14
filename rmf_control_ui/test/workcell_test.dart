@@ -194,7 +194,27 @@ void main() {
       expect(code, contains("'policy_5':"));
       expect(code, contains('msg.items[0].type_guid'));
       expect(code, contains('cell.run_policy(policy_id, ACTION_SECONDS)'));
+      expect(code, contains('ARM_SETTLE_SECONDS = 3.0'));
+      expect(
+        code,
+        contains(
+          'self.create_timer(ACTION_SECONDS + ARM_SETTLE_SECONDS, finish)',
+        ),
+      );
       expect(code, contains('DispenserResult.FAILED'));
+      expect(code, contains("policy_id == 'armLoad'"));
+    });
+
+    test('하이픈이 든 프로젝트 이름도 유효한 ROS node 이름을 만든다', () {
+      final code = buildWorkcellScript(
+        mapName: 'project1-ver2',
+        pairing: pairWorkcells(robots: const [omx2], stations: const [pickup2]),
+      );
+      expect(code, contains("super().__init__('project1_ver2_workcell')"));
+      expect(
+        code,
+        isNot(contains("super().__init__('project1-ver2_workcell')")),
+      );
     });
 
     test('handle 이라는 이름을 쓰지 않는다', () {
@@ -215,6 +235,25 @@ void main() {
         fleetName: 'project1_pinky',
       );
       expect(xml, contains('project1_workcell.py'));
+    });
+  });
+
+  group('작업 policy 자동 구성', () {
+    test('Gazebo 설비가 있으면 생성되는 다섯 policy를 고를 수 있다', () {
+      expect(workcellPoliciesFor(const [pinky, omx2]), gazeboWorkcellPolicies);
+    });
+
+    test('policy가 없는 실제 설비는 기본 armLoad를 사용한다', () {
+      const real = RmfProjectRobot(
+        robotId: 'OMX_REAL',
+        displayName: '실설비',
+        model: 'open_manipulator_x',
+        gzName: 'omx_real',
+        zones: [],
+        kind: RmfRobotKind.workcell,
+        dataSource: RobotDataSource.real,
+      );
+      expect(workcellPoliciesFor(const [real]), isEmpty);
     });
   });
 }

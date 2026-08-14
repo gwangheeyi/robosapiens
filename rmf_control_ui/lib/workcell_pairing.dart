@@ -28,6 +28,31 @@ import 'rmf_project_config.dart';
 /// 않을 팔을 RMF 가 기다린다.
 const double workcellReachMeters = .8;
 
+/// Gazebo 설비에 자동으로 붙이는 기본 물품 정책.
+///
+/// 생성되는 workcell 노드의 `POLICY_MOTIONS`와 같은 이름이어야 한다. 사용자가
+/// 설비를 Gazebo 방식으로 등록하면 별도 설정 없이 이 정책들이 작업 편집기에
+/// 나타난다.
+const List<String> gazeboWorkcellPolicies = [
+  'policy_1',
+  'policy_2',
+  'policy_3',
+  'policy_4',
+  'policy_5',
+];
+
+/// 등록된 설비로부터 픽업 단계에서 고를 수 있는 policy를 만든다.
+///
+/// Mock 설비는 앱이 직접 armLoad를 흉내 내므로 policy가 필요 없다. 실제 설비도
+/// 아직 등록된 policy가 없다면 일반 armLoad를 쓸 수 있어야 한다. Gazebo 설비가
+/// 하나라도 있으면 생성되는 workcell 노드가 제공하는 기본 policy를 노출한다.
+List<String> workcellPoliciesFor(List<RmfProjectRobot> robots) {
+  final hasGazeboWorkcell = robots.any(
+    (robot) => !robot.isMobile && robot.dataSource == RobotDataSource.gazebo,
+  );
+  return hasGazeboWorkcell ? gazeboWorkcellPolicies : const <String>[];
+}
+
 /// 짝지어진 설비 하나.
 class WorkcellPairing {
   const WorkcellPairing({

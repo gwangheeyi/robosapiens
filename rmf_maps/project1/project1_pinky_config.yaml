@@ -30,7 +30,7 @@ rmf_fleet:
     loop: True
     delivery: True
   actions: ["teleop", "armLoad"]
-  finishing_request: "park"
+  finishing_request: "nothing"
   responsive_wait: False
   reassign_task_interval: 120
   robots:

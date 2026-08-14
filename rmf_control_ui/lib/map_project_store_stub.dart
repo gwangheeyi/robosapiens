@@ -37,6 +37,15 @@ Future<void> saveMapProjectFiles(
 Future<List<MapProjectFile>> loadMapProjectFiles(String mapName) async =>
     const [];
 
+Future<List<MapProjectFile>> loadMapProjectFileSummaries(
+  String mapName,
+) async => const [];
+
+Future<String?> loadMapProjectFileContent(
+  String mapName,
+  String fileName,
+) async => null;
+
 Future<void> saveMapProjectFleet(
   String mapName, {
   required Map<String, Object?> settings,

@@ -1,16 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, ProcessSignal, exit;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'deployment_service.dart';
+import 'database_migration.dart';
 import 'deployed_map_service.dart';
+import 'gazebo_robot_reset.dart';
 import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_project_store.dart';
@@ -33,6 +36,7 @@ import 'grid_map_settings.dart';
 import 'readiness_check.dart';
 import 'robot_link_probe.dart';
 import 'robot_move_command.dart';
+import 'robot_model_store.dart';
 import 'robot_sensor_feed.dart';
 import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
@@ -52,6 +56,8 @@ import 'task_dispatch.dart';
 import 'task_store.dart';
 import 'wall_height.dart';
 import 'workcell_pairing.dart';
+import 'workcell_policy_page.dart';
+import 'workcell_policy_store.dart';
 
 void main() => runApp(const RmfControlApp());
 
@@ -457,6 +463,8 @@ class _MockTask {
   _MockTaskStatus status = _MockTaskStatus.queued;
   final DateTime createdAt;
   DateTime? completedAt;
+  Offset? initialRobotPosition;
+  double? initialRobotHeading;
 
   _MockTaskStep? get currentStep =>
       currentStepIndex < steps.length ? steps[currentStepIndex] : null;
@@ -674,15 +682,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
   static const _menuMap = 1;
   static const _menuGrid = 2;
   static const _menuRobots = 3;
-  static const _menuTasks = 4;
-  static const _menuRos2 = 5;
-  static const _menuFiles = 6;
-  static const _menuLog = 7;
-  static const _menuAnalytics = 8;
+  static const _menuPolicies = 4;
+  static const _menuTasks = 5;
+  static const _menuRobotModels = 6;
+  static const _menuRos2 = 7;
+  static const _menuFiles = 8;
+  static const _menuLog = 9;
+  static const _menuAnalytics = 10;
+  static const _menuProjectAnalytics = 11;
 
   int _selectedMenu = _menuDashboard;
 
   AppLifecycleListener? _exitListener;
+  StreamSubscription<ProcessSignal>? _interruptSubscription;
+  bool _isExiting = false;
 
   /// 열린 프로젝트의 RMF 플릿 설정. 맵이 다르면 충전소 위치도 다르므로
   /// 프로젝트를 따라간다.
@@ -691,6 +704,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 열린 프로젝트에 등록된 로봇. Gazebo spawn 과 fleet adapter 의 robots
   /// 항목을 함께 만든다.
   List<RmfProjectRobot> _fleetRobots = const [];
+  List<WorkcellPolicy> _workcellPolicyModels = const [];
+
+  List<String> get _availableWorkcellPolicies {
+    final deployed = deployedPolicyIds(_workcellPolicyModels);
+    return deployed.isNotEmpty ? deployed : workcellPoliciesFor(_fleetRobots);
+  }
 
   /// Gazebo 에서 실제로 받아온 위치.
   ///
@@ -714,6 +733,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Timer? _mockRobotTimer;
   Timer? _orderDispatchTimer;
   bool _isPollingOrders = false;
+  bool _databaseReady = false;
   DeployedMapData? _robotDeployedMap;
 
   @override
@@ -728,9 +748,48 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 창을 닫을 때 앱이 띄운 프로젝트를 정리한다. 강제 종료(kill·전원)까지는
     // 막을 수 없으므로, 그때 남은 것을 시작하면서 알아챈다.
     _exitListener = AppLifecycleListener(onExitRequested: _handleExitRequest);
+    // 터미널 Ctrl+C는 SIGINT다. 화면의 복사 단축키는 건드리지 않고 OS 신호만
+    // 받아 창 X와 Ctrl+X가 쓰는 것과 같은 백엔드 정리를 수행한다.
+    if (Platform.isLinux || Platform.isMacOS) {
+      _interruptSubscription = ProcessSignal.sigint.watch().listen(
+        (_) => unawaited(_handleInterruptSignal()),
+      );
+    }
     WidgetsBinding.instance.addPostFrameCallback(
-      (_) => unawaited(_checkOrphanedProjects()),
+      (_) => unawaited(_initializeApplication()),
     );
+  }
+
+  Future<void> _initializeApplication() async {
+    try {
+      final migration = await migrateDatabaseSchema();
+      _databaseReady = true;
+      if (migration.changed && mounted) {
+        await showWaypointErrorDialog(
+          context,
+          title: migration.fromVersion == null
+              ? 'DB 스키마를 생성했습니다'
+              : 'DB 스키마를 자동 업데이트했습니다',
+          message: [
+            if (migration.fromVersion != null)
+              'v${migration.fromVersion} → v${migration.toVersion}',
+            '적용: ${migration.applied.join(', ')}',
+            if (migration.backupPath != null) '백업: ${migration.backupPath}',
+          ].join('\n'),
+        );
+      }
+    } catch (error) {
+      _databaseReady = false;
+      if (mounted) {
+        await showWaypointErrorDialog(
+          context,
+          title: 'DB 스키마 준비에 실패했습니다',
+          message: '$error\n\n데이터 보호를 위해 DB 작업 기능을 시작하지 않았습니다.',
+        );
+      }
+      return;
+    }
+    await _checkOrphanedProjects();
   }
 
   /// 지난 실행에서 정리되지 않고 남은 프로젝트를 알린다.
@@ -791,18 +850,43 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
-  /// 창을 닫을 때 앱이 띄운 프로젝트를 내린다.
+  /// 창을 닫을 때 실행 중인 백엔드를 모두 내린다.
   ///
-  /// 사용자가 터미널에서 직접 띄운 것은 건드리지 않는다 — 앱이 띄운 것만
-  /// runningProjectName 에 남아 있다.
+  /// 기억값 하나만 보면 앱 재시작 뒤 이어서 보고 있던 백엔드를 놓칠 수 있다.
+  /// 종료 요청은 사용자가 운영 프로그램과 백엔드를 함께 끝내겠다는 뜻이므로
+  /// 실제 PGID 파일을 다시 읽어 현재 실행 중인 프로젝트까지 정리한다.
   Future<ui.AppExitResponse> _handleExitRequest() async {
-    await RobotTelemetryBridge.instance.stop();
-    RobotSensorFeed.instance.stop();
-    await RmfTaskBridge.instance.stop();
-    final running = runningProjectName;
-    if (running == null) return ui.AppExitResponse.exit;
-    await stopProject(running);
+    if (_isExiting) return ui.AppExitResponse.cancel;
+    _isExiting = true;
+    try {
+      await RobotTelemetryBridge.instance.stop();
+      RobotSensorFeed.instance.stop();
+      await RmfTaskBridge.instance.stop();
+      final projects = <String>{
+        if (runningProjectName case final String name) name,
+        for (final project in await findRunningProjects()) project.mapName,
+      };
+      for (final mapName in projects) {
+        await stopProject(mapName);
+      }
+    } finally {
+      _isExiting = false;
+    }
     return ui.AppExitResponse.exit;
+  }
+
+  Future<void> _handleInterruptSignal() async {
+    if (_isExiting) return;
+    await _handleExitRequest();
+    // SIGINT를 구독하면 기본 즉시 종료가 억제되므로 정리가 끝난 뒤 종료한다.
+    exit(0);
+  }
+
+  /// Ctrl+X도 창의 X 버튼과 같은 종료 요청을 보낸다.
+  void _requestAppExit() {
+    unawaited(
+      ServicesBinding.instance.exitApplication(ui.AppExitType.cancelable),
+    );
   }
 
   /// 열린 프로젝트가 바뀌었을 때 대시보드를 그 프로젝트 상태로 갈아 끼운다.
@@ -825,8 +909,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _gridPreviewGrid = null;
       _gridPreviewDirectory = null;
       _gridPreviewSavedAt = null;
+      _workcellPolicyModels = const [];
     });
     if (mapName == null) return;
+    try {
+      final policies = await loadWorkcellPolicies(mapName);
+      if (mounted) setState(() => _workcellPolicyModels = policies);
+    } catch (_) {
+      // Policy 저장소가 아직 없거나 배포 디렉터리가 없는 옛 프로젝트다.
+    }
     // 넣어 둔 SLAM 지도가 있으면 올려 준다. 없으면 조용히 지나간다.
     unawaited(_loadStoredSlam(mapName));
     // 구워 둔 그리드맵도 같이 올린다. 프로젝트에 딸린 산출물이므로 열면 그때
@@ -843,7 +934,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _pollPendingOrders() async {
     // 주문을 태스크로 전개하려면 목적지로 삼을 맵이 있어야 한다. 열린 프로젝트가
     // 없으면 주문은 미처리 상태로 그냥 둔다(주문 자체는 창고 공통 원장이다).
-    if (_openProjectName == null) return;
+    if (!_databaseReady || _openProjectName == null) return;
     if (_isPollingOrders || !mounted) return;
     _isPollingOrders = true;
     try {
@@ -972,6 +1063,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
     'currentStepIndex': task.currentStepIndex,
     'createdAt': task.createdAt.toIso8601String(),
     'completedAt': task.completedAt?.toIso8601String(),
+    'initialRobotPosition': task.initialRobotPosition == null
+        ? null
+        : {
+            'x': task.initialRobotPosition!.dx,
+            'y': task.initialRobotPosition!.dy,
+          },
+    'initialRobotHeading': task.initialRobotHeading,
     'steps': [
       for (final step in task.steps)
         {
@@ -1047,6 +1145,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
     }
     task.completedAt = DateTime.tryParse(data['completedAt'] as String? ?? '');
+    task.initialRobotPosition = switch (data['initialRobotPosition']) {
+      {'x': final num x, 'y': final num y} => Offset(
+        x.toDouble(),
+        y.toDouble(),
+      ),
+      _ => null,
+    };
+    task.initialRobotHeading = (data['initialRobotHeading'] as num?)
+        ?.toDouble();
     return task;
   }
 
@@ -6389,6 +6496,84 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     if (confirmed != true || !mounted) return;
 
+    final registered = robot == null
+        ? null
+        : _fleetRobots.where((item) => item.robotId == robot.id).firstOrNull;
+    final immediateSimulation =
+        registered?.dataSource == RobotDataSource.gazebo ||
+        registered?.dataSource == RobotDataSource.mock;
+    if (immediateSimulation) {
+      final initial = task.initialRobotPosition ?? robot?.spawnPosition;
+      setState(() {
+        task
+          ..status = _MockTaskStatus.cancelled
+          ..completedAt = DateTime.now();
+        for (final step in task.steps.where(
+          (step) =>
+              step.status == _TaskStepStatus.pending ||
+              step.status == _TaskStepStatus.active,
+        )) {
+          step
+            ..status = _TaskStepStatus.cancelled
+            ..remainingSeconds = 0;
+        }
+        if (robot != null) {
+          robot
+            ..activeTaskId = null
+            ..moving = false
+            ..returningToSpawn = false
+            ..rmfDriven = false
+            ..rmfTaskId = null
+            ..rmfGoalX = null
+            ..rmfGoalY = null
+            ..targetWaypoint = null
+            ..previousWaypoint = null
+            ..assignedRoute.clear();
+          if (initial != null) robot.position = initial;
+          _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
+        }
+      });
+      await _saveMockTasks();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${task.name} 을 즉시 취소했습니다 — '
+            '${robot?.id ?? '로봇'}을 작업 최초 위치로 되돌렸습니다.',
+          ),
+        ),
+      );
+
+      // 화면은 위에서 즉시 끝낸다. ROS 응답을 기다리느라 취소 버튼이 멈춰
+      // 보이지 않도록 RMF와 Gazebo 정리는 뒤에서 수행한다.
+      final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+      if (rmfTaskId != null) {
+        unawaited(
+          RmfTaskBridge.instance.submit(
+            mapDirectory: _mapDirectoryFor(mapName),
+            mapName: mapName,
+            requestJson: buildCancelTaskRequest(rmfTaskId),
+          ),
+        );
+      }
+      if (registered?.dataSource == RobotDataSource.gazebo && initial != null) {
+        final world = _rmfMetersFromPixel(initial);
+        if (world != null) {
+          unawaited(
+            resetGazeboRobotPose(
+              modelName: registered!.gzName,
+              x: world.dx,
+              y: world.dy,
+              yaw: task.initialRobotHeading ?? 0,
+              rosDomainId: _rosDomainId,
+            ),
+          );
+        }
+      }
+      _startQueuedOrderTasks();
+      return;
+    }
+
     // RMF 를 먼저 세운다. 앱 상태를 먼저 지우면 그 사이에 RMF 가 로봇을 계속
     // 몰아, 돌아가는 로봇과 RMF 의 명령이 서로 당긴다.
     final mapName = _robotDeployedMap?.summary.name ?? _mapName;
@@ -6410,9 +6595,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 로봇은 그 자리에 선다.** 이동 타이머는 `rmfDriven` 로봇을 건너뛰기
     // 때문이다 — 위치는 토픽에서 온다. 그러니 RMF 에게 자리로 가라고 새 작업을
     // 넣어야 진짜로 돌아간다.
-    final registered = robot == null
-        ? null
-        : _fleetRobots.where((item) => item.robotId == robot.id).firstOrNull;
     final charger = registered?.chargerWaypoint?.trim();
     final byRmf = robot != null && robot.rmfDriven;
     var sentHomeByRmf = false;
@@ -6510,7 +6692,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ).showSnackBar(const SnackBar(content: Text('되돌릴 이동 로봇이 없습니다.')));
       return;
     }
-    final running = movable.where((robot) => robot.activeTaskId != null).length;
+    final stoppable = _mockTasks
+        .where(
+          (task) =>
+              task.status == _MockTaskStatus.active ||
+              task.status == _MockTaskStatus.queued,
+        )
+        .length;
     final confirmed = await showMovableDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -6520,7 +6708,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
           width: 420,
           child: Text(
             '이동 로봇 ${movable.length}대를 Spawn 할 때 고른 Waypoint로 되돌립니다.'
-            '${running == 0 ? '' : '\n\n진행 중인 작업 $running건은 대기 상태로 돌아가 다시 배차됩니다.'}',
+            '\n\n진행 중이거나 대기 중인 작업 $stoppable건을 모두 중지합니다.'
+            '\nGazebo와 작업맵의 위치도 함께 원위치로 맞춥니다.',
           ),
         ),
         actions: [
@@ -6538,46 +6727,92 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     if (confirmed != true || !mounted) return;
 
-    var routed = 0;
-    var teleported = 0;
+    final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+    final rmfTaskIds = movable
+        .map((robot) => robot.rmfTaskId)
+        .whereType<String>()
+        .toSet();
+    final registrations = {
+      for (final robot in _fleetRobots) robot.robotId: robot,
+    };
+    var moved = 0;
     var already = 0;
     setState(() {
-      for (final robot in movable) {
-        final task = robot.activeTaskId == null
-            ? null
-            : _mockTasks
-                  .where((item) => item.id == robot.activeTaskId)
-                  .firstOrNull;
-        if (task != null && task.status == _MockTaskStatus.active) {
-          task
-            ..status = _MockTaskStatus.queued
-            ..currentStepIndex = 0
-            ..completedAt = null;
-          for (final step in task.steps) {
-            step
-              ..status = _TaskStepStatus.pending
-              ..remainingSeconds = 0
-              ..failureReason = null;
-          }
-        }
-        // 작업 취소와 같은 길로 돌려보낸다. 두 곳에서 따로 옮기면 한쪽만 고치는
-        // 일이 생긴다.
-        switch (_sendRobotHome(robot)) {
-          case _ReturnOutcome.routed:
-            routed++;
-          case _ReturnOutcome.teleported:
-            teleported++;
-          case _ReturnOutcome.already:
-            already++;
+      // 원위치는 비상 정리 성격의 명령이다. 대기 작업을 남기면 로봇을 되돌린
+      // 직후 주문 타이머가 다시 배차하므로 활성·대기 작업을 모두 끝낸다.
+      for (final task in _mockTasks.where(
+        (task) =>
+            task.status == _MockTaskStatus.active ||
+            task.status == _MockTaskStatus.queued,
+      )) {
+        task
+          ..status = _MockTaskStatus.cancelled
+          ..completedAt = DateTime.now();
+        for (final step in task.steps.where(
+          (step) =>
+              step.status == _TaskStepStatus.pending ||
+              step.status == _TaskStepStatus.active,
+        )) {
+          step
+            ..status = _TaskStepStatus.cancelled
+            ..remainingSeconds = 0;
         }
       }
+      for (final robot in movable) {
+        if ((robot.position - robot.spawnPosition).distance <= .01) {
+          already++;
+        } else {
+          moved++;
+        }
+        // 작업맵은 즉시 원위치로 맞춘다. Gazebo/AMCL도 아래에서 같은 좌표로
+        // 맞추므로 다음 텔레메트리 갱신 때 이전 위치로 되돌아가지 않는다.
+        robot
+          ..position = robot.spawnPosition
+          ..activeTaskId = null
+          ..moving = false
+          ..returningToSpawn = false
+          ..rmfDriven = false
+          ..rmfTaskId = null
+          ..rmfGoalX = null
+          ..rmfGoalY = null
+          ..targetWaypoint = null
+          ..previousWaypoint = null
+          ..assignedRoute.clear();
+      }
+      _homeReservations.clear();
     });
-    _startMockRobotTimer();
     await _saveMockTasks();
     if (!mounted) return;
+
+    // 화면은 즉시 멈추되 RMF에도 취소를 보내 이전 목적지가 로봇을 다시 끌고
+    // 가지 않게 한다.
+    for (final taskId in rmfTaskIds) {
+      unawaited(
+        RmfTaskBridge.instance.submit(
+          mapDirectory: _mapDirectoryFor(mapName),
+          mapName: mapName,
+          requestJson: buildCancelTaskRequest(taskId),
+        ),
+      );
+    }
+    for (final robot in movable) {
+      final registered = registrations[robot.id];
+      if (registered?.dataSource != RobotDataSource.gazebo) continue;
+      final world = _rmfMetersFromPixel(robot.spawnPosition);
+      if (world == null) continue;
+      unawaited(
+        resetGazeboRobotPose(
+          modelName: registered!.gzName,
+          x: world.dx,
+          y: world.dy,
+          yaw: registered.spawnHeading,
+          rosDomainId: _rosDomainId,
+        ),
+      );
+    }
     final detail = [
-      if (routed > 0) '$routed대 복귀 중',
-      if (teleported > 0) '$teleported대는 경로가 없어 즉시 이동',
+      if (stoppable > 0) '작업 $stoppable건 중지',
+      if (moved > 0) '$moved대 원위치 이동',
       if (already > 0) '$already대는 이미 최초 위치',
     ].join(' · ');
     ScaffoldMessenger.of(context).showSnackBar(
@@ -6784,6 +7019,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   void _startTaskStep(_MockRobot robot, _MockTask task) {
+    // 취소하면 Spawn 지점이 아니라 이 작업을 시작한 자리로 돌아간다. 다음
+    // 단계로 넘어갈 때 기준점이 바뀌지 않도록 최초 한 번만 기록한다.
+    task.initialRobotPosition ??= robot.position;
+    task.initialRobotHeading ??= _telemetry.poses[robot.id]?.heading;
     // RMF 가 모는 작업은 통째로 한 번 넘긴다. 단계마다 앱이 경로를 만들면
     // RMF 가 고른 경로와 둘이 된다.
     if (robot.rmfDriven) {
@@ -7384,6 +7623,38 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
     });
+    // 화면의 Spawn 위치와 Gazebo 의 시작 위치가 같은 값을 보게 한다. 예전에는
+    // 지도 마커만 옮기고 등록 정보의 spawn_x/spawn_y 는 그대로여서, 다시
+    // 실행하면 늘 충전 Waypoint 좌표로 돌아갔다. 충전 복귀 지점은 유지하고
+    // 최초 시작 좌표만 이번 선택으로 저장한다.
+    final spawnedRegistration = registered;
+    final spawnWorld = _rmfMetersFromPixel(result.position);
+    if (spawnedRegistration != null && spawnWorld != null) {
+      final updated = spawnedRegistration.withSpawn(
+        spawnX: spawnWorld.dx,
+        spawnY: spawnWorld.dy,
+      );
+      setState(() {
+        _fleetRobots = [
+          for (final robot in _fleetRobots)
+            if (robot.robotId == spawnedRegistration.robotId)
+              updated
+            else
+              robot,
+        ];
+        // 이미 만들어진 Gazebo launch 는 옛 좌표를 담고 있다.
+        _isDeployed = false;
+      });
+      final waypoint = (runtimeNames[result.position] ?? '').trim();
+      await _saveSettingToOpenProject(
+        label: '로봇 시작 위치',
+        detail:
+            '${spawnedRegistration.robotId} · '
+            '${waypoint.isEmpty ? '선택한 Waypoint' : waypoint} '
+            '(${spawnWorld.dx.toStringAsFixed(3)}, '
+            '${spawnWorld.dy.toStringAsFixed(3)}) · 다시 배포하고 백엔드를 재시작하세요.',
+      );
+    }
     _startMockRobotTimer();
   }
 
@@ -7437,6 +7708,48 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // Waypoint 는 편집 중인 프로젝트에도 있으므로, 그것만 확인하면 새 프로젝트를
+    // 저장한 직후 배포하지 않고도 작업 편집기로 들어갈 수 있다. 작업은 RMF 가
+    // 읽을 운영 산출물을 전제로 하므로 현재 프로젝트의 배포가 먼저다.
+    final loadedOperationalMap =
+        _robotDeployedMap != null &&
+        !_robotDeployedMap!.summary.yamlPath.endsWith('.rmfproject') &&
+        _robotDeployedMap!.summary.name == _openProjectName;
+    if (!_isDeployed && !loadedOperationalMap) {
+      final action = await showMovableDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(
+            Icons.rocket_launch_outlined,
+            color: Color(0xFFD97706),
+            size: 36,
+          ),
+          title: const Text('먼저 맵을 배포하세요'),
+          content: const SizedBox(
+            width: 420,
+            child: Text(
+              '현재 프로젝트가 아직 배포되지 않았습니다. 로봇 작업을 만들기 전에 '
+              '맵 관리에서 `배포하기`를 완료하세요.',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('닫기'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'map'),
+              icon: const Icon(Icons.map_outlined, size: 18),
+              label: const Text('맵 관리로 이동'),
+            ),
+          ],
+        ),
+      );
+      if (action == 'map' && mounted) {
+        setState(() => _selectedMenu = _menuMap);
+      }
+      return;
+    }
     final waypoints = _mobileRuntimeWaypoints;
     final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
     final taskRobots = _mockRobots
@@ -7488,6 +7801,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       builder: (_) => _SequentialTaskEditorDialog(
         initialName: '연속 작업 ${_mockTasks.length + 1}',
         robots: taskRobots,
+        workcellPolicies: _availableWorkcellPolicies,
         drawing: _robotRuntimeDrawing,
         lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
         waypoints: waypoints,
@@ -7587,6 +7901,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         initialTrigger: task.trigger,
         editing: true,
         robots: taskRobots,
+        workcellPolicies: _availableWorkcellPolicies,
         drawing: _robotRuntimeDrawing,
         lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
         waypoints: waypoints,
@@ -7978,6 +8293,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   @override
   void dispose() {
     _exitListener?.dispose();
+    unawaited(_interruptSubscription?.cancel());
     _mockRobotTimer?.cancel();
     _orderDispatchTimer?.cancel();
     // 그리드맵·SLAM 미리보기는 GPU 쪽 자원이라 놔두면 안 돌아온다.
@@ -9898,8 +10214,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             ? '$charger 를 지금 맵에서 찾지 못했습니다. '
                                   '그대로 두면 값은 지워지지 않습니다.'
                             : isMobile
-                            ? 'spawn 위치와 복귀 지점이 됩니다. 반드시 골라야 '
-                                  '합니다.'
+                            ? '작업 후 복귀할 충전소입니다. 새 로봇은 처음에 이 '
+                                  '위치를 Spawn 기본값으로 쓰지만, 이후 로봇 '
+                                  'Spawn에서 다른 시작 Waypoint를 고를 수 있습니다.'
                             : '이 자리에 고정 설치됩니다. 반드시 골라야 합니다.',
                         helperMaxLines: 3,
                         border: const OutlineInputBorder(),
@@ -10017,6 +10334,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     : () {
                         final id = idController.text.trim();
                         if (id.isEmpty) return;
+                        final stationChanged =
+                            existing == null ||
+                            charger != existing.chargerWaypoint ||
+                            kind != existing.kind;
                         // 비우면 맵 기본값을 따라간다는 뜻이라 저장할 것이
                         // 없다. 적었으면 쓸 수 있는 번호여야 한다.
                         final rawDomain = domainController.text.trim();
@@ -10050,8 +10371,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             gzName: id,
                             zones: zones.toList()..sort(),
                             chargerWaypoint: charger,
-                            spawnX: spawn == null ? existing?.spawnX : spawn.dx,
-                            spawnY: spawn == null ? existing?.spawnY : spawn.dy,
+                            // 충전소는 복귀점이고 Spawn은 최초 시작 위치다. 등록
+                            // 창을 열어 저장했다는 이유만으로 대기4 Spawn을
+                            // 충전1 좌표로 덮어쓰지 않는다. 복귀점을 실제로
+                            // 바꾼 경우에만 새 로봇의 기본 시작점도 함께 맞춘다.
+                            spawnX: stationChanged
+                                ? spawn?.dx
+                                : existing?.spawnX ?? spawn?.dx,
+                            spawnY: stationChanged
+                                ? spawn?.dy
+                                : existing?.spawnY ?? spawn?.dy,
                             spawnHeading: existing?.spawnHeading ?? 0,
                           ),
                         );
@@ -10445,11 +10774,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<({bool gazeboGui, bool rviz})?> _askRunWindows(String mapName) async {
     var gazeboGui = _runWithGazeboGui;
     var rviz = _runWithRviz;
-    var saving = false;
-    var savedNow = false;
-    var exporting = false;
-    var exportedNow = false;
-    String? exportMessage;
     final chosen = await showMovableDialog<({bool gazeboGui, bool rviz})>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -10462,128 +10786,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF7ED),
-                    border: Border.all(color: const Color(0xFFF59E0B)),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '백엔드 실행 전에 설정 파일을 디스크로 내보내야 합니다.',
-                        style: TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                      const SizedBox(height: 5),
-                      const Text(
-                        '로봇 등록, Gazebo 이름, 워크셀 연결과 Nav2 설정은 '
-                        '실행 중 자동으로 바뀌지 않습니다.',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      const SizedBox(height: 10),
-                      OutlinedButton.icon(
-                        onPressed: saving
-                            ? null
-                            : () async {
-                                setDialogState(() => saving = true);
-                                final saved = await _saveSettingsBeforeBackend(
-                                  mapName,
-                                );
-                                if (!dialogContext.mounted) return;
-                                setDialogState(() {
-                                  saving = false;
-                                  savedNow = saved;
-                                  exportedNow = false;
-                                  exportMessage = saved
-                                      ? '설정 내용 저장 완료'
-                                      : '설정 내용을 저장하지 못했습니다.';
-                                });
-                              },
-                        icon: saving
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : Icon(
-                                savedNow
-                                    ? Icons.check_circle_outline
-                                    : Icons.save_outlined,
-                                size: 18,
-                              ),
-                        label: Text(saving ? '저장하는 중…' : '설정 내용 저장하기'),
-                      ),
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                        onPressed: exporting || !savedNow
-                            ? null
-                            : () async {
-                                setDialogState(() {
-                                  exporting = true;
-                                  exportMessage = null;
-                                });
-                                try {
-                                  await _refreshProjectScripts();
-                                  final files = await loadMapProjectFiles(
-                                    mapName,
-                                  );
-                                  if (files.isEmpty) {
-                                    throw StateError(
-                                      '만들어진 설정 파일이 없습니다. 프로젝트 저장을 먼저 하세요.',
-                                    );
-                                  }
-                                  final result = await exportProjectConfigFiles(
-                                    mapName: mapName,
-                                    files: files,
-                                  );
-                                  if (!dialogContext.mounted) return;
-                                  setDialogState(() {
-                                    exporting = false;
-                                    exportedNow = result.success;
-                                    exportMessage = result.success
-                                        ? '내보내기 완료 · ${result.written.length}개 파일'
-                                        : result.message;
-                                  });
-                                } catch (error) {
-                                  if (!dialogContext.mounted) return;
-                                  setDialogState(() {
-                                    exporting = false;
-                                    exportedNow = false;
-                                    exportMessage = '내보내기 실패: $error';
-                                  });
-                                }
-                              },
-                        icon: exporting
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(
-                                Icons.drive_file_move_outline,
-                                size: 18,
-                              ),
-                        label: Text(exporting ? '내보내는 중…' : '디스크로 내보내기'),
-                      ),
-                      if (exportMessage != null) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          exportMessage!,
-                          style: TextStyle(
-                            color: exportedNow
-                                ? const Color(0xFF15803D)
-                                : const Color(0xFFB91C1C),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ],
+                const Text(
+                  '설정 저장과 디스크 내보내기는 완료되었습니다.',
+                  style: TextStyle(
+                    color: Color(0xFF15803D),
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -10631,12 +10838,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
               child: const Text('취소'),
             ),
             FilledButton.icon(
-              onPressed: exportedNow
-                  ? () => Navigator.pop(dialogContext, (
-                      gazeboGui: gazeboGui,
-                      rviz: rviz,
-                    ))
-                  : null,
+              onPressed: () => Navigator.pop(dialogContext, (
+                gazeboGui: gazeboGui,
+                rviz: rviz,
+              )),
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('백엔드 실행'),
             ),
@@ -10746,8 +10951,20 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
-    // 지금 코드로 다시 만들어 디스크까지 맞춘 뒤 띄운다.
-    await _refreshProjectScripts();
+    // 버튼 한 번으로 저장 → 생성 → 내보내기까지 끝낸다. 어느 단계든 실패하면
+    // 예전 파일로 백엔드를 띄우지 않는다.
+    final saved = await _saveSettingsBeforeBackend(project);
+    if (!saved || !mounted) return;
+    final gridExport = await _exportOccupancyGrid(project);
+    if (gridExport != null && !gridExport.success) {
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: 'Nav2 지도 내보내기 실패',
+        message: gridExport.message,
+      );
+      return;
+    }
     if (!mounted) return;
     List<MapProjectFile> files;
     try {
@@ -10843,7 +11060,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                 '${result.written.join('\n')}\n\n'
                 '실행:\n'
                 '  source /opt/ros/jazzy/setup.bash\n'
-                '  source \$HOME/rmf_ws/install/setup.bash\n'
+                '  source <robosapiens>/rmf_ws/install/setup.bash\n'
                 '  ros2 launch ${result.directory}/$mapName.launch.xml'
           : result.message,
     );
@@ -12126,6 +12343,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyZ, control: true): _undo,
+        const SingleActivator(LogicalKeyboardKey.keyX, control: true):
+            _requestAppExit,
         const SingleActivator(LogicalKeyboardKey.escape): _finishCurrentLane,
       },
       child: Focus(
@@ -12145,12 +12364,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '대시보드',
                         '맵 관리',
                         '그리드맵',
-                        '로봇',
-                        '작업',
+                        '로봇 관리',
+                        'WorkCell 관리',
+                        '작업 관리',
+                        '로봇 모델 관리',
                         'ROS2 확인',
                         '설정 파일',
                         '로그 분석',
                         '운영 분석',
+                        '프로젝트 분석',
                       ][_selectedMenu],
                     ),
                     Expanded(
@@ -12734,9 +12956,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onCheckSpawns: () => unawaited(_showSpawnCheck()),
                               spawnChecks: _spawnChecks,
                               onStartBackend: _startBackendForOpenProject,
-                              onSaveSettings: () => _saveSettingsBeforeBackend(
-                                _openProjectName ?? _mapName,
-                              ),
                               onRefreshScripts: _refreshProjectScripts,
                               telemetry: _telemetry,
                             )
@@ -12779,6 +12998,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               readiness: _readiness,
                               onRefreshReadiness: _refreshReadiness,
                             )
+                          : _selectedMenu == _menuRobotModels
+                          ? const _RobotModelManagementPage()
                           : _selectedMenu == _menuFiles
                           ? _ProjectFilesPage(
                               projectName: _openProjectName,
@@ -12794,6 +13015,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
                               onRun: _runProjectScript,
                               onStop: _stopProjectScript,
                             )
+                          : _selectedMenu == _menuPolicies
+                          ? WorkcellPolicyPage(
+                              projectName: _openProjectName,
+                              robots: _fleetRobots,
+                              onChanged: (policies) {
+                                if (!listEquals(
+                                  _workcellPolicyModels,
+                                  policies,
+                                )) {
+                                  setState(
+                                    () => _workcellPolicyModels = policies,
+                                  );
+                                }
+                              },
+                            )
                           : _selectedMenu == _menuRos2
                           ? const Ros2InspectPage()
                           : _selectedMenu == _menuLog
@@ -12804,6 +13040,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             )
                           : _selectedMenu == _menuAnalytics
                           ? const _OperationsAnalyticsPage()
+                          : _selectedMenu == _menuProjectAnalytics
+                          ? const _ProjectAnalyticsPage()
                           // 여기까지 왔으면 아직 안 만든 화면이다. 예전에는
                           // 항목 수가 메뉴보다 적고 순서도 달라, 메뉴를 하나
                           // 늘리면 범위 넘침으로 터졌다. 메뉴 이름을 그대로
@@ -12900,6 +13138,7 @@ class _SequentialTaskEditorDialog extends StatefulWidget {
     this.initialTrigger = _OrderTrigger.manual,
     this.editing = false,
     required this.robots,
+    required this.workcellPolicies,
     required this.drawing,
     required this.lanes,
     required this.waypoints,
@@ -12913,6 +13152,7 @@ class _SequentialTaskEditorDialog extends StatefulWidget {
   final _OrderTrigger initialTrigger;
   final bool editing;
   final List<_MockRobot> robots;
+  final List<String> workcellPolicies;
   final UploadedDrawing? drawing;
   final List<(Offset, Offset)> lanes;
   final List<Offset> waypoints;
@@ -12947,6 +13187,7 @@ class _SequentialTaskEditorDialogState
     _description.text = widget.initialDescription;
     _robotId = widget.initialRobotId;
     _trigger = widget.initialTrigger;
+    final defaultArmAction = widget.workcellPolicies.firstOrNull ?? 'armLoad';
     _steps = widget.initialSteps?.isNotEmpty == true
         ? widget.initialSteps!
               .map(
@@ -12963,7 +13204,7 @@ class _SequentialTaskEditorDialogState
               _TaskStepType.navigate,
               destination: widget.waypoints.first,
             ),
-            _TaskStepDraft(_TaskStepType.armLoad),
+            _TaskStepDraft(_TaskStepType.armLoad, policyId: defaultArmAction),
             _TaskStepDraft(
               _TaskStepType.navigate,
               destination: widget.waypoints.first,
@@ -13177,6 +13418,10 @@ class _SequentialTaskEditorDialogState
                                     } else if (value ==
                                         _TaskStepType.returnHome) {
                                       step.destination = null;
+                                    } else if (value == _TaskStepType.armLoad) {
+                                      step.policyId =
+                                          widget.workcellPolicies.firstOrNull ??
+                                          'armLoad';
                                     }
                                   }),
                                 ),
@@ -13235,22 +13480,38 @@ class _SequentialTaskEditorDialogState
                                       )
                                     : DropdownButtonFormField<String>(
                                         initialValue: step.policyId,
-                                        decoration: const InputDecoration(
-                                          labelText: '물품 정책',
-                                          helperText: '물품 종류에 맞는 가상 policy',
+                                        decoration: InputDecoration(
+                                          labelText:
+                                              widget.workcellPolicies.isEmpty
+                                              ? '픽업 동작'
+                                              : '픽업 Policy',
+                                          helperText:
+                                              widget.workcellPolicies.isEmpty
+                                              ? 'Policy가 없어 기본 armLoad를 사용합니다.'
+                                              : 'Gazebo 설비에 자동 생성된 Policy 중 선택',
                                           isDense: true,
-                                          border: OutlineInputBorder(),
+                                          border: const OutlineInputBorder(),
                                         ),
                                         items: [
-                                          for (
-                                            var policy = 1;
-                                            policy <= 5;
-                                            policy++
-                                          )
+                                          if (widget.workcellPolicies.isEmpty)
+                                            const DropdownMenuItem(
+                                              value: 'armLoad',
+                                              child: Text('기본 armLoad'),
+                                            ),
+                                          for (final policy
+                                              in widget.workcellPolicies)
                                             DropdownMenuItem(
-                                              value: 'policy_$policy',
+                                              value: policy,
+                                              child: Text(policy),
+                                            ),
+                                          if (step.policyId != 'armLoad' &&
+                                              !widget.workcellPolicies.contains(
+                                                step.policyId,
+                                              ))
+                                            DropdownMenuItem(
+                                              value: step.policyId,
                                               child: Text(
-                                                '물품 $policy · policy_$policy',
+                                                '${step.policyId} · 기존 설정',
                                               ),
                                             ),
                                         ],
@@ -16303,6 +16564,250 @@ class _RegistrationBadge extends StatelessWidget {
   );
 }
 
+/// 로봇 모델 저장소를 독립적으로 관리한다.
+class _RobotModelManagementPage extends StatefulWidget {
+  const _RobotModelManagementPage();
+
+  @override
+  State<_RobotModelManagementPage> createState() =>
+      _RobotModelManagementPageState();
+}
+
+class _RobotModelManagementPageState extends State<_RobotModelManagementPage> {
+  List<RobotModelInfo> _models = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_reload());
+  }
+
+  Future<void> _reload() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final models = await listRobotModels();
+      if (!mounted) return;
+      setState(() {
+        _models = models;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _importZip() async {
+    final chosen = await FilePicker.platform.pickFiles(
+      dialogTitle: '로봇 모델 ZIP 선택',
+      type: FileType.custom,
+      allowedExtensions: const ['zip'],
+    );
+    final path = chosen?.files.single.path;
+    if (path == null) return;
+    await _runImport(() => importRobotModelFromZip(path));
+  }
+
+  Future<void> _importGit() async {
+    final answer = await showMovableDialog<({String url, String name})>(
+      context: context,
+      builder: (dialogContext) => _GitRobotModelDialog(
+        onSubmit: (url, name) =>
+            Navigator.pop(dialogContext, (url: url, name: name)),
+      ),
+    );
+    if (answer == null) return;
+    await _runImport(
+      () => importRobotModelFromGit(
+        answer.url,
+        name: answer.name.trim().isEmpty ? null : answer.name.trim(),
+      ),
+    );
+  }
+
+  Future<void> _runImport(Future<RobotModelInfo> Function() action) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      await action();
+      await _reload();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.all(28),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '로봇 모델 관리',
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('Gazebo·ROS 2에서 사용할 로봇 모델 패키지를 등록하고 확인합니다.'),
+                ],
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _importGit,
+              icon: const Icon(Icons.account_tree_outlined),
+              label: const Text('Git에서 추가'),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.icon(
+              onPressed: _loading ? null : _importZip,
+              icon: const Icon(Icons.folder_zip_outlined),
+              label: const Text('ZIP으로 추가'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFEFF6FF),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFBFDBFE)),
+          ),
+          child: const Text(
+            '모델은 robot_model/<모델명>에 보관됩니다. ROS 2 작업공간, '
+            'URDF·SDF 또는 여러 패키지가 포함된 저장소를 등록할 수 있습니다.',
+          ),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 12),
+          SelectableText(
+            _error!,
+            style: const TextStyle(color: Color(0xFFB91C1C)),
+          ),
+        ],
+        const SizedBox(height: 14),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : _models.isEmpty
+              ? const Center(child: Text('등록된 로봇 모델이 없습니다.'))
+              : ListView.separated(
+                  itemCount: _models.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 8),
+                  itemBuilder: (_, index) {
+                    final model = _models[index];
+                    return Card(
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          child: Icon(
+                            model.isGitRepository
+                                ? Icons.account_tree_outlined
+                                : Icons.view_in_ar_outlined,
+                          ),
+                        ),
+                        title: Text(
+                          model.name,
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                        subtitle: SelectableText(
+                          '${model.packageCount}개 ROS 패키지\n${model.path}',
+                        ),
+                        isThreeLine: true,
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _GitRobotModelDialog extends StatefulWidget {
+  const _GitRobotModelDialog({required this.onSubmit});
+  final void Function(String url, String name) onSubmit;
+
+  @override
+  State<_GitRobotModelDialog> createState() => _GitRobotModelDialogState();
+}
+
+class _GitRobotModelDialogState extends State<_GitRobotModelDialog> {
+  final _url = TextEditingController();
+  final _name = TextEditingController();
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    icon: const Icon(Icons.account_tree_outlined),
+    title: const Text('Git에서 로봇 모델 추가'),
+    content: SizedBox(
+      width: 520,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _url,
+            autofocus: true,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'Git 저장소 주소 *',
+              hintText: 'https://github.com/owner/robot.git',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _name,
+            decoration: const InputDecoration(
+              labelText: '폴더 이름 (선택)',
+              helperText: '비우면 저장소 이름을 사용합니다.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('취소'),
+      ),
+      FilledButton(
+        onPressed: _url.text.trim().isEmpty
+            ? null
+            : () => widget.onSubmit(_url.text.trim(), _name.text.trim()),
+        child: const Text('가져오기'),
+      ),
+    ],
+  );
+}
+
 class _RobotManagementPage extends StatefulWidget {
   const _RobotManagementPage({
     required this.drawing,
@@ -16329,7 +16834,6 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onCheckSpawns,
     required this.spawnChecks,
     required this.onStartBackend,
-    required this.onSaveSettings,
     required this.onRefreshScripts,
     required this.telemetry,
     this.mapDirectory,
@@ -16382,9 +16886,6 @@ class _RobotManagementPage extends StatefulWidget {
   /// 열린 프로젝트로 Gazebo 와 Open-RMF 를 함께 띄운다.
   final Future<void> Function() onStartBackend;
 
-  /// 지금까지 편집한 맵·로봇·워크셀 설정을 프로젝트 원장에 저장한다.
-  final Future<bool> Function() onSaveSettings;
-
   /// 디스크의 실행·중지 스크립트를 MySQL 의 최신 내용으로 맞춘다.
   final Future<void> Function() onRefreshScripts;
 
@@ -16398,10 +16899,185 @@ class _RobotManagementPage extends StatefulWidget {
 class _RobotManagementPageState extends State<_RobotManagementPage> {
   RmfRuntimeStatus _rmfStatus = RmfRuntimeStatus.unknown;
   bool _rmfBusy = false;
-  bool _backendExportBusy = false;
-  bool _backendExportReady = false;
-  bool _backendSaveBusy = false;
-  bool _backendSaveReady = false;
+
+  Future<List<String>?> _askGitModel() async {
+    var url = '';
+    var name = '';
+    return showMovableDialog<List<String>>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.account_tree_outlined),
+        title: const Text('Git에서 로봇 모델 추가'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Git 저장소 주소',
+                  hintText: 'https://github.com/owner/robot.git',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (value) => url = value,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                decoration: const InputDecoration(
+                  labelText: '폴더 이름 (선택)',
+                  helperText: '비우면 저장소 이름을 사용합니다.',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (value) => name = value,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, [url, name]),
+            child: const Text('가져오기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showRobotModelManager() async {
+    var models = await listRobotModels();
+    if (!mounted) return;
+    var busy = false;
+    String? error;
+    await showMovableDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Future<void> runImport(
+            Future<RobotModelInfo> Function() action,
+          ) async {
+            setDialogState(() {
+              busy = true;
+              error = null;
+            });
+            try {
+              await action();
+              models = await listRobotModels();
+            } catch (caught) {
+              error = '$caught';
+            }
+            if (dialogContext.mounted) {
+              setDialogState(() => busy = false);
+            }
+          }
+
+          return AlertDialog(
+            icon: const Icon(Icons.smart_toy_outlined),
+            title: const Text('로봇 모델 관리'),
+            content: SizedBox(
+              width: 720,
+              height: 520,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '모든 모델은 robot_model/<모델명>에 보관됩니다. ROS 2 작업공간, '
+                    'URDF·SDF 모델 또는 여러 패키지가 든 저장소를 추가할 수 있습니다.',
+                    style: TextStyle(color: Color(0xFF64748B), height: 1.45),
+                  ),
+                  const SizedBox(height: 14),
+                  if (error != null)
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(10),
+                      color: const Color(0xFFFEF2F2),
+                      child: SelectableText(
+                        error!,
+                        style: const TextStyle(color: Color(0xFFB91C1C)),
+                      ),
+                    ),
+                  Flexible(
+                    child: models.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 28),
+                            child: Text('등록된 로봇 모델이 없습니다.'),
+                          )
+                        : ListView.separated(
+                            shrinkWrap: true,
+                            itemCount: models.length,
+                            separatorBuilder: (_, _) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, index) {
+                              final model = models[index];
+                              return ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  model.isGitRepository
+                                      ? Icons.account_tree_outlined
+                                      : Icons.folder_outlined,
+                                ),
+                                title: Text(model.name),
+                                subtitle: SelectableText(
+                                  '${model.packageCount}개 ROS 패키지 · ${model.path}',
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                  if (busy) const LinearProgressIndicator(),
+                ],
+              ),
+            ),
+            actions: [
+              OutlinedButton.icon(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        final chosen = await FilePicker.platform.pickFiles(
+                          dialogTitle: '로봇 모델 ZIP 선택',
+                          type: FileType.custom,
+                          allowedExtensions: const ['zip'],
+                        );
+                        final path = chosen?.files.single.path;
+                        if (path != null) {
+                          await runImport(() => importRobotModelFromZip(path));
+                        }
+                      },
+                icon: const Icon(Icons.folder_zip_outlined),
+                label: const Text('ZIP 추가'),
+              ),
+              OutlinedButton.icon(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        final answer = await _askGitModel();
+                        if (answer == null) return;
+                        await runImport(
+                          () => importRobotModelFromGit(
+                            answer[0],
+                            name: answer[1].trim().isEmpty ? null : answer[1],
+                          ),
+                        );
+                      },
+                icon: const Icon(Icons.cloud_download_outlined),
+                label: const Text('Git 추가'),
+              ),
+              FilledButton(
+                onPressed: busy ? null : () => Navigator.pop(dialogContext),
+                child: const Text('닫기'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 
   /// 노드 목록 스크롤. Scrollbar 와 스크롤 뷰가 같은 것을 잡아야 손잡이가
   /// 제자리에 붙는다.
@@ -16430,8 +17106,6 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     if (oldWidget.registeredRobots.length != widget.registeredRobots.length ||
         oldWidget.deployMapName != widget.deployMapName ||
         oldWidget.mapDirectory != widget.mapDirectory) {
-      _backendExportReady = false;
-      _backendSaveReady = false;
       unawaited(_refreshDeployedCount());
     }
   }
@@ -16454,47 +17128,13 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   /// 실행 스크립트는 Gazebo 를 먼저 띄우고 12초 뒤 Open-RMF 를 올린다. 바로
   /// 확인하면 아직 아무것도 없어서 실패한 것처럼 보인다.
   Future<void> _startBackend() async {
-    if (!_backendExportReady) return;
+    if (_rmfBusy || widget.projectName == null) return;
+    setState(() => _rmfBusy = true);
     await widget.onStartBackend();
     if (!mounted) return;
-    setState(() => _rmfBusy = true);
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
     await _refreshUntilClear();
-  }
-
-  /// 현재 등록·맵 설정을 실행 파일로 만든 뒤 실제 파일의 로봇 수까지 확인한다.
-  Future<void> _exportBeforeBackend() async {
-    if (_backendExportBusy || !_backendSaveReady) return;
-    setState(() => _backendExportBusy = true);
-    await widget.onRefreshScripts();
-    if (!mounted) return;
-    final directory = widget.mapDirectory;
-    final name = widget.deployMapName;
-    final expected = widget.registeredRobots
-        .where((robot) => robot.runsInGazebo)
-        .length;
-    final count = directory == null || name == null || name.trim().isEmpty
-        ? null
-        : await deployedSpawnCount(mapDirectory: directory, mapName: name);
-    if (!mounted) return;
-    setState(() {
-      _backendExportBusy = false;
-      _deployedRobots = count;
-      _backendExportReady = count != null && count == expected;
-    });
-  }
-
-  Future<void> _saveBeforeBackend() async {
-    if (_backendSaveBusy) return;
-    setState(() => _backendSaveBusy = true);
-    final saved = await widget.onSaveSettings();
-    if (!mounted) return;
-    setState(() {
-      _backendSaveBusy = false;
-      _backendSaveReady = saved;
-      _backendExportReady = false;
-    });
   }
 
   /// 배포된 bringup 이 담고 있는 로봇 수. 안 봤거나 파일이 없으면 null.
@@ -16815,76 +17455,21 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   const Text(
-                    '설정 저장 → 디스크 내보내기 → 백엔드 실행 순서입니다.',
+                    '버튼을 누르면 설정 저장과 내보내기 후 백엔드를 실행합니다.',
                     style: TextStyle(fontSize: 11, color: Color(0xFF92400E)),
                   ),
                   const SizedBox(height: 5),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed:
-                            widget.projectName == null || _backendSaveBusy
-                            ? null
-                            : () => unawaited(_saveBeforeBackend()),
-                        icon: _backendSaveBusy
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : Icon(
-                                _backendSaveReady
-                                    ? Icons.check_circle_outline
-                                    : Icons.save_outlined,
-                                size: 18,
-                              ),
-                        label: Text(_backendSaveReady ? '저장 완료' : '설정 내용 저장하기'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed:
-                            widget.projectName == null ||
-                                _backendExportBusy ||
-                                !_backendSaveReady
-                            ? null
-                            : () => unawaited(_exportBeforeBackend()),
-                        icon: _backendExportBusy
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : Icon(
-                                _backendExportReady
-                                    ? Icons.check_circle_outline
-                                    : Icons.drive_file_move_outline,
-                                size: 18,
-                              ),
-                        label: Text(
-                          _backendExportReady ? '내보내기 완료' : '디스크로 내보내기',
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Tooltip(
-                        message: widget.projectName == null
-                            ? '먼저 맵 프로젝트를 열거나 저장하세요.'
-                            : !_backendExportReady
-                            ? '설정을 디스크로 내보낸 뒤 실행할 수 있습니다.'
-                            : '`${widget.projectName}` 프로젝트로 Gazebo 와 '
-                                  'Open-RMF 를 함께 띄웁니다.',
-                        child: FilledButton.icon(
-                          onPressed:
-                              widget.projectName == null || !_backendExportReady
-                              ? null
-                              : () => unawaited(_startBackend()),
-                          icon: const Icon(Icons.play_arrow_rounded, size: 18),
-                          label: const Text('백엔드 띄우기'),
-                        ),
-                      ),
-                    ],
+                  Tooltip(
+                    message: widget.projectName == null
+                        ? '먼저 맵 프로젝트를 열거나 저장하세요.'
+                        : '설정 저장 → 디스크 내보내기 → 백엔드 실행을 한 번에 수행합니다.',
+                    child: FilledButton.icon(
+                      onPressed: widget.projectName == null || _rmfBusy
+                          ? null
+                          : () => unawaited(_startBackend()),
+                      icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                      label: const Text('백엔드 띄우기'),
+                    ),
                   ),
                 ],
               ),
@@ -17932,12 +18517,15 @@ class _NavigationRail extends StatelessWidget {
       (Icons.grid_view_rounded, '대시보드'),
       (Icons.map_outlined, '맵 관리'),
       (Icons.grid_on_outlined, '그리드맵'),
-      (Icons.smart_toy_outlined, '로봇'),
-      (Icons.assignment_outlined, '작업'),
+      (Icons.smart_toy_outlined, '로봇 관리'),
+      (Icons.model_training_outlined, 'WorkCell 관리'),
+      (Icons.assignment_outlined, '작업 관리'),
+      (Icons.view_in_ar_outlined, '로봇 모델'),
       (Icons.hub_outlined, 'ROS2 확인'),
       (Icons.description_outlined, '설정 파일'),
       (Icons.receipt_long_outlined, '로그 분석'),
       (Icons.analytics_outlined, '운영 분석'),
+      (Icons.difference_outlined, '프로젝트 분석'),
     ];
     return Container(
       width: 224,
@@ -17972,21 +18560,24 @@ class _NavigationRail extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(height: 38),
-              for (var i = 0; i < items.length; i++)
-                InkWell(
-                  onTap: () => onSelected(i),
-                  borderRadius: BorderRadius.circular(9),
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 7),
-                    child: _NavItem(
-                      icon: items[i].$1,
-                      label: items[i].$2,
-                      selected: i == selectedIndex,
+              const SizedBox(height: 24),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: items.length,
+                  itemBuilder: (_, i) => InkWell(
+                    onTap: () => onSelected(i),
+                    borderRadius: BorderRadius.circular(9),
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 7),
+                      child: _NavItem(
+                        icon: items[i].$1,
+                        label: items[i].$2,
+                        selected: i == selectedIndex,
+                      ),
                     ),
                   ),
                 ),
-              const Spacer(),
+              ),
               const Divider(color: Color(0xFF273449)),
               const SizedBox(height: 8),
               const _NavItem(icon: Icons.settings_outlined, label: '설정'),
@@ -23223,6 +23814,544 @@ class _OperationsAnalyticsPageState extends State<_OperationsAnalyticsPage> {
       ),
     );
   }
+}
+
+/// MySQL에 저장된 프로젝트 설정 스냅샷을 나란히 비교한다.
+///
+/// 값의 원장은 map_projects / map_project_fleets / map_project_robots /
+/// map_project_files다. 도면 bytes와 마스크 점 목록처럼 사람이 비교할 수 없는
+/// 큰 값은 크기와 개수로 요약한다.
+class _ProjectAnalyticsPage extends StatefulWidget {
+  const _ProjectAnalyticsPage();
+
+  @override
+  State<_ProjectAnalyticsPage> createState() => _ProjectAnalyticsPageState();
+}
+
+class _ProjectAnalyticsSnapshot {
+  const _ProjectAnalyticsSnapshot({
+    required this.summary,
+    required this.values,
+    required this.files,
+  });
+
+  final MapProjectSummary summary;
+  final Map<String, String> values;
+  final List<MapProjectFile> files;
+}
+
+class _ProjectAnalyticsPageState extends State<_ProjectAnalyticsPage> {
+  static const _comparisonSlots = 4;
+  static const _rowsPerPage = 50;
+  List<MapProjectSummary> _projects = const [];
+  final List<String?> _selectedNames = List<String?>.filled(
+    _comparisonSlots,
+    null,
+  );
+  final List<_ProjectAnalyticsSnapshot?> _snapshots =
+      List<_ProjectAnalyticsSnapshot?>.filled(_comparisonSlots, null);
+  bool _loading = false;
+  bool _differencesOnly = true;
+  int _rowPage = 0;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadProjects());
+  }
+
+  Future<void> _loadProjects() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final projects = await listMapProjects();
+      if (!mounted) return;
+      _projects = projects;
+      for (var slot = 0; slot < _comparisonSlots; slot++) {
+        _selectedNames[slot] = slot < projects.length
+            ? projects[slot].mapName
+            : null;
+      }
+      await _reloadSnapshots();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  Future<_ProjectAnalyticsSnapshot?> _loadSnapshot(String? name) async {
+    if (name == null) return null;
+    final summary = _projects.firstWhere((item) => item.mapName == name);
+    final payloadText = await loadMapProject(name);
+    final fleet = await loadMapProjectFleet(name);
+    // 원문까지 네 프로젝트치를 동시에 읽으면 수십 MB 문자열과 렌더 객체가 한
+    // 번에 생긴다. 목록에서는 메타데이터만 읽고 원문은 펼칠 때 한 파일만 읽는다.
+    final files = await loadMapProjectFileSummaries(name);
+    final values = <String, String>{
+      '기본.프로젝트명': summary.mapName,
+      '기본.도면': summary.drawingName ?? '없음',
+      '기본.Waypoint 수': '${summary.waypointCount}',
+      '기본.Lane 수': '${summary.laneCount}',
+      '기본.building.yaml': summary.hasBuildingYaml ? '있음' : '없음',
+      '기본.설정 파일 수': '${files.length}',
+    };
+    if (payloadText != null && payloadText.isNotEmpty) {
+      final payload = jsonDecode(payloadText) as Map<String, dynamic>;
+      _flattenProjectValues(values, '맵', payload);
+    }
+    if (fleet != null) _flattenProjectValues(values, '플릿', fleet);
+    return _ProjectAnalyticsSnapshot(
+      summary: summary,
+      values: values,
+      files: files,
+    );
+  }
+
+  Future<void> _reloadSnapshots() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final snapshots = <_ProjectAnalyticsSnapshot?>[];
+      // MySQL 결과와 JSON decode 네 벌의 최고 메모리가 겹치지 않게 순차 로드한다.
+      for (final name in _selectedNames) {
+        snapshots.add(await _loadSnapshot(name));
+      }
+      if (!mounted) return;
+      setState(() {
+        for (var slot = 0; slot < _comparisonSlots; slot++) {
+          _snapshots[slot] = snapshots[slot];
+        }
+        _rowPage = 0;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  static final RegExp _secretKey = RegExp(
+    r'(password|passwd|secret|token|api[_-]?key|credential)',
+    caseSensitive: false,
+  );
+
+  static void _flattenProjectValues(
+    Map<String, String> output,
+    String path,
+    dynamic value,
+  ) {
+    if (path.endsWith('.bytes')) {
+      output[path] = value is String ? '바이너리 ${value.length} 문자' : '없음';
+      return;
+    }
+    if (_secretKey.hasMatch(path)) {
+      output[path] = value == null ? '없음' : '••••••';
+      return;
+    }
+    if (value is Map) {
+      final entries = value.entries.toList()
+        ..sort((a, b) => '${a.key}'.compareTo('${b.key}'));
+      for (final entry in entries) {
+        _flattenProjectValues(output, '$path.${entry.key}', entry.value);
+      }
+      return;
+    }
+    if (value is List) {
+      // 좌표/마스크/로봇 배열은 전체 원문 대신 개수와, 작은 구조만 펼친다.
+      output['$path.개수'] = '${value.length}';
+      if (value.length <= 20 && value.every((item) => item is Map)) {
+        for (var i = 0; i < value.length; i++) {
+          final item = value[i] as Map;
+          final identity =
+              item['robotId'] ?? item['name'] ?? item['fileName'] ?? i;
+          _flattenProjectValues(output, '$path[$identity]', item);
+        }
+      }
+      return;
+    }
+    output[path] = value == null ? '없음' : '$value';
+  }
+
+  List<String> get _keys {
+    final keys = <String>{
+      for (final snapshot in _snapshots) ...?snapshot?.values.keys,
+    }.toList()..sort();
+    final selectedCount = _snapshots
+        .whereType<_ProjectAnalyticsSnapshot>()
+        .length;
+    if (!_differencesOnly || selectedCount < 2) return keys;
+    return keys.where(_isChanged).toList();
+  }
+
+  bool _isChanged(String key) {
+    final values = <String?>{
+      for (final snapshot in _snapshots)
+        if (snapshot != null) snapshot.values[key],
+    };
+    return values.length > 1;
+  }
+
+  Widget _selector(int slot) {
+    final value = _selectedNames[slot];
+    return DropdownButtonFormField<String>(
+      key: ValueKey('project-comparison-$slot:$value'),
+      initialValue: value,
+      decoration: InputDecoration(
+        labelText: slot == 0 ? '기준 프로젝트' : '비교 프로젝트 ${slot + 1}',
+        border: const OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: [
+        if (slot > 0)
+          const DropdownMenuItem(value: null, child: Text('비교 안 함')),
+        for (final project in _projects)
+          DropdownMenuItem(
+            value: project.mapName,
+            child: Text(project.mapName, overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      onChanged: (name) {
+        if (slot == 0 && name == null) return;
+        setState(() {
+          _selectedNames[slot] = name;
+          _rowPage = 0;
+        });
+        unawaited(_reloadSnapshots());
+      },
+    );
+  }
+
+  Widget _valueCell(String? value, {required bool changed}) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+    color: changed ? const Color(0xFFFFF7ED) : Colors.transparent,
+    child: SelectableText(
+      value ?? '—',
+      style: TextStyle(
+        fontFamily: value != null && value.length > 30 ? 'monospace' : null,
+        fontSize: 13,
+        color: value == null
+            ? const Color(0xFF94A3B8)
+            : const Color(0xFF334155),
+      ),
+    ),
+  );
+
+  Widget _comparisonTable() {
+    final keys = _keys;
+    if (keys.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 32),
+        child: Text('선택한 프로젝트들의 설정 차이가 없습니다.'),
+      );
+    }
+    final pageCount = math.max(1, (keys.length / _rowsPerPage).ceil());
+    if (_rowPage >= pageCount) _rowPage = pageCount - 1;
+    final start = _rowPage * _rowsPerPage;
+    final visibleKeys = keys.skip(start).take(_rowsPerPage).toList();
+    return Column(
+      children: [
+        Row(
+          children: [
+            Text(
+              '${start + 1}–${start + visibleKeys.length} / ${keys.length}개 항목',
+            ),
+            const Spacer(),
+            IconButton(
+              tooltip: '이전 페이지',
+              onPressed: _rowPage == 0
+                  ? null
+                  : () => setState(() => _rowPage--),
+              icon: const Icon(Icons.chevron_left),
+            ),
+            Text('${_rowPage + 1} / $pageCount'),
+            IconButton(
+              tooltip: '다음 페이지',
+              onPressed: _rowPage + 1 >= pageCount
+                  ? null
+                  : () => setState(() => _rowPage++),
+              icon: const Icon(Icons.chevron_right),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: 1420,
+            child: Table(
+              columnWidths: const {
+                0: FixedColumnWidth(300),
+                1: FixedColumnWidth(280),
+                2: FixedColumnWidth(280),
+                3: FixedColumnWidth(280),
+                4: FixedColumnWidth(280),
+              },
+              border: TableBorder.all(color: const Color(0xFFE2E8F0)),
+              children: [
+                TableRow(
+                  decoration: const BoxDecoration(color: Color(0xFFF8FAFC)),
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.all(10),
+                      child: Text(
+                        '설정 항목',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    for (var slot = 0; slot < _comparisonSlots; slot++)
+                      Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Text(
+                          _selectedNames[slot] ?? '비교 없음',
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                  ],
+                ),
+                for (final key in visibleKeys)
+                  TableRow(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: SelectableText(
+                          key,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                      for (final snapshot in _snapshots)
+                        _valueCell(
+                          snapshot?.values[key],
+                          changed: _isChanged(key),
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _fileList(_ProjectAnalyticsSnapshot? snapshot) {
+    if (snapshot == null) return const Text('프로젝트를 고르세요.');
+    if (snapshot.files.isEmpty) return const Text('보관된 설정 파일이 없습니다.');
+    return Column(
+      children: [
+        for (final file in snapshot.files)
+          _LazyProjectFile(mapName: snapshot.summary.mapName, file: file),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: const EdgeInsets.all(28),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '프로젝트 분석',
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'MySQL에 보관된 도면·로봇·안전·RMF·Gazebo·Nav2 설정을 프로젝트별로 비교합니다.',
+                  ),
+                ],
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : () => unawaited(_loadProjects()),
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('다시 읽기'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        if (_error != null)
+          SelectableText(
+            '프로젝트 설정을 읽지 못했습니다.\n$_error',
+            style: const TextStyle(color: Color(0xFFB91C1C)),
+          )
+        else if (_projects.isEmpty && !_loading)
+          const Text('MySQL에 저장된 프로젝트가 없습니다.')
+        else ...[
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (var slot = 0; slot < _comparisonSlots; slot++)
+                SizedBox(width: 270, child: _selector(slot)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              FilterChip(
+                selected: _differencesOnly,
+                label: const Text('다른 항목만'),
+                onSelected: (value) => setState(() {
+                  _differencesOnly = value;
+                  _rowPage = 0;
+                }),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'SLAM PGM 원본은 현재 프로젝트 파일로 보관되며, MySQL에서는 SLAM 사용 여부와 생성 설정을 비교합니다.',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (_loading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(36),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else ...[
+            _comparisonTable(),
+            const SizedBox(height: 26),
+            Text('설정 파일 원문', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 6),
+            const Text(
+              '네 프로젝트의 파일을 가로로 비교할 수 있습니다. 파일을 펼치면 MySQL에 보관된 실제 산출물이 표시됩니다.',
+              style: TextStyle(color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var slot = 0; slot < _comparisonSlots; slot++) ...[
+                    SizedBox(
+                      width: 330,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _selectedNames[slot] ?? '비교 없음',
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 8),
+                          _fileList(_snapshots[slot]),
+                        ],
+                      ),
+                    ),
+                    if (slot < _comparisonSlots - 1) const SizedBox(width: 24),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ],
+      ],
+    ),
+  );
+}
+
+/// 프로젝트 설정 파일 원문은 사용자가 펼친 한 건만 읽는다.
+class _LazyProjectFile extends StatefulWidget {
+  const _LazyProjectFile({required this.mapName, required this.file});
+  final String mapName;
+  final MapProjectFile file;
+
+  @override
+  State<_LazyProjectFile> createState() => _LazyProjectFileState();
+}
+
+class _LazyProjectFileState extends State<_LazyProjectFile> {
+  String? _content;
+  String? _error;
+  bool _loading = false;
+
+  Future<void> _load(bool expanded) async {
+    if (!expanded || _content != null || _loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final content = await loadMapProjectFileContent(
+        widget.mapName,
+        widget.file.fileName,
+      );
+      if (!mounted) return;
+      setState(() {
+        _content = content ?? '파일 원문이 없습니다.';
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ExpansionTile(
+    tilePadding: EdgeInsets.zero,
+    leading: const Icon(Icons.description_outlined),
+    title: Text(widget.file.fileName),
+    subtitle: Text(
+      '${widget.file.kind}'
+      '${widget.file.description.isEmpty ? '' : ' · ${widget.file.description}'}',
+    ),
+    onExpansionChanged: (expanded) => unawaited(_load(expanded)),
+    children: [
+      Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(maxHeight: 360),
+        padding: const EdgeInsets.all(12),
+        color: const Color(0xFF0F172A),
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+            ? SelectableText(
+                _error!,
+                style: const TextStyle(color: Color(0xFFFCA5A5)),
+              )
+            : SingleChildScrollView(
+                child: SelectableText(
+                  _content ?? '펼치면 원문을 읽습니다.',
+                  style: const TextStyle(
+                    color: Color(0xFFE2E8F0),
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+      ),
+    ],
+  );
 }
 
 /// 로봇 한 대의 상세. 등록 정보와 지금 상태를 한자리에서 본다.

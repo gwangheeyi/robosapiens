@@ -14,14 +14,13 @@ import 'rmf_project_config.dart';
 
 /// 자리 한 곳을 살핀 결과.
 enum SpawnIssue {
-  /// 저장된 자리가 바닥 안이고 지도와도 같다.
+  /// Spawn 자리가 바닥 안이고 등록된 복귀 Waypoint도 지도에 있다.
   ok,
 
   /// 저장된 자리가 바닥 밖이다. 이대로 올리면 이동 로봇은 끝없이 떨어진다.
   outsideFloor,
 
-  /// 바닥 안이긴 한데 지도가 말하는 자리와 다르다. 자리 Waypoint 를 옮겼거나
-  /// 예전 판이 저장해 둔 값이다.
+  /// 이전 버전에서 쓰던 값. 현재는 충전소와 Spawn 위치가 달라도 정상이다.
   stale,
 
   /// 설 자리(Waypoint)를 못 찾았다. 이름이 바뀌었거나 지워졌다.
@@ -33,23 +32,23 @@ enum SpawnIssue {
 
 extension SpawnIssueLabel on SpawnIssue {
   String get label => switch (this) {
-    SpawnIssue.ok => '맞습니다',
+    SpawnIssue.ok => '유효합니다',
     SpawnIssue.outsideFloor => '바닥 밖',
-    SpawnIssue.stale => '지도와 다름',
+    SpawnIssue.stale => '이전 위치 형식',
     SpawnIssue.noStation => '자리 없음',
     SpawnIssue.noCoordinate => '좌표 없음',
   };
 
   /// 무엇이 잘못됐고 어떻게 하면 되는지.
   String get detail => switch (this) {
-    SpawnIssue.ok => '저장된 자리가 지도와 같고 바닥 안입니다.',
+    SpawnIssue.ok =>
+      'Spawn 위치가 바닥 안에 있고 복귀 Waypoint도 지도에 있습니다. '
+          'Spawn 위치와 충전소는 달라도 정상입니다.',
     SpawnIssue.outsideFloor =>
       '저장된 자리에 바닥이 없습니다. 이대로 올리면 이동 로봇은 '
           '허공에서 끝없이 떨어집니다. 설치 로봇은 고정이라 떨어지지는 않지만 '
           '자리는 어긋납니다.',
-    SpawnIssue.stale =>
-      '자리 Waypoint 를 옮겼거나 예전 판이 저장해 둔 값입니다. '
-          '지도 기준으로 다시 맞추면 됩니다.',
+    SpawnIssue.stale => '이전 버전에서 저장된 위치 형식입니다.',
     SpawnIssue.noStation =>
       '이 로봇이 선다고 적힌 Waypoint 를 지도에서 못 찾았습니다. '
           '이름이 바뀌었거나 지워졌습니다. 로봇 등록에서 자리를 다시 골라 주세요.',
@@ -136,11 +135,11 @@ List<SpawnCheck> checkRobotSpawns({
       issue = SpawnIssue.outsideFloor;
     } else if (fromMap == null) {
       issue = SpawnIssue.noStation;
-    } else if ((fromMap.x - stored.x).abs() < 1e-6 &&
-        (fromMap.y - stored.y).abs() < 1e-6) {
-      issue = SpawnIssue.ok;
     } else {
-      issue = SpawnIssue.stale;
+      // 충전 Waypoint는 작업 종료 후 복귀점이고 stored는 Gazebo 최초 Spawn
+      // 위치다. 둘은 같은 지점일 필요가 없다. 둘을 직접 비교하면 충전1에
+      // 등록하고 대기4에서 시작하는 정상 구성을 오류로 막게 된다.
+      issue = SpawnIssue.ok;
     }
 
     result.add(
@@ -171,11 +170,11 @@ String spawnCheckSummary(List<SpawnCheck> checks) {
       )
       .length;
   if (outside == 0 && stale == 0 && missing == 0) {
-    return '${checks.length}대 모두 자리가 맞습니다.';
+    return '${checks.length}대 모두 시작 위치가 유효합니다.';
   }
   return [
     if (outside > 0) '$outside대가 바닥 밖에 있습니다',
-    if (stale > 0) '$stale대가 지도와 다릅니다',
+    if (stale > 0) '$stale대가 이전 위치 형식입니다',
     if (missing > 0) '$missing대는 자리가 없습니다',
   ].join(' · ');
 }

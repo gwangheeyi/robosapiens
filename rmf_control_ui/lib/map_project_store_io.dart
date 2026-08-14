@@ -376,6 +376,62 @@ WHERE p.map_name = $_nameParam;
   return files;
 }
 
+/// 분석 목록용 설정 파일 메타데이터. 큰 원문은 펼칠 때만 따로 읽는다.
+Future<List<MapProjectFile>> loadMapProjectFileSummaries(String mapName) async {
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SELECT ${_toBase64("JSON_OBJECT(\n"
+  "  'fileName', f.file_name, 'kind', f.kind, 'description', f.description,\n"
+  "  'executable', f.executable, 'contentBytes', OCTET_LENGTH(f.content),\n"
+  "  'generatedAt', DATE_FORMAT(f.generated_at, '%Y-%m-%dT%H:%i:%s.%f')\n"
+  ")")}
+FROM map_project_files f
+JOIN map_projects p ON p.id = f.project_id
+WHERE p.map_name = $_nameParam
+ORDER BY f.file_name;
+''');
+  if (output.isEmpty) return const [];
+  return [
+    for (final line in output.split('\n'))
+      if (line.trim().isNotEmpty)
+        (() {
+          final row =
+              jsonDecode(utf8.decode(base64Decode(line.trim())))
+                  as Map<String, dynamic>;
+          return MapProjectFile(
+            fileName: row['fileName'] as String,
+            kind: row['kind'] as String? ?? 'etc',
+            description:
+                '${row['description'] as String? ?? ''}'
+                ' · 원문 ${(row['contentBytes'] as num? ?? 0)} bytes',
+            executable: (row['executable'] as num?)?.toInt() == 1,
+            content: '',
+            generatedAt:
+                DateTime.tryParse(row['generatedAt'] as String? ?? '') ??
+                DateTime.fromMillisecondsSinceEpoch(0),
+          );
+        })(),
+  ];
+}
+
+/// 분석 화면에서 파일 하나를 펼쳤을 때만 원문을 읽는다.
+Future<String?> loadMapProjectFileContent(
+  String mapName,
+  String fileName,
+) async {
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SET @file_name = CONVERT(FROM_BASE64('${_encode(fileName)}') USING utf8mb4);
+SELECT ${_toBase64('LEFT(f.content, 200000)')}
+FROM map_project_files f
+JOIN map_projects p ON p.id = f.project_id
+WHERE p.map_name = $_nameParam AND BINARY f.file_name = BINARY @file_name
+LIMIT 1;
+''');
+  if (output.isEmpty) return null;
+  return _decodeResult(output);
+}
+
 /// 프로젝트의 플릿 설정과 로봇 목록을 저장한다.
 ///
 /// 로봇의 zones 는 콤마로 이어 붙인 문자열(`zonesText`)로 넘긴다. JSON_TABLE 로

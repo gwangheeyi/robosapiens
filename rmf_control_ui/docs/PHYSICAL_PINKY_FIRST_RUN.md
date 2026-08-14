@@ -181,7 +181,7 @@ ros2 pkg prefix sllidar_ros2
 ```bash
 cd ~/robosapiens/pinky_pro
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
+colcon build
 source install/setup.bash
 ```
 

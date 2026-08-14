@@ -6,7 +6,7 @@
 
   실행:
     source /opt/ros/jazzy/setup.bash
-    source $HOME/rmf_ws/install/setup.bash
+    source <robosapiens>/rmf_ws/install/setup.bash
     ros2 launch /home/gyi/robosapiens/rmf_maps/project1/project1.launch.xml
 -->
 <launch>

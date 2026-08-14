@@ -14,6 +14,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'rmf_task_models.dart';
+import 'workspace_paths_io.dart';
 
 export 'rmf_task_models.dart';
 
@@ -23,9 +24,7 @@ export 'rmf_task_models.dart';
 String _withRosEnvironment(String command) {
   final rosSetup =
       Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
-  final workspace =
-      Platform.environment['RMF_WS'] ??
-      '${Platform.environment['HOME'] ?? ''}/rmf_ws';
+  final workspace = bundledRmfWorkspace();
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '

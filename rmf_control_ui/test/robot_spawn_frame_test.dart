@@ -160,6 +160,20 @@ void main() {
       );
     });
 
+    test('충전소와 다른 유효한 시작 좌표는 다시 열어도 유지한다', () {
+      final waiting4 = [pinky.withSpawn(spawnX: 1.185, spawnY: -1.602)];
+      final kept = robotsWithMapSpawnPoints(
+        waiting4,
+        (_) => (dx: 1537.532, dy: 556.757),
+        metersPerPixel,
+      );
+
+      expect(identical(kept, waiting4), isTrue);
+      expect(kept.single.chargerWaypoint, '홈1');
+      expect(kept.single.spawnX, 1.185);
+      expect(kept.single.spawnY, -1.602);
+    });
+
     test('자리는 있는데 좌표가 없던 로봇도 채워 준다', () {
       const noSpawn = RmfProjectRobot(
         robotId: 'PK-02',

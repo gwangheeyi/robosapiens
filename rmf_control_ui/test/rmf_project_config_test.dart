@@ -383,6 +383,14 @@ void main() {
       final relay = buildSensorRelayScript(mapName: 'gwanghee', robots: robots);
       expect(relay, isNot(contains("Image, f'/{namespace}/camera/image_raw'")));
     });
+
+    test('센서 relay의 ROS node 이름에서 하이픈을 제거한다', () {
+      final relay = buildSensorRelayScript(
+        mapName: 'project1-ver2',
+        robots: robots,
+      );
+      expect(relay, contains("super().__init__('project1_ver2_sensor_relay')"));
+    });
   });
 
   group('설치 로봇', () {

@@ -10,9 +10,10 @@ set -euo pipefail
 
 MAP_DIR="${MAP_DIR:-/home/gyi/robosapiens/rmf_maps/gwanghee}"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
-PINKY_WS="${PINKY_WS:-$HOME/robosapiens/pinky_pro}"
-OMX_WS="${OMX_WS:-$HOME/robosapiens/open_manipulator}"
+APP_ROOT="${ROBOSAPIENS_ROOT:-$(cd "$MAP_DIR/../.." && pwd)}"
+RMF_WS="${RMF_WS:-$APP_ROOT/rmf_ws}"
+PINKY_WS="${PINKY_WS:-$APP_ROOT/robot_model/pinky_pro}"
+OMX_WS="${OMX_WS:-$APP_ROOT/robot_model/open_manipulator}"
 
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter rmf_building_map_tools ros_gz_sim pinky_description robot_state_publisher joint_state_publisher open_manipulator_description"

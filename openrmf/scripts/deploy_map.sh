@@ -15,7 +15,7 @@ DEPLOY_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 # 패키지 디렉터리가 안 보인다. 한 곳에 모은다.
 LOG_DIR="$ROOT_DIR/log"
 DEPLOY_LOG="$LOG_DIR/map-deploy-${DEPLOY_TIMESTAMP}.log"
-RMF_WS_DIR="${RMF_WS:-$HOME/rmf_ws}"
+RMF_WS_DIR="${RMF_WS:-$ROOT_DIR/rmf_ws}"
 TARGET_DIR="$ROOT_DIR/rmf_maps/$MAP_NAME"
 STAGING_DIR="$(mktemp -d "$ROOT_DIR/rmf_maps/.${MAP_NAME}.deploy.XXXXXX")"
 RUNTIME_DIR="$ROOT_DIR/openrmf/.runtime"

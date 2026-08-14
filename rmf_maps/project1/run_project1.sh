@@ -17,10 +17,11 @@ set -euo pipefail
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-22}"
 
 MAP_DIR="${MAP_DIR:-/home/gyi/robosapiens/rmf_maps/project1}"
+APP_ROOT="${ROBOSAPIENS_ROOT:-$(cd "$MAP_DIR/../.." && pwd)}"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
-PINKY_WS="${PINKY_WS:-$HOME/robosapiens/pinky_pro}"
-OMX_WS="${OMX_WS:-$HOME/robosapiens/open_manipulator}"
+RMF_WS="${RMF_WS:-$APP_ROOT/rmf_ws}"
+PINKY_WS="${PINKY_WS:-$APP_ROOT/robot_model/pinky_pro}"
+OMX_WS="${OMX_WS:-$APP_ROOT/robot_model/open_manipulator}"
 
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter rmf_building_map_tools ros_gz_sim pinky_description robot_state_publisher joint_state_publisher open_manipulator_description"
@@ -74,6 +75,20 @@ source "$ROS_SETUP"
 [[ -f "$OMX_WS/install/setup.bash" ]] && source "$OMX_WS/install/setup.bash"
 set -u
 
+# C++ RMF 라이브러리와 Python 바인딩이 다른 설치본에서 섞이면 다중 로봇
+# 등록 중 SIGSEGV가 날 수 있으므로 작업공간 설치본만 허용한다.
+RMF_ADAPTER_MODULE="$(python3 -c 'import rmf_adapter; print(rmf_adapter.__file__)' 2>/dev/null || true)"
+case "$RMF_ADAPTER_MODULE" in
+  "$RMF_WS"/install/*) ;;
+  *)
+    echo "호환되지 않는 rmf_adapter가 선택됐습니다: ${RMF_ADAPTER_MODULE:-찾지 못함}" >&2
+    echo "필요한 경로: $RMF_WS/install 아래" >&2
+    echo "RMF↔Nav2 어댑터를 시작하지 않습니다." >&2
+    exit 1
+    ;;
+esac
+echo "RMF adapter: $RMF_ADAPTER_MODULE"
+
 # nav_graphs/0.yaml 은 building.yaml 에서 파생된다. 맵에서 Waypoint 나 Lane 을
 # 고쳐도 이 파일이 그대로면 RMF 는 옛날 지도를 본다. 없는 것이 아니라 낡은
 # 것이라 오류가 나지 않는다 — 충전 Waypoint 를 방금 이었는데도 RMF 가 "충전
@@ -125,46 +140,10 @@ if ! flock -n 9; then
 fi
 : > "$ERR_FILE"
 
-# 이 awk 는 파이프를 쉬지 않고 읽는다. 읽는 쪽이 있어야 위의 교착이 안 난다.
-exec > >(exec awk -v out="$LOG_FILE" -v err="$ERR_FILE" -v maxmb="$LOG_MAX_MB" '
-function put(text) {
-  print text > out
-  fflush(out)
-  bytes += length(text) + 1
-  if (bytes > maxmb * 1048576) {
-    close(out)
-    system("mv -f \"" out "\" \"" out ".1\" 2>/dev/null")
-    bytes = 0
-    print "=== 로그가 " maxmb "MB 를 넘어 " out ".1 로 밀었다 ===" > out
-    fflush(out)
-  }
-}
-function fold() {
-  if (dup > 0) { put("  ↑ 같은 줄 " dup "번 더") ; dup = 0 }
-}
-{
-  if ($0 ~ /^\[[^]]+\] *$/) next
-  signature = $0
-  # ROS 시각만 다른 같은 경고도 접는다. Nav2 충돌 경고는 20Hz라서 원문
-  # 비교만 하면 한 줄도 접히지 않고 로깅 자체가 CPU를 먹는다.
-  gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)
-  if (signature == last_signature) {
-    dup++
-    # 오래 접혀 있으면 로그가 멎은 것처럼 보인다. 가끔 살아 있다고 알린다.
-    if (dup % 100000 == 0) put("  ↑ 같은 줄 " dup "번째, 계속 접는 중")
-    next
-  }
-  fold()
-  put($0)
-  last = $0
-  last_signature = signature
-  if ($0 ~ /ERROR|error:|Error|Traceback|Warning|WARN|없는 파일|실패/) {
-    print $0 > err
-    fflush(err)
-  }
-}
-END { fold() }
-') 2>&1
+# mawk 는 detached 세션의 프로세스 치환 파이프에서 읽기가 멈춘 사례가 있다.
+# unbuffered Python 수집기는 시작할 때 파일을 먼저 열고 한 줄씩 즉시 기록한다.
+exec > >(exec python3 -u "$APP_ROOT/openrmf/scripts/log_collector.py" \
+  --out "$LOG_FILE" --err "$ERR_FILE" --max-mb "$LOG_MAX_MB") 2>&1
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') project1 실행 ==="
 # 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
 # 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
@@ -382,6 +361,10 @@ ADAPTER_WAIT="${ADAPTER_WAIT:-90}"
 # launch 의 respawn_delay 보다 넉넉해야 한다. 짧으면 다시 뜨는 중인 것을 두고
 # 죽었다고 알린다.
 ADAPTER_RESPAWN_WAIT="${ADAPTER_RESPAWN_WAIT:-30}"
+ADAPTER_HEALTH_GRACE="${ADAPTER_HEALTH_GRACE:-120}"
+ADAPTER_HEALTH_INTERVAL="${ADAPTER_HEALTH_INTERVAL:-30}"
+ADAPTER_HEALTH_FAILURES="${ADAPTER_HEALTH_FAILURES:-3}"
+EXPECTED_FLEET_ROBOTS="pinky_01 pinky_02"
 watch_fleet_adapter() {
   local pattern="$MAP_DIR/project1_nav2_adapter.py"
   local deadline=$((SECONDS + ADAPTER_WAIT))
@@ -397,6 +380,9 @@ watch_fleet_adapter() {
     return
   fi
   echo "RMF↔Nav2 어댑터가 떴습니다."
+  local health_after=$((SECONDS + ADAPTER_HEALTH_GRACE))
+  local last_health=0
+  local failed_health=0
   # 뜬 다음 죽는 것이 진짜 문제다. 계속 지켜본다.
   #
   # 다만 launch 가 respawn 으로 다시 띄운다. 사라진 그 순간에 죽었다고 알리면
@@ -404,6 +390,30 @@ watch_fleet_adapter() {
   # 정말 안 돌아올 때만 알린다.
   while :; do
     if pgrep -u "$(id -u)" -f "$pattern" >/dev/null 2>&1; then
+      if ((SECONDS >= health_after && SECONDS - last_health >= ADAPTER_HEALTH_INTERVAL)); then
+        last_health=$SECONDS
+        local fleet_state
+        fleet_state="$(timeout 12 ros2 topic echo /fleet_states --once 2>/dev/null || true)"
+        local missing=0
+        local robot
+        for robot in $EXPECTED_FLEET_ROBOTS; do
+          if ! grep -Fq "name: $robot" <<<"$fleet_state"; then
+            missing=1
+            echo "RMF fleet state에 $robot 등록이 없습니다." >&2
+          fi
+        done
+        if ((missing)); then
+          failed_health=$((failed_health + 1))
+          if ((failed_health >= ADAPTER_HEALTH_FAILURES)); then
+            echo "fleet 등록 확인이 $failed_health 회 연속 실패했습니다. 어댑터를 재기동합니다." >&2
+            pkill -u "$(id -u)" -f "$pattern" || true
+            failed_health=0
+            health_after=$((SECONDS + ADAPTER_HEALTH_GRACE))
+          fi
+        else
+          failed_health=0
+        fi
+      fi
       sleep 5
       continue
     fi
@@ -429,7 +439,10 @@ watch_fleet_adapter() {
   echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다. 그래서 겉으로는" >&2
   echo "멀쩡해 보입니다." >&2
   echo "" >&2
-  echo "가장 흔한 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
+  echo "먼저 위에 출력된 RMF adapter 경로가 rmf_ws/install 아래인지 확인하세요." >&2
+  echo "C++ 라이브러리와 Python 바인딩의 설치본이 섞이면 다중 로봇 등록 중" >&2
+  echo "SIGSEGV가 날 수 있습니다." >&2
+  echo "또 다른 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
   echo "(rmf/dynamic_event/begin/<플릿>/<로봇>) 영문·숫자·밑줄만 쓸 수 있습니다." >&2
   echo "하이픈이 들어간 ID 는 로봇을 플릿에 붙이는 순간 어댑터를 죽입니다." >&2
   echo "" >&2

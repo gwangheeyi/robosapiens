@@ -11,7 +11,8 @@ MAP_DIR="${MAP_DIR:-/home/gyi/robosapiens/rmf_maps/project1}"
 # 이 프로젝트가 쓰는 로봇 네임스페이스. 인자에 맵 경로가 없는 노드는 이 이름으로
 # 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
 ROBOT_NAMESPACES="pinky_01 pinky_02 omx_01 omx_02 omx_03"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
+APP_ROOT="${ROBOSAPIENS_ROOT:-$(cd "$MAP_DIR/../.." && pwd)}"
+RMF_WS="${RMF_WS:-$APP_ROOT/rmf_ws}"
 LOCK_FILE="$MAP_DIR/.project1.run.lock"
 
 # INT → TERM → KILL 로 올려 가며 내린다.

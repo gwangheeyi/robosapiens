@@ -16,6 +16,7 @@ import json
 import math
 import sys
 import threading
+import time
 import uuid
 
 import rclpy
@@ -72,13 +73,18 @@ def yaw_of(rotation):
 class RobotAdapter:
     """로봇 한 대. RMF 쪽과 Nav2 쪽을 양쪽으로 붙인다."""
 
-    def __init__(self, name, namespace, node, tf_buffer, fleet_handle):
+    next_registration_at = 0.0
+
+    def __init__(self, name, namespace, node, tf_buffer, fleet_handle,
+                 fleet_config, registration_delay):
         self.name = name
         self.namespace = namespace
         self.node = node
         self.tf_buffer = tf_buffer
         self.fleet_handle = fleet_handle
+        self.fleet_config = fleet_config
         self.update_handle = None
+        self.update_ready_at = None
         self.execution = None
         self.goal_handle = None
         # Nav2 액션 결과는 비동기로 늦게 돌아온다. 새 목적지가 옛 목적지를
@@ -101,6 +107,8 @@ class RobotAdapter:
         self.dispenser_execution = None
         self.dispenser_request_guid = None
         self.dispenser_target_guid = None
+        # pybind C++가 콜백을 사용하는 동안 Python 객체가 회수되지 않게 한다.
+        self.callbacks = self.make_callbacks()
 
     # ── RMF 가 부르는 쪽 ────────────────────────────────────────────────
 
@@ -310,12 +318,14 @@ class RobotAdapter:
         if state is None:
             return
         if self.update_handle is None:
+            if time.monotonic() < RobotAdapter.next_registration_at:
+                return
             # 처음 자리를 알게 된 순간에 RMF 에 등록한다. 자리를 모르는 채로
             # 넣으면 RMF 가 그 로봇을 어디에 둘지 모른다.
             handle = self.fleet_handle.add_robot(
                 self.name, state,
-                rmf_easy.RobotConfiguration([]),
-                self.make_callbacks())
+                self.fleet_config.get_known_robot_configuration(self.name),
+                self.callbacks)
             if handle is None:
                 # 자리가 nav graph 에서 너무 멀면 RMF 가 받지 않는다. 다음에 다시
                 # 해 본다 — AMCL 이 아직 안 잡혔을 수 있다. 같은 말을 0.1초마다
@@ -328,8 +338,15 @@ class RobotAdapter:
                         f' 멀어 RMF 가 받지 않습니다. AMCL 이 잡히면 다시 붙습니다.')
                 return
             self.update_handle = handle
+            RobotAdapter.next_registration_at = time.monotonic() + 3.0
+            # add_robot의 C++ 측 등록 완료 콜백이 끝나기 전에 update()를 호출하면
+            # Jazzy rmf_adapter가 SIGSEGV를 낸다. wall clock으로 여유를 둔다.
+            self.update_ready_at = time.monotonic() + 2.0
             self.warned = False
             self.node.get_logger().info(f'[{self.name}] RMF 에 붙었습니다.')
+            return
+        if (self.update_ready_at is not None and
+                time.monotonic() < self.update_ready_at):
             return
         with self.lock:
             activity = (
@@ -365,6 +382,7 @@ def main(argv=sys.argv):
         adapter.node.use_sim_time()
 
     adapter.start()
+    time.sleep(1.0)
 
     tf_buffer = tf2_ros.Buffer()
     tf2_ros.TransformListener(tf_buffer, node)
@@ -372,14 +390,16 @@ def main(argv=sys.argv):
     fleet_handle = adapter.add_easy_fleet(fleet_config)
 
     robots = []
-    for name in fleet_config.known_robots:
+    for index, name in enumerate(fleet_config.known_robots):
         namespace = ROBOT_NAMESPACES.get(name)
         if namespace is None:
             node.get_logger().warn(
                 f'[{name}] 의 ROS 네임스페이스를 모릅니다. 건너뜁니다.')
             continue
         robots.append(
-            RobotAdapter(name, namespace, node, tf_buffer, fleet_handle))
+            RobotAdapter(
+                name, namespace, node, tf_buffer, fleet_handle, fleet_config,
+                index * 3.0))
 
     if not robots:
         node.get_logger().error('이을 로봇이 없습니다.')

@@ -69,14 +69,14 @@ void main() {
       expect(result.fromMap?.y, closeTo(homeY, 1e-9));
     });
 
-    test('바닥 안이지만 지도와 다르면 지도와 다름이다', () {
-      // 자리 Waypoint 를 옮겼을 때. 떨어지지는 않지만 엉뚱한 데 선다.
+    test('충전소와 Spawn 위치가 달라도 바닥 안이면 정상이다', () {
+      // 충전1은 복귀점이고 이 좌표는 대기4의 시작 위치다.
       final result = check([
         pinky(spawnX: 1.0, spawnY: -1.0, station: '홈1'),
       ]).single;
-      expect(result.issue, SpawnIssue.stale);
+      expect(result.issue, SpawnIssue.ok);
       expect(result.storedInsideFloor, isTrue);
-      expect(result.willChange, isTrue);
+      expect(result.willChange, isFalse);
     });
 
     test('자리를 안 고른 로봇은 좌표 없음이다', () {
@@ -116,7 +116,7 @@ void main() {
       final checks = check([
         pinky(spawnX: homeX, spawnY: homeY, station: '홈1'),
       ]);
-      expect(spawnCheckSummary(checks), '1대 모두 자리가 맞습니다.');
+      expect(spawnCheckSummary(checks), '1대 모두 시작 위치가 유효합니다.');
     });
 
     test('바닥 밖은 몇 대인지 세어서 알린다', () {

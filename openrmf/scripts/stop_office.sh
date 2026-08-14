@@ -12,7 +12,7 @@ if [[ "$#" -ne 0 ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
+RMF_WS="${RMF_WS:-$ROOT_DIR/rmf_ws}"
 API_CONTAINER="${RMF_API_CONTAINER:-robosapiens-rmf-api}"
 WAIT_SECONDS="${RMF_STOP_WAIT_SECONDS:-15}"
 

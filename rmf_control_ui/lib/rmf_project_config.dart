@@ -463,6 +463,15 @@ class RmfFleetSettings {
 
 String _n(double value) => value.toStringAsFixed(3);
 
+/// 임의의 프로젝트 이름을 유효한 ROS 2 node 이름으로 바꾼다.
+/// 파일 이름에는 `-`가 허용되지만 node 이름에는 허용되지 않는다.
+String _rosNodeName(String value) {
+  var sanitized = value.replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_');
+  if (sanitized.isEmpty) return 'robosapiens_node';
+  if (RegExp(r'^[0-9]').hasMatch(sanitized)) sanitized = 'n_$sanitized';
+  return sanitized;
+}
+
 /// Open-RMF fleet adapter 설정(`<fleet>_config.yaml`).
 ///
 /// `rmf_demos` 의 tinyRobot_config.yaml 과 같은 구조다. 이것이 없어서 지금까지
@@ -517,7 +526,9 @@ String buildFleetAdapterYaml({
     // `Fleet not configured to perform this action` 이라며 통째로 거절한다.
     // `armLoad` 는 앱의 연속 작업에 있는 매니퓰레이터 적재 단계다.
     ..writeln('  actions: ["teleop", "$rmfArmLoadAction"]')
-    ..writeln('  finishing_request: "park"')
+    // Jazzy easy_full_control은 시작 위치가 주차 지점과 같을 때 자동 park를
+    // 즉시 완료하는 경로에서 SIGSEGV가 발생할 수 있다.
+    ..writeln('  finishing_request: "nothing"')
     // 대기점 도착 뒤 별도 responsive-wait 자세를 만들지 않는다. 작업의 다음
     // 목적지가 정해졌다면 그 경로를 바로 넘겨 불필요한 대기 회전을 막는다.
     ..writeln('  responsive_wait: False')
@@ -671,7 +682,7 @@ String buildProjectLaunchXml({
     ..writeln('')
     ..writeln('  실행:')
     ..writeln('    source /opt/ros/jazzy/setup.bash')
-    ..writeln('    source \$HOME/rmf_ws/install/setup.bash')
+    ..writeln('    source <robosapiens>/rmf_ws/install/setup.bash')
     ..writeln('    ros2 launch $mapDirectory/$mapName.launch.xml')
     ..writeln('-->')
     ..writeln('<launch>')
@@ -1131,9 +1142,9 @@ String buildProjectRunScript({
   required String mapDirectory,
   List<RmfProjectRobot> robots = const [],
   String rosSetup = '/opt/ros/jazzy/setup.bash',
-  String rmfWorkspace = r'$HOME/rmf_ws',
-  String pinkyWorkspace = r'$HOME/robosapiens/pinky_pro',
-  String manipulatorWorkspace = r'$HOME/robosapiens/open_manipulator',
+  String rmfWorkspace = r'$APP_ROOT/rmf_ws',
+  String pinkyWorkspace = r'$APP_ROOT/robot_model/pinky_pro',
+  String manipulatorWorkspace = r'$APP_ROOT/robot_model/open_manipulator',
   int rosDomainId = defaultRosDomainId,
 }) =>
     '''#!/usr/bin/env bash
@@ -1155,6 +1166,7 @@ set -euo pipefail
 export ROS_DOMAIN_ID="\${ROS_DOMAIN_ID:-$rosDomainId}"
 
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
+APP_ROOT="\${ROBOSAPIENS_ROOT:-\$(cd "\$MAP_DIR/../.." && pwd)}"
 ROS_SETUP="\${ROS_SETUP:-$rosSetup}"
 RMF_WS="\${RMF_WS:-$rmfWorkspace}"
 PINKY_WS="\${PINKY_WS:-$pinkyWorkspace}"
@@ -1212,6 +1224,20 @@ source "\$ROS_SETUP"
 [[ -f "\$OMX_WS/install/setup.bash" ]] && source "\$OMX_WS/install/setup.bash"
 set -u
 
+# C++ RMF 라이브러리와 Python 바인딩이 다른 설치본에서 섞이면 다중 로봇
+# 등록 중 SIGSEGV가 날 수 있으므로 작업공간 설치본만 허용한다.
+RMF_ADAPTER_MODULE="\$(python3 -c 'import rmf_adapter; print(rmf_adapter.__file__)' 2>/dev/null || true)"
+case "\$RMF_ADAPTER_MODULE" in
+  "\$RMF_WS"/install/*) ;;
+  *)
+    echo "호환되지 않는 rmf_adapter가 선택됐습니다: \${RMF_ADAPTER_MODULE:-찾지 못함}" >&2
+    echo "필요한 경로: \$RMF_WS/install 아래" >&2
+    echo "RMF↔Nav2 어댑터를 시작하지 않습니다." >&2
+    exit 1
+    ;;
+esac
+echo "RMF adapter: \$RMF_ADAPTER_MODULE"
+
 # nav_graphs/0.yaml 은 building.yaml 에서 파생된다. 맵에서 Waypoint 나 Lane 을
 # 고쳐도 이 파일이 그대로면 RMF 는 옛날 지도를 본다. 없는 것이 아니라 낡은
 # 것이라 오류가 나지 않는다 — 충전 Waypoint 를 방금 이었는데도 RMF 가 "충전
@@ -1263,46 +1289,10 @@ if ! flock -n 9; then
 fi
 : > "\$ERR_FILE"
 
-# 이 awk 는 파이프를 쉬지 않고 읽는다. 읽는 쪽이 있어야 위의 교착이 안 난다.
-exec > >(exec awk -v out="\$LOG_FILE" -v err="\$ERR_FILE" -v maxmb="\$LOG_MAX_MB" '
-function put(text) {
-  print text > out
-  fflush(out)
-  bytes += length(text) + 1
-  if (bytes > maxmb * 1048576) {
-    close(out)
-    system("mv -f \\"" out "\\" \\"" out ".1\\" 2>/dev/null")
-    bytes = 0
-    print "=== 로그가 " maxmb "MB 를 넘어 " out ".1 로 밀었다 ===" > out
-    fflush(out)
-  }
-}
-function fold() {
-  if (dup > 0) { put("  ↑ 같은 줄 " dup "번 더") ; dup = 0 }
-}
-{
-  if (\$0 ~ /^\\[[^]]+\\] *\$/) next
-  signature = \$0
-  # ROS 시각만 다른 같은 경고도 접는다. Nav2 충돌 경고는 20Hz라서 원문
-  # 비교만 하면 한 줄도 접히지 않고 로깅 자체가 CPU를 먹는다.
-  gsub(/\\[[0-9]+\\.[0-9]+\\]/, "[time]", signature)
-  if (signature == last_signature) {
-    dup++
-    # 오래 접혀 있으면 로그가 멎은 것처럼 보인다. 가끔 살아 있다고 알린다.
-    if (dup % 100000 == 0) put("  ↑ 같은 줄 " dup "번째, 계속 접는 중")
-    next
-  }
-  fold()
-  put(\$0)
-  last = \$0
-  last_signature = signature
-  if (\$0 ~ /ERROR|error:|Error|Traceback|Warning|WARN|없는 파일|실패/) {
-    print \$0 > err
-    fflush(err)
-  }
-}
-END { fold() }
-') 2>&1
+# mawk 는 detached 세션의 프로세스 치환 파이프에서 읽기가 멈춘 사례가 있다.
+# unbuffered Python 수집기는 시작할 때 파일을 먼저 열고 한 줄씩 즉시 기록한다.
+exec > >(exec python3 -u "\$APP_ROOT/openrmf/scripts/log_collector.py" \\
+  --out "\$LOG_FILE" --err "\$ERR_FILE" --max-mb "\$LOG_MAX_MB") 2>&1
 echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
 # 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
 # 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
@@ -1521,6 +1511,10 @@ ADAPTER_WAIT="\${ADAPTER_WAIT:-90}"
 # launch 의 respawn_delay 보다 넉넉해야 한다. 짧으면 다시 뜨는 중인 것을 두고
 # 죽었다고 알린다.
 ADAPTER_RESPAWN_WAIT="\${ADAPTER_RESPAWN_WAIT:-30}"
+ADAPTER_HEALTH_GRACE="\${ADAPTER_HEALTH_GRACE:-120}"
+ADAPTER_HEALTH_INTERVAL="\${ADAPTER_HEALTH_INTERVAL:-30}"
+ADAPTER_HEALTH_FAILURES="\${ADAPTER_HEALTH_FAILURES:-3}"
+EXPECTED_FLEET_ROBOTS="${robots.where((robot) => robot.isMobile && robot.runsInGazebo).map((robot) => robot.robotId).join(' ')}"
 watch_fleet_adapter() {
   local pattern="\$MAP_DIR/${mapName}_nav2_adapter.py"
   local deadline=\$((SECONDS + ADAPTER_WAIT))
@@ -1536,6 +1530,9 @@ watch_fleet_adapter() {
     return
   fi
   echo "RMF↔Nav2 어댑터가 떴습니다."
+  local health_after=\$((SECONDS + ADAPTER_HEALTH_GRACE))
+  local last_health=0
+  local failed_health=0
   # 뜬 다음 죽는 것이 진짜 문제다. 계속 지켜본다.
   #
   # 다만 launch 가 respawn 으로 다시 띄운다. 사라진 그 순간에 죽었다고 알리면
@@ -1543,6 +1540,30 @@ watch_fleet_adapter() {
   # 정말 안 돌아올 때만 알린다.
   while :; do
     if pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1; then
+      if ((SECONDS >= health_after && SECONDS - last_health >= ADAPTER_HEALTH_INTERVAL)); then
+        last_health=\$SECONDS
+        local fleet_state
+        fleet_state="\$(timeout 12 ros2 topic echo /fleet_states --once 2>/dev/null || true)"
+        local missing=0
+        local robot
+        for robot in \$EXPECTED_FLEET_ROBOTS; do
+          if ! grep -Fq "name: \$robot" <<<"\$fleet_state"; then
+            missing=1
+            echo "RMF fleet state에 \$robot 등록이 없습니다." >&2
+          fi
+        done
+        if ((missing)); then
+          failed_health=\$((failed_health + 1))
+          if ((failed_health >= ADAPTER_HEALTH_FAILURES)); then
+            echo "fleet 등록 확인이 \$failed_health 회 연속 실패했습니다. 어댑터를 재기동합니다." >&2
+            pkill -u "\$(id -u)" -f "\$pattern" || true
+            failed_health=0
+            health_after=\$((SECONDS + ADAPTER_HEALTH_GRACE))
+          fi
+        else
+          failed_health=0
+        fi
+      fi
       sleep 5
       continue
     fi
@@ -1568,7 +1589,10 @@ watch_fleet_adapter() {
   echo "Gazebo 와 Nav2 는 그대로 살아 있어 토픽은 계속 옵니다. 그래서 겉으로는" >&2
   echo "멀쩡해 보입니다." >&2
   echo "" >&2
-  echo "가장 흔한 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
+  echo "먼저 위에 출력된 RMF adapter 경로가 rmf_ws/install 아래인지 확인하세요." >&2
+  echo "C++ 라이브러리와 Python 바인딩의 설치본이 섞이면 다중 로봇 등록 중" >&2
+  echo "SIGSEGV가 날 수 있습니다." >&2
+  echo "또 다른 원인은 로봇 ID 입니다. RMF 가 ID 로 토픽을 만드는데" >&2
   echo "(rmf/dynamic_event/begin/<플릿>/<로봇>) 영문·숫자·밑줄만 쓸 수 있습니다." >&2
   echo "하이픈이 들어간 ID 는 로봇을 플릿에 붙이는 순간 어댑터를 죽입니다." >&2
   echo "" >&2
@@ -1619,7 +1643,8 @@ MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 # 이 프로젝트가 쓰는 로봇 네임스페이스. 인자에 맵 경로가 없는 노드는 이 이름으로
 # 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
 ROBOT_NAMESPACES="${robots.where((robot) => robot.runsInGazebo).map((robot) => robot.gzName).join(' ')}"
-RMF_WS="\${RMF_WS:-\$HOME/rmf_ws}"
+APP_ROOT="\${ROBOSAPIENS_ROOT:-\$(cd "\$MAP_DIR/../.." && pwd)}"
+RMF_WS="\${RMF_WS:-\$APP_ROOT/rmf_ws}"
 LOCK_FILE="\$MAP_DIR/.$mapName.run.lock"
 
 # INT → TERM → KILL 로 올려 가며 내린다.
@@ -2032,6 +2057,7 @@ String buildSensorRelayScript({
   required String mapName,
   required List<RmfProjectRobot> robots,
 }) {
+  final nodeName = _rosNodeName('${mapName}_sensor_relay');
   final watched = robots
       .where((robot) => robot.isMobile && robot.dataSource.usesTopics)
       .toList();
@@ -2099,7 +2125,7 @@ def write_atomic(path, data, binary=True):
 class SensorRelay(Node):
 
     def __init__(self, out_dir):
-        super().__init__('${mapName}_sensor_relay')
+        super().__init__('${nodeName}')
         self.out_dir = out_dir
         self.last_frame = {}
         os.makedirs(out_dir, exist_ok=True)
@@ -2246,6 +2272,7 @@ import json
 import math
 import sys
 import threading
+import time
 import uuid
 
 import rclpy
@@ -2301,13 +2328,18 @@ def yaw_of(rotation):
 class RobotAdapter:
     """로봇 한 대. RMF 쪽과 Nav2 쪽을 양쪽으로 붙인다."""
 
-    def __init__(self, name, namespace, node, tf_buffer, fleet_handle):
+    next_registration_at = 0.0
+
+    def __init__(self, name, namespace, node, tf_buffer, fleet_handle,
+                 fleet_config, registration_delay):
         self.name = name
         self.namespace = namespace
         self.node = node
         self.tf_buffer = tf_buffer
         self.fleet_handle = fleet_handle
+        self.fleet_config = fleet_config
         self.update_handle = None
+        self.update_ready_at = None
         self.execution = None
         self.goal_handle = None
         # Nav2 액션 결과는 비동기로 늦게 돌아온다. 새 목적지가 옛 목적지를
@@ -2330,6 +2362,8 @@ class RobotAdapter:
         self.dispenser_execution = None
         self.dispenser_request_guid = None
         self.dispenser_target_guid = None
+        # pybind C++가 콜백을 사용하는 동안 Python 객체가 회수되지 않게 한다.
+        self.callbacks = self.make_callbacks()
 
     # ── RMF 가 부르는 쪽 ────────────────────────────────────────────────
 
@@ -2539,12 +2573,14 @@ class RobotAdapter:
         if state is None:
             return
         if self.update_handle is None:
+            if time.monotonic() < RobotAdapter.next_registration_at:
+                return
             # 처음 자리를 알게 된 순간에 RMF 에 등록한다. 자리를 모르는 채로
             # 넣으면 RMF 가 그 로봇을 어디에 둘지 모른다.
             handle = self.fleet_handle.add_robot(
                 self.name, state,
-                rmf_easy.RobotConfiguration([]),
-                self.make_callbacks())
+                self.fleet_config.get_known_robot_configuration(self.name),
+                self.callbacks)
             if handle is None:
                 # 자리가 nav graph 에서 너무 멀면 RMF 가 받지 않는다. 다음에 다시
                 # 해 본다 — AMCL 이 아직 안 잡혔을 수 있다. 같은 말을 0.1초마다
@@ -2557,8 +2593,15 @@ class RobotAdapter:
                         f' 멀어 RMF 가 받지 않습니다. AMCL 이 잡히면 다시 붙습니다.')
                 return
             self.update_handle = handle
+            RobotAdapter.next_registration_at = time.monotonic() + 3.0
+            # add_robot의 C++ 측 등록 완료 콜백이 끝나기 전에 update()를 호출하면
+            # Jazzy rmf_adapter가 SIGSEGV를 낸다. wall clock으로 여유를 둔다.
+            self.update_ready_at = time.monotonic() + 2.0
             self.warned = False
             self.node.get_logger().info(f'[{self.name}] RMF 에 붙었습니다.')
+            return
+        if (self.update_ready_at is not None and
+                time.monotonic() < self.update_ready_at):
             return
         with self.lock:
             activity = (
@@ -2594,6 +2637,7 @@ def main(argv=sys.argv):
         adapter.node.use_sim_time()
 
     adapter.start()
+    time.sleep(1.0)
 
     tf_buffer = tf2_ros.Buffer()
     tf2_ros.TransformListener(tf_buffer, node)
@@ -2601,14 +2645,16 @@ def main(argv=sys.argv):
     fleet_handle = adapter.add_easy_fleet(fleet_config)
 
     robots = []
-    for name in fleet_config.known_robots:
+    for index, name in enumerate(fleet_config.known_robots):
         namespace = ROBOT_NAMESPACES.get(name)
         if namespace is None:
             node.get_logger().warn(
                 f'[{name}] 의 ROS 네임스페이스를 모릅니다. 건너뜁니다.')
             continue
         robots.append(
-            RobotAdapter(name, namespace, node, tf_buffer, fleet_handle))
+            RobotAdapter(
+                name, namespace, node, tf_buffer, fleet_handle, fleet_config,
+                index * 3.0))
 
     if not robots:
         node.get_logger().error('이을 로봇이 없습니다.')
@@ -2753,20 +2799,14 @@ String buildProjectNav2LaunchXml({
       ..writeln('       RMF 안에서 이 어댑터(FleetUpdateHandle) 하나뿐이다.')
       ..writeln('       이것이 죽으면 RViz 는 도면만 남고 텅 빈다.')
       ..writeln('')
-      ..writeln('       respawn 을 켠 이유 — Nav2 20여 개 노드와 같이 뜨는')
-      ..writeln('       중에 add_easy_fleet 안에서 SIGSEGV 로 죽는 일이 있다.')
-      ..writeln('       한가할 때 같은 명령을 다시 돌리면 멀쩡히 뜬다. 부하가')
-      ..writeln('       걸린 순간에만 나는 rmf_adapter 쪽 경합이라 우리가 고칠')
-      ..writeln('       수 없다. 대신 다시 띄운다 — 죽은 채로 두면 오류 한 줄')
-      ..writeln('       없이 RViz 만 비어 보인다. -->')
+      ..writeln('       네이티브 RMF 라이브러리 오류나 시작 순서 문제로 종료되더라도')
+      ..writeln('       계속 다시 띄운다. 실행 스크립트는 프로세스뿐 아니라')
+      ..writeln('       /fleet_states 의 실제 로봇 등록 상태도 별도로 감시한다. -->')
       // ROS 패키지에 든 노드가 아니라 이 프로젝트가 만든 스크립트라 <node> 로는
       // 못 돌린다. <executable> 은 아무 명령이나 그대로 띄운다.
       //
-      // respawn_max_retries 를 둔다. 무한히 되살리면 설정이 잘못돼 늘 죽는
-      // 경우에 로그가 같은 역추적으로 덮여 진짜 원인이 묻힌다.
       ..writeln('  <executable output="screen"')
       ..writeln('              respawn="true" respawn_delay="5.0"')
-      ..writeln('              respawn_max_retries="5"')
       ..writeln(
         '              cmd="python3 \$(var map_dir)/${mapName}_nav2_adapter.py'
         ' -c \$(var map_dir)/${fleetName}_config.yaml'
@@ -2845,6 +2885,16 @@ List<RmfProjectRobot> robotsWithMapSpawnPoints(
       continue;
     }
     final spawn = rmfWorldFromPixel(pixel.dx, pixel.dy, metersPerPixel);
+    // 유효한 RMF 좌표가 충전 자리와 다르면 사용자가 별도의 시작 Waypoint를
+    // 선택한 것이다. 충전은 작업 후 복귀 지점이고 spawn은 Gazebo 최초 위치라
+    // 둘이 같을 필요가 없다. 예전 좌표계 버그는 화면 y를 그대로 저장해 spawnY가
+    // 양수였으므로 그 값만 아래에서 현재 지도 기준으로 교정한다.
+    final hasExplicitSpawn =
+        robot.spawnX != null && robot.spawnY != null && robot.spawnY! <= 0;
+    if (hasExplicitSpawn) {
+      result.add(robot);
+      continue;
+    }
     if (robot.spawnX != null &&
         robot.spawnY != null &&
         (spawn.x - robot.spawnX!).abs() < 1e-6 &&
@@ -3565,6 +3615,7 @@ String buildWorkcellScript({
   required String mapName,
   required WorkcellPairingResult pairing,
 }) {
+  final nodeName = _rosNodeName('${mapName}_workcell');
   final entries = pairing.pairings
       .map(
         (item) =>
@@ -3606,6 +3657,11 @@ $entries
 #
 # RMF 는 이 시간을 모른다. 우리가 끝났다고 알릴 때까지 기다릴 뿐이다.
 ACTION_SECONDS = 4.0
+
+# 팔 궤적의 마지막 시각과 동시에 RMF에 성공을 알리면 관절 컨트롤러가
+# 마지막 자세를 정착시키는 동안 모바일 로봇이 출발할 수 있다. 궤적이 끝난
+# 뒤 이 시간만큼 더 기다린 다음 성공을 알려 핑키가 안전하게 출발하게 한다.
+ARM_SETTLE_SECONDS = 3.0
 
 # 물품 종류별 가상 모방학습 policy. 모든 OMX가 같은 다섯 policy를 제공한다.
 # 각 값은 시간 비율과 joint1~4 자세이며 실제 추론기 연결 전 동작 검증용이다.
@@ -3662,7 +3718,7 @@ class Workcell:
 class WorkcellAdapter(rclpy.node.Node):
 
     def __init__(self):
-        super().__init__('${mapName}_workcell')
+        super().__init__('${nodeName}')
 
         # RMF 는 상태를 **transient local** 로 듣는다. 늦게 뜬 쪽도 마지막
         # 상태를 받아야 워크셀이 있다는 것을 알기 때문이다.
@@ -3748,7 +3804,7 @@ class WorkcellAdapter(rclpy.node.Node):
         self.answer(msg, dispenser, DispenserResult.ACKNOWLEDGED)
 
         policy_id = msg.items[0].type_guid if msg.items else 'policy_1'
-        if policy_id not in POLICY_MOTIONS:
+        if policy_id != 'armLoad' and policy_id not in POLICY_MOTIONS:
             self.get_logger().error(
                 f'[{cell.robot_id}] 알 수 없는 물품 policy [{policy_id}]')
             with cell.lock:
@@ -3756,9 +3812,15 @@ class WorkcellAdapter(rclpy.node.Node):
                 cell.active_request = None
             self.answer(msg, dispenser, DispenserResult.FAILED)
             return
-        self.get_logger().info(
-            f'[{cell.robot_id}] 물품 [{policy_id}] 가상 policy 실행')
-        cell.run_policy(policy_id, ACTION_SECONDS)
+        if policy_id == 'armLoad':
+            # Mock 또는 별도 policy가 없는 실설비의 기본 적재 동작. RMF 요청은
+            # 정상 완료하되 존재하지 않는 관절 policy를 억지로 실행하지 않는다.
+            self.get_logger().info(
+                f'[{cell.robot_id}] 기본 armLoad 실행 (등록 policy 없음)')
+        else:
+            self.get_logger().info(
+                f'[{cell.robot_id}] 물품 [{policy_id}] 가상 policy 실행')
+            cell.run_policy(policy_id, ACTION_SECONDS)
 
         def finish():
             timer.cancel()
@@ -3769,7 +3831,7 @@ class WorkcellAdapter(rclpy.node.Node):
             self.get_logger().info(f'[{cell.robot_id}] {msg.target_guid} 끝.')
             self.answer(msg, dispenser, DispenserResult.SUCCESS)
 
-        timer = self.create_timer(ACTION_SECONDS, finish)
+        timer = self.create_timer(ACTION_SECONDS + ARM_SETTLE_SECONDS, finish)
 
     def answer(self, msg, dispenser, status):
         if dispenser:

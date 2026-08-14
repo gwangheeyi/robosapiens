@@ -12,7 +12,7 @@ if [[ "$#" -ne 0 ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RMF_WS="${RMF_WS:-$HOME/rmf_ws}"
+RMF_WS="${RMF_WS:-$ROOT_DIR/rmf_ws}"
 RMF_API_URL="${RMF_API_URL:-http://127.0.0.1:8000}"
 RMF_SERVER_URI="${RMF_SERVER_URI:-ws://127.0.0.1:8000/_internal}"
 TRAJECTORY_SERVER_URL="${RMF_TRAJECTORY_SERVER_URL:-ws://127.0.0.1:8006}"
