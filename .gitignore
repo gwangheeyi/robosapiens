@@ -12,8 +12,15 @@
 # 맵 배포 산출물. 앱의 `배포하기`로 다시 만든다.
 /rmf_maps/*/nav_graphs/
 /rmf_maps/*/generated_models/
+# 맵 재배포 전 자동 백업. Policy ZIP 등 대용량 로컬 운영 파일이 포함된다.
+/rmf_maps/.backups/
 
-# 프로젝트별로 업로드·배포한 WorkCell Policy 모델과 ZIP 산출물.
+# 전역 WorkCell Policy 보관함. Hugging Face/ZIP 원본은 로컬에서 관리한다.
+/workcell_policies/
+
+# 프로젝트별 WorkCell Policy 연결과 레거시 모델·ZIP 배포본.
+# 프로젝트 삭제·재생성과 관계없이 모두 로컬 운영 데이터로 취급한다.
+/rmf_maps/*/policy_bindings.json
 /rmf_maps/*/policies/
 
 # 실행 중 남는 PID·로그

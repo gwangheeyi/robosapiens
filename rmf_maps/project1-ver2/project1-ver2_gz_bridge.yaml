@@ -47,11 +47,6 @@
   gz_type_name: "gz.msgs.IMU"
   direction: GZ_TO_ROS
 
-# omx_01 · OMX-01 (설치 로봇)
-#   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.
-#   관절 상태: joint_state_broadcaster 가 /omx_01/joint_states 로 낸다.
-#   팔 명령: /omx_01/arm_controller · /omx_01/gripper_controller 액션.
-
 # pinky_02 · PK-02 (이동 로봇)
 - ros_topic_name: "/pinky_02/odom"
   gz_topic_name: "/pinky_02/odom"
@@ -82,6 +77,11 @@
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
   direction: GZ_TO_ROS
+
+# omx_03 · OMX-03 (설치 로봇)
+#   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.
+#   관절 상태: joint_state_broadcaster 가 /omx_03/joint_states 로 낸다.
+#   팔 명령: /omx_03/arm_controller · /omx_03/gripper_controller 액션.
 
 # omx_04 · OMX-04 (설치 로봇)
 #   다리 없음. gz_ros2_control 이 ROS 2 로 직접 주고받는다.

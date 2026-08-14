@@ -41,8 +41,8 @@ rmf_fleet:
 
 # 설치 로봇은 플릿에 넣지 않는다. 배차 대상이 아니다.
 # 이 프로젝트의 설치 로봇:
-#   omx_01 · OMX-01 (open_manipulator_x) @ 설비3
-#   omx_04 · OMX-04 (open_manipulator_x) @ 설비1
+#   omx_03 · OMX-03 (omx_f) @ 설비1
+#   omx_04 · OMX-04 (omx_f) @ 설비3
 
 fleet_manager:
   ip: "127.0.0.1"

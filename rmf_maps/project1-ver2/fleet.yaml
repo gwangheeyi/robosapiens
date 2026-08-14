@@ -14,16 +14,6 @@ robots:
     spawn_x: 1.613
     spawn_y: -1.088
     spawn_heading: 0.000
-  - id: omx_01
-    name: OMX-01
-    kind: workcell # 설치 로봇
-    model: open_manipulator_x
-    gz_name: omx_01
-    zones: []
-    station: 설비3
-    spawn_x: 1.158
-    spawn_y: -2.253
-    spawn_heading: 0.000
   - id: pinky_02
     name: PK-02
     kind: mobile # 이동 로봇
@@ -34,13 +24,23 @@ robots:
     spawn_x: 1.612
     spawn_y: -0.717
     spawn_heading: 0.000
-  - id: omx_04
-    name: OMX-04
+  - id: omx_03
+    name: OMX-03
     kind: workcell # 설치 로봇
-    model: open_manipulator_x
-    gz_name: omx_04
+    model: omx_f
+    gz_name: omx_03
     zones: []
     station: 설비1
     spawn_x: 0.448
     spawn_y: -1.138
+    spawn_heading: 0.000
+  - id: omx_04
+    name: OMX-04
+    kind: workcell # 설치 로봇
+    model: omx_f
+    gz_name: omx_04
+    zones: []
+    station: 설비3
+    spawn_x: 1.158
+    spawn_y: -2.253
     spawn_heading: 0.000

@@ -9509,6 +9509,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         content: buildWorkcellScript(
           mapName: mapName,
           pairing: _workcellPairing(mapName, deployRobots),
+          policies: _workcellPolicyModels,
         ),
         generatedAt: now,
       ),

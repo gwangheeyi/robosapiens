@@ -17,6 +17,7 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/rmf_project_config.dart';
 import 'package:rmf_control_ui/workcell_pairing.dart';
+import 'package:rmf_control_ui/workcell_policy.dart';
 
 void main() {
   /// 이 맵의 실제 등록. 자리도 nav graph 에서 그대로 가져왔다.
@@ -41,6 +42,17 @@ void main() {
     dataSource: RobotDataSource.gazebo,
     spawnX: .409,
     spawnY: -2.187,
+  );
+  const omxFollower = RmfProjectRobot(
+    robotId: 'OMX_F',
+    displayName: 'OMX follower',
+    model: 'omx_f',
+    gzName: 'omx_f',
+    zones: [],
+    kind: RmfRobotKind.workcell,
+    dataSource: RobotDataSource.gazebo,
+    spawnX: .448,
+    spawnY: -1.138,
   );
   const pinky = RmfProjectRobot(
     robotId: 'PK_02',
@@ -150,8 +162,14 @@ void main() {
 
     test('맡은 자리를 이름으로 적는다', () {
       final code = script();
-      expect(code, contains("('OMX_02', 'omx_02', ['픽업2'], [])"));
-      expect(code, contains("('OMX_01', 'omx_01', ['픽업1'], [])"));
+      expect(
+        code,
+        contains("('OMX_02', 'omx_02', 'open_manipulator_x', ['픽업2'], [], [])"),
+      );
+      expect(
+        code,
+        contains("('OMX_01', 'omx_01', 'open_manipulator_x', ['픽업1'], [], [])"),
+      );
     });
 
     test('상태를 낸다', () {
@@ -198,11 +216,47 @@ void main() {
       expect(
         code,
         contains(
-          'self.create_timer(ACTION_SECONDS + ARM_SETTLE_SECONDS, finish)',
+          'self.create_timer(execution_seconds + ARM_SETTLE_SECONDS, finish)',
         ),
       );
       expect(code, contains('DispenserResult.FAILED'));
       expect(code, contains("policy_id == 'armLoad'"));
+    });
+
+    test('omx_f에 배포한 policy는 6축 controller 시험 동작으로 잇는다', () {
+      final code = buildWorkcellScript(
+        mapName: 'project1',
+        pairing: pairWorkcells(
+          robots: const [omxFollower],
+          stations: const [pickup1],
+        ),
+        policies: [
+          WorkcellPolicy(
+            name: 'sandwich',
+            version: '1.0.0',
+            objectType: 'sandwich',
+            robotModel: 'omx_f',
+            archiveName: 'policy.zip',
+            archiveBytes: 10,
+            deployedWorkcells: const ['OMX_F'],
+            createdAt: DateTime(2026),
+          ),
+        ],
+      );
+      expect(code, contains("'omx_f', ['픽업1'], [], ['sandwich@1.0.0']"));
+      expect(
+        code,
+        contains(
+          "['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']",
+        ),
+      );
+      expect(code, contains('cell.run_deployed_policy_test(policy_id'));
+      expect(code, contains('ACT 추론 전 controller 시험 동작'));
+      expect(code, contains('SANDWICH_REPLAY_DEG'));
+      expect(code, contains('math.radians(value)'));
+      expect(code, contains('cell.run_sandwich_replay(policy_id)'));
+      expect(code, contains("replay_name in ('sandwich', 'sandwitch')"));
+      expect(code, contains('학습 episode 0 샌드위치 동작 재생'));
     });
 
     test('하이픈이 든 프로젝트 이름도 유효한 ROS node 이름을 만든다', () {

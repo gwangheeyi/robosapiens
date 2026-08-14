@@ -4,6 +4,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/workcell_policy.dart';
 
 void main() {
+  test('Hugging Face 주소와 repository ID를 정규화한다', () {
+    expect(
+      parseHuggingFaceRepository(
+        'https://huggingface.co/2usang/act_trihouse-sandwich',
+      ),
+      '2usang/act_trihouse-sandwich',
+    );
+    expect(
+      parseHuggingFaceRepository('2usang/act_trihouse-sandwich'),
+      '2usang/act_trihouse-sandwich',
+    );
+    expect(parseHuggingFaceRepository('https://example.com/a/b'), isNull);
+  });
+
   test('ZIP signature와 확장자를 검증한다', () {
     final zip = Uint8List.fromList([0x50, 0x4b, 0x03, 0x04]);
     expect(validatePolicyArchive('pick.zip', zip), isNull);
@@ -47,5 +61,9 @@ void main() {
       createdAt: DateTime(2026),
     );
     expect(policy.manifest('warehouse'), contains('can_pick@2.1.0'));
+    final global = policy.copyWith(objectType: '', deployedWorkcells: const []);
+    expect(global.id, policy.id);
+    expect(global.isDeployed, isFalse);
+    expect(global.globalManifest(), contains('"scope": "global"'));
   });
 }

@@ -31,6 +31,22 @@ class WorkcellPolicy {
   String get id => '$name@$version';
   bool get isDeployed => deployedWorkcells.isNotEmpty;
 
+  WorkcellPolicy copyWith({
+    String? objectType,
+    List<String>? deployedWorkcells,
+  }) => WorkcellPolicy(
+    name: name,
+    version: version,
+    objectType: objectType ?? this.objectType,
+    robotModel: robotModel,
+    archiveName: archiveName,
+    archiveBytes: archiveBytes,
+    deployedWorkcells: deployedWorkcells ?? this.deployedWorkcells,
+    createdAt: createdAt,
+    sourceRepository: sourceRepository,
+    sourceRevision: sourceRevision,
+  );
+
   Map<String, Object?> toJson() => {
     'name': name,
     'version': version,
@@ -47,6 +63,10 @@ class WorkcellPolicy {
   String manifest(String projectName) => const JsonEncoder.withIndent(
     '  ',
   ).convert({...toJson(), 'project': projectName, 'policyId': id});
+
+  String globalManifest() => const JsonEncoder.withIndent(
+    '  ',
+  ).convert({...toJson(), 'scope': 'global', 'policyId': id});
 
   static WorkcellPolicy fromJson(Map<String, dynamic> json) => WorkcellPolicy(
     name: json['name'] as String,
@@ -78,6 +98,26 @@ class HuggingFacePolicyDownload {
   final String revision;
   final String fileName;
   final Uint8List bytes;
+}
+
+/// Hugging Face 모델 URL 또는 `owner/name`을 정규화한다.
+String? parseHuggingFaceRepository(String value) {
+  final input = value.trim();
+  final direct = RegExp(
+    r'^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$',
+  ).firstMatch(input);
+  if (direct != null) return '${direct.group(1)}/${direct.group(2)}';
+  final uri = Uri.tryParse(input);
+  if (uri == null || uri.scheme != 'https' || uri.host != 'huggingface.co') {
+    return null;
+  }
+  final parts = uri.pathSegments.where((part) => part.isNotEmpty).toList();
+  if (parts.length < 2 ||
+      !RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(parts[0]) ||
+      !RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(parts[1])) {
+    return null;
+  }
+  return '${parts[0]}/${parts[1]}';
 }
 
 String? validatePolicyArchive(String fileName, Uint8List bytes) {

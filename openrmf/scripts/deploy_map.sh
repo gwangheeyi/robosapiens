@@ -160,6 +160,16 @@ if [[ -d "$TARGET_DIR" ]]; then
   echo "기존 맵 백업: $BACKUP_PATH"
 fi
 mv "$STAGING_DIR" "$TARGET_DIR"
+# WorkCell policy는 지도 생성물이 아니라 사용자가 등록한 운영 자산이다.
+# 맵 재배포 때 staging 디렉터리로 통째로 교체하더라도 함께 보존한다.
+if [[ -n "${BACKUP_PATH:-}" && -d "$BACKUP_PATH/policies" ]]; then
+  cp -a "$BACKUP_PATH/policies" "$TARGET_DIR/policies"
+  echo "WorkCell policy 보존: $TARGET_DIR/policies"
+fi
+if [[ -n "${BACKUP_PATH:-}" && -f "$BACKUP_PATH/policy_bindings.json" ]]; then
+  cp -a "$BACKUP_PATH/policy_bindings.json" "$TARGET_DIR/policy_bindings.json"
+  echo "WorkCell policy 연결 보존: $TARGET_DIR/policy_bindings.json"
+fi
 STAGING_DIR="$(mktemp -d "$ROOT_DIR/rmf_maps/.${MAP_NAME}.cleanup.XXXXXX")"
 
 stop_pid_file() {
@@ -223,7 +233,10 @@ log_step 6 "새 지도 수신 확인"
 WAIT_SECS="${MAP_READY_WAIT:-25}"
 DEADLINE=$((SECONDS + WAIT_SECS))
 while ((SECONDS < DEADLINE)); do
-  if ros2 service list 2>/dev/null | grep -qx '/get_building_map'; then
+  # 앱에서 ROS_DOMAIN_ID를 바꿔도 기존 ros2 daemon은 먼저 시작된 도메인의
+  # 그래프를 계속 들고 있을 수 있다. 방금 같은 셸에서 띄운 서버를 확인하는
+  # 단계이므로 daemon 캐시를 우회하고 현재 도메인을 직접 탐색한다.
+  if ros2 service list --no-daemon --spin-time 1 2>/dev/null | grep -qx '/get_building_map'; then
     MAP_SERVER_PID="$(cat "$RUNTIME_DIR/building_map_server.pid")"
     kill -0 "$MAP_SERVER_PID" 2>/dev/null || fail "Building Map Server가 종료되었습니다."
     echo "DEPLOYED_MAP_DIR=$TARGET_DIR"
@@ -250,7 +263,7 @@ done
 # 돌려 ~/.bashrc 의 export 를 못 읽었고, 터미널의 시스템이 22번에 있는 동안
 # 이 스크립트만 0번에서 혼자 돌았다. 방금 우리가 띄운 노드조차 안 보이면
 # 그 경우다.
-if ! ros2 node list 2>/dev/null | grep -q .; then
+if ! ros2 node list --no-daemon --spin-time 1 2>/dev/null | grep -q .; then
   echo "" >&2
   echo "ROS 도메인 ${ROS_DOMAIN_ID:-0} 에 노드가 하나도 없습니다." >&2
   echo "방금 띄운 building_map_server 조차 안 보인다면 도메인이 어긋난 것입니다." >&2

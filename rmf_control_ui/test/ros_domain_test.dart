@@ -134,6 +134,18 @@ void main() {
       expect(script, contains('노드가 하나도 없습니다'));
       expect(script, contains('맵 관리 · [ROS 도메인] 단추'));
     });
+
+    test('도메인을 바꾼 뒤 이전 ros2 daemon 캐시를 쓰지 않는다', () {
+      expect(script, contains('ros2 service list --no-daemon --spin-time 1'));
+      expect(script, contains('ros2 node list --no-daemon --spin-time 1'));
+    });
+
+    test('맵을 다시 배포해도 등록한 WorkCell policy를 보존한다', () {
+      expect(script, contains(r'cp -a "$BACKUP_PATH/policies"'));
+      expect(script, contains('WorkCell policy 보존'));
+      expect(script, contains(r'cp -a "$BACKUP_PATH/policy_bindings.json"'));
+      expect(script, contains('WorkCell policy 연결 보존'));
+    });
   });
 
   group('맵 관리 화면', () {

@@ -24,6 +24,7 @@ class WorkcellPolicyPage extends StatefulWidget {
 
 class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
   List<WorkcellPolicy> _policies = const [];
+  List<WorkcellPolicy> _globalPolicies = const [];
   bool _loading = false;
 
   List<RmfProjectRobot> get _workcells =>
@@ -44,14 +45,27 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
   Future<void> _reload() async {
     final project = widget.projectName;
     if (project == null || project.isEmpty) {
-      setState(() => _policies = const []);
+      final globals = await loadGlobalWorkcellPolicies();
+      if (!mounted) return;
+      setState(() {
+        _policies = const [];
+        _globalPolicies = globals
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      });
       return;
     }
     setState(() => _loading = true);
-    final policies = await loadWorkcellPolicies(project);
+    final results = await Future.wait([
+      loadWorkcellPolicies(project),
+      loadGlobalWorkcellPolicies(),
+    ]);
+    final policies = results[0];
+    final globals = results[1];
     if (!mounted) return;
     setState(() {
       _policies = policies..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _globalPolicies = globals
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _loading = false;
     });
     widget.onChanged(List.unmodifiable(_policies));
@@ -78,9 +92,7 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
     setState(() => _loading = true);
     try {
       final downloaded = await downloadHuggingFacePolicy(
-        repositoryId: source.repositoryId,
-        revision: source.revision,
-        fileName: source.fileName,
+        repositoryUrl: source.repositoryUrl,
       );
       if (!mounted) return;
       await _registerArchive(
@@ -141,16 +153,68 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
     _message('${policy.id} 등록 및 WorkCell 배포가 완료되었습니다.');
   }
 
-  Future<void> _delete(WorkcellPolicy policy) async {
+  Future<void> _useLocal() async {
+    final project = widget.projectName;
+    if (project == null) return;
+    final current = _policies.map((policy) => policy.id).toSet();
+    final models = _workcells.map((robot) => robot.model).toSet();
+    final available = _globalPolicies
+        .where(
+          (policy) =>
+              !current.contains(policy.id) &&
+              models.contains(policy.robotModel),
+        )
+        .toList();
+    if (available.isEmpty) {
+      _message('현재 WorkCell과 호환되는 미사용 로컬 Policy가 없습니다.');
+      return;
+    }
+    final selected = await showDialog<WorkcellPolicy>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('로컬 Policy 선택'),
+        children: [
+          for (final policy in available)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, policy),
+              child: ListTile(
+                title: Text(policy.id),
+                subtitle: Text(
+                  '모델: ${policy.robotModel} · ZIP ${(policy.archiveBytes / 1024 / 1024).toStringAsFixed(1)}MB',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final draft = await showDialog<_PolicyBindingDraft>(
+      context: context,
+      builder: (_) =>
+          _PolicyBindingDialog(policy: selected, workcells: _workcells),
+    );
+    if (draft == null) return;
+    await bindWorkcellPolicy(
+      project,
+      selected.copyWith(
+        objectType: draft.objectType,
+        deployedWorkcells: draft.workcells,
+      ),
+    );
+    await _reload();
+    _message('${selected.id}을 현재 프로젝트에 연결했습니다.');
+  }
+
+  Future<void> _remove(WorkcellPolicy policy) async {
     final project = widget.projectName;
     if (project == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Policy를 삭제할까요?'),
+        title: const Text('프로젝트에서 제거할까요?'),
         content: Text(
-          '${policy.id} 원본과 WorkCell 배포본이 함께 삭제됩니다.\n'
-          '이 Policy를 사용하는 기존 작업은 실행할 수 없습니다.',
+          '${policy.id}의 현재 프로젝트 연결만 제거합니다.\n'
+          '전역 Policy 원본은 보관되어 다른 프로젝트에서 다시 사용할 수 있습니다.',
         ),
         actions: [
           TextButton(
@@ -159,7 +223,7 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('삭제'),
+            child: const Text('프로젝트에서 제거'),
           ),
         ],
       ),
@@ -167,7 +231,65 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
     if (confirmed != true) return;
     await deleteWorkcellPolicy(project, policy);
     await _reload();
-    _message('${policy.id}를 삭제했습니다.');
+    _message('${policy.id}을 현재 프로젝트에서 제거했습니다.');
+  }
+
+  Future<void> _showLibrary() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('전역 WorkCell Policy 보관함'),
+          content: SizedBox(
+            width: 680,
+            height: 420,
+            child: _globalPolicies.isEmpty
+                ? const Center(child: Text('보관된 Policy가 없습니다.'))
+                : ListView.builder(
+                    itemCount: _globalPolicies.length,
+                    itemBuilder: (_, index) {
+                      final policy = _globalPolicies[index];
+                      return ListTile(
+                        leading: const Icon(Icons.inventory_2_outlined),
+                        title: Text(policy.id),
+                        subtitle: Text(
+                          '모델: ${policy.robotModel} · ZIP ${(policy.archiveBytes / 1024 / 1024).toStringAsFixed(1)}MB'
+                          '${policy.sourceRepository == null ? '' : '\n${policy.sourceRepository} @ ${policy.sourceRevision}'}',
+                        ),
+                        trailing: IconButton(
+                          tooltip: '전역 원본 삭제',
+                          icon: const Icon(Icons.delete_forever_outlined),
+                          onPressed: () async {
+                            final references = await globalPolicyReferences(
+                              policy.id,
+                            );
+                            if (!dialogContext.mounted) return;
+                            if (references.isNotEmpty) {
+                              _message(
+                                '사용 중이어서 삭제할 수 없습니다: ${references.join(', ')}',
+                              );
+                              return;
+                            }
+                            await deleteGlobalWorkcellPolicy(policy);
+                            _globalPolicies.removeAt(index);
+                            setDialogState(() {});
+                            _message('${policy.id} 전역 원본을 삭제했습니다.');
+                          },
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('닫기'),
+            ),
+          ],
+        ),
+      ),
+    );
+    await _reload();
   }
 
   void _message(String text) {
@@ -197,7 +319,7 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
                       ),
                     ),
                     SizedBox(height: 5),
-                    Text('학습 Policy ZIP 등록 · 버전 관리 · 물품 연결 · WorkCell 배포'),
+                    Text('전역 Policy 보관 · 프로젝트별 연결 · WorkCell 배포'),
                   ],
                 ),
               ),
@@ -210,6 +332,18 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
                         : _fromHuggingFace,
                     icon: const Icon(Icons.cloud_download_outlined),
                     label: const Text('Hugging Face에서 불러오기'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: noProject || _workcells.isEmpty || _loading
+                        ? null
+                        : _useLocal,
+                    icon: const Icon(Icons.add_link),
+                    label: const Text('로컬 Policy 사용'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _loading ? null : _showLibrary,
+                    icon: const Icon(Icons.inventory_2_outlined),
+                    label: Text('전역 보관함 (${_globalPolicies.length})'),
                   ),
                   FilledButton.icon(
                     onPressed: noProject || _workcells.isEmpty || _loading
@@ -260,9 +394,9 @@ class _WorkcellPolicyPageState extends State<WorkcellPolicyPage> {
                       ),
                       isThreeLine: true,
                       trailing: IconButton(
-                        tooltip: 'Policy 및 배포본 삭제',
-                        onPressed: () => _delete(policy),
-                        icon: const Icon(Icons.delete_outline),
+                        tooltip: '현재 프로젝트에서 제거',
+                        onPressed: () => _remove(policy),
+                        icon: const Icon(Icons.link_off),
                       ),
                     ),
                   );
@@ -286,10 +420,8 @@ class _Notice extends StatelessWidget {
 }
 
 class _HuggingFaceDraft {
-  const _HuggingFaceDraft(this.repositoryId, this.revision, this.fileName);
-  final String repositoryId;
-  final String revision;
-  final String fileName;
+  const _HuggingFaceDraft(this.repositoryUrl);
+  final String repositoryUrl;
 }
 
 class _HuggingFaceDialog extends StatefulWidget {
@@ -300,37 +432,21 @@ class _HuggingFaceDialog extends StatefulWidget {
 
 class _HuggingFaceDialogState extends State<_HuggingFaceDialog> {
   final _repository = TextEditingController();
-  final _revision = TextEditingController(text: 'main');
-  final _file = TextEditingController(text: 'policy.zip');
 
   @override
   void dispose() {
     _repository.dispose();
-    _revision.dispose();
-    _file.dispose();
     super.dispose();
   }
 
   void _submit() {
-    if (!RegExp(
-          r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$',
-        ).hasMatch(_repository.text.trim()) ||
-        !_file.text.trim().toLowerCase().endsWith('.zip')) {
+    if (parseHuggingFaceRepository(_repository.text) == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Repository는 owner/name, 파일은 저장소 안의 ZIP 경로로 입력하세요.'),
-        ),
+        const SnackBar(content: Text('올바른 Hugging Face 모델 주소를 입력하세요.')),
       );
       return;
     }
-    Navigator.pop(
-      context,
-      _HuggingFaceDraft(
-        _repository.text.trim(),
-        _revision.text.trim().isEmpty ? 'main' : _revision.text.trim(),
-        _file.text.trim(),
-      ),
-    );
+    Navigator.pop(context, _HuggingFaceDraft(_repository.text.trim()));
   }
 
   @override
@@ -345,22 +461,9 @@ class _HuggingFaceDialogState extends State<_HuggingFaceDialog> {
             controller: _repository,
             autofocus: true,
             decoration: const InputDecoration(
-              labelText: 'Repository ID *',
-              hintText: 'robosapiens/can-pick-policy',
-            ),
-          ),
-          TextField(
-            controller: _revision,
-            decoration: const InputDecoration(
-              labelText: 'Revision *',
-              helperText: '운영 배포에는 branch보다 commit hash 또는 tag를 권장합니다.',
-            ),
-          ),
-          TextField(
-            controller: _file,
-            decoration: const InputDecoration(
-              labelText: '저장소 내 ZIP 파일 경로 *',
-              hintText: 'releases/policy.zip',
+              labelText: 'Hugging Face 모델 주소 *',
+              hintText: 'https://huggingface.co/owner/policy',
+              helperText: '주소를 입력하면 저장소의 policy 파일을 자동으로 내려받습니다.',
             ),
           ),
           const SizedBox(height: 12),
@@ -398,6 +501,84 @@ class _PolicyDraft {
   final String objectType;
   final String robotModel;
   final List<String> workcells;
+}
+
+class _PolicyBindingDraft {
+  const _PolicyBindingDraft(this.objectType, this.workcells);
+  final String objectType;
+  final List<String> workcells;
+}
+
+class _PolicyBindingDialog extends StatefulWidget {
+  const _PolicyBindingDialog({required this.policy, required this.workcells});
+  final WorkcellPolicy policy;
+  final List<RmfProjectRobot> workcells;
+
+  @override
+  State<_PolicyBindingDialog> createState() => _PolicyBindingDialogState();
+}
+
+class _PolicyBindingDialogState extends State<_PolicyBindingDialog> {
+  final _object = TextEditingController();
+  final Set<String> _targets = {};
+
+  @override
+  void dispose() {
+    _object.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (_object.text.trim().isEmpty || _targets.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('물품과 배포할 WorkCell을 선택하세요.')));
+      return;
+    }
+    Navigator.pop(
+      context,
+      _PolicyBindingDraft(_object.text.trim(), _targets.toList()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text('${widget.policy.id} 프로젝트 연결'),
+    content: SizedBox(
+      width: 520,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _object,
+            decoration: const InputDecoration(labelText: '집을 물품 *'),
+          ),
+          const SizedBox(height: 12),
+          for (final cell in widget.workcells.where(
+            (cell) => cell.model == widget.policy.robotModel,
+          ))
+            CheckboxListTile(
+              value: _targets.contains(cell.robotId),
+              title: Text('${cell.displayName} (${cell.robotId})'),
+              onChanged: (checked) => setState(() {
+                if (checked == true) {
+                  _targets.add(cell.robotId);
+                } else {
+                  _targets.remove(cell.robotId);
+                }
+              }),
+            ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('취소'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('연결 및 배포')),
+    ],
+  );
 }
 
 class _PolicyUploadDialog extends StatefulWidget {

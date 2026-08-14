@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# omx_04 의 URDF 를 만든다.
+# omx_03 의 URDF 를 만든다.
 # rmf_control_ui 가 맵 프로젝트에서 생성했다.
 #
 # 벤더 xacro 의 gz_ros2_control 플러그인에 네임스페이스를 끼워 넣는다. 없으면
@@ -7,7 +7,7 @@
 set -euo pipefail
 
 MODEL="${MODEL:-omx_f}"
-NAMESPACE="${NAMESPACE:-omx_04}"
+NAMESPACE="${NAMESPACE:-omx_03}"
 
 XACRO="$(ros2 pkg prefix open_manipulator_description)"
 XACRO="$XACRO/share/open_manipulator_description/urdf/$MODEL/$MODEL.urdf.xacro"
