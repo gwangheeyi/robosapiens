@@ -1,4 +1,4 @@
-# Launch Screen Assets
+# Launch Screen Assets (시작 화면 자산)
 
 You can customize the launch screen with your own desired assets by replacing the image files in this directory.
 

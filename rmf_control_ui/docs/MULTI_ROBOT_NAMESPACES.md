@@ -1,4 +1,4 @@
-# 한 월드에 로봇 여러 대 — 네임스페이스가 닿아야 하는 곳
+# Multiple Robots in One World — Where Namespaces Must Apply (한 월드에 로봇 여러 대 — 네임스페이스가 닿아야 하는 곳)
 
 ## 1. 짧은 답
 

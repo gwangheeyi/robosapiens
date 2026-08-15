@@ -1,4 +1,4 @@
-# Pinky · OMX-AI 연속 작업 가이드
+# Pinky and OMX-AI Sequential Task Guide (Pinky · OMX-AI 연속 작업 가이드)
 
 ## 개요
 

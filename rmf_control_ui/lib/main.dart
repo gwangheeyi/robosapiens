@@ -26,6 +26,7 @@ import 'nav2_speed_limits.dart';
 import 'nav2_vendor_params.dart';
 import 'occupancy_grid.dart';
 import 'project_log.dart';
+import 'project_file_store.dart';
 import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
@@ -58,6 +59,7 @@ import 'wall_height.dart';
 import 'workcell_pairing.dart';
 import 'workcell_policy_page.dart';
 import 'workcell_policy_store.dart';
+import 'workspace_layout.dart';
 
 void main() => runApp(const RmfControlApp());
 
@@ -761,6 +763,23 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   Future<void> _initializeApplication() async {
+    final layoutWarnings = await workspaceLayoutWarnings();
+    if (layoutWarnings.isNotEmpty && mounted) {
+      await showWaypointErrorDialog(
+        context,
+        title: 'RoboSapiens 파일 구조를 확인해주세요',
+        message: [
+          '상업 배포를 위해 모든 실행 파일은 ~/robosapiens 아래의 실제 디렉터리에 있어야 합니다.',
+          '',
+          ...layoutWarnings.map((warning) => '• $warning'),
+          '',
+          '필수 구조:',
+          '~/robosapiens/rmf_ws',
+          '~/robosapiens/robot_model/pinky_pro',
+          '~/robosapiens/robot_model/open_manipulator',
+        ].join('\n'),
+      );
+    }
     try {
       final migration = await migrateDatabaseSchema();
       _databaseReady = true;
@@ -6178,7 +6197,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 굴면, 같은 일을 어디서 시작했느냐에 따라 결과가 달라진다.
     final windows = await _askRunWindows(name);
     if (windows == null || !mounted) return;
-    await startProject(name, gazeboGui: windows.gazeboGui, rviz: windows.rviz);
+    await startProject(
+      name,
+      backend: windows.backend,
+      gazeboGui: windows.gazeboGui,
+      rviz: windows.rviz,
+    );
     final running = await gazeboRunningProjects();
     if (!mounted) return;
     setState(() => _backendRunning = running.isNotEmpty);
@@ -8988,28 +9012,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
     };
   }
 
-  Future<bool> _writeProject({
-    required String mapName,
-    required String dialogTitle,
-  }) async {
+  Future<bool> _writeProject({required String mapName}) async {
     if (_drawing == null) return false;
     try {
-      final fileName =
-          '${mapName.replaceAll(RegExp(r'[^a-zA-Z0-9가-힣_-]'), '_')}.rmfproject';
+      final fileName = projectFileName(mapName);
       final bytes = Uint8List.fromList(
         utf8.encode(jsonEncode(_buildProjectData(mapName: mapName))),
       );
-      final path = await FilePicker.platform.saveFile(
-        dialogTitle: dialogTitle,
-        fileName: fileName,
-        type: FileType.custom,
-        allowedExtensions: const ['rmfproject'],
-        bytes: bytes,
+      final path = await saveProjectFile(mapName, bytes);
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$fileName 작업을 project 디렉터리에 저장했습니다.\n$path')),
       );
-      if (!mounted || path == null) return false;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('$fileName 작업을 저장했습니다.')));
       setState(() => _projectFileName = fileName);
       return true;
     } catch (error) {
@@ -9024,7 +9038,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   Future<void> _saveProject() async {
     if (_drawing == null) return;
-    await _writeProject(mapName: _mapName, dialogTitle: '맵 작업 프로젝트 저장');
+    await _writeProject(mapName: _mapName);
   }
 
   Future<void> _saveProjectAs() async {
@@ -9062,17 +9076,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
               if (name.isNotEmpty) Navigator.pop(dialogContext, name);
             },
             icon: const Icon(Icons.save_as_outlined, size: 18),
-            label: const Text('파일 위치 선택'),
+            label: const Text('project에 저장'),
           ),
         ],
       ),
     );
     controller.dispose();
     if (newName == null || !mounted) return;
-    final saved = await _writeProject(
-      mapName: newName,
-      dialogTitle: '$newName 프로젝트를 다른 이름으로 저장',
-    );
+    final saved = await _writeProject(mapName: newName);
     if (!saved || !mounted) return;
     setState(() {
       _projectName = newName;
@@ -9568,6 +9579,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         generatedAt: now,
       ),
+      MapProjectFile(
+        fileName: 'isaac/start_$mapName.py',
+        kind: 'isaac',
+        description:
+            'Isaac Sim에서 isaac/$mapName.usd를 열고 ROS 2 Bridge와 stage의 '
+            'Action Graph를 실행한다. USD에는 clock·odom·scan·TF·cmd_vel '
+            '인터페이스가 구성돼 있어야 한다.',
+        executable: true,
+        content: buildIsaacProjectScript(mapName: mapName),
+        generatedAt: now,
+      ),
       // 로봇 하나가 디렉터리 하나다. 한 대를 빼거나 옮길 때 그 디렉터리만
       // 보면 되고, 파일이 늘어도 어느 것이 누구 것인지 헷갈리지 않는다.
       for (final robot in deployRobots) ...[
@@ -9654,9 +9676,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         fileName: 'run_$mapName.sh',
         kind: 'script',
         description:
-            '전체 실행. ROS 환경을 읽고 Gazebo bringup 을 먼저 띄운 뒤 '
-            'Open-RMF 를 올린다. Gazebo 가 먼저 떠야 /clock 이 나오고 '
-            'use_sim_time 을 쓰는 RMF 노드가 시간을 맞춘다.',
+            '전체 실행. 선택한 Gazebo/Isaac Sim 백엔드를 먼저 띄운 뒤 '
+            'Open-RMF를 올린다. 물리 백엔드가 먼저 /clock을 내야 '
+            'use_sim_time을 쓰는 RMF 노드가 시간을 맞춘다.',
         executable: true,
         content: buildProjectRunScript(
           mapName: mapName,
@@ -10765,6 +10787,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 지난번에 고른 실행 창 설정. 한 번 정하면 대개 그대로 여러 번 띄운다.
   bool _runWithGazeboGui = false;
   bool _runWithRviz = false;
+  SimulationBackend _runBackend = SimulationBackend.gazebo;
 
   /// 띄우기 전에 어떤 창을 볼지 고르게 한다. 취소하면 null.
   ///
@@ -10772,90 +10795,153 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 카메라도 발행한다 — Gazebo 서버는 언제나 헤드리스 렌더링으로 뜬다.
   /// 창은 사람이 보기 위한 것일 뿐이고, 두 개를 함께 띄우면 이 컴퓨터에서는
   /// 프레임이 떨어져 시뮬레이션까지 느려진다.
-  Future<({bool gazeboGui, bool rviz})?> _askRunWindows(String mapName) async {
+  Future<({SimulationBackend backend, bool gazeboGui, bool rviz})?>
+  _askRunWindows(String mapName) async {
+    var backend = _runBackend;
     var gazeboGui = _runWithGazeboGui;
     var rviz = _runWithRviz;
-    final chosen = await showMovableDialog<({bool gazeboGui, bool rviz})>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          icon: const Icon(Icons.play_circle_outline, size: 32),
-          title: Text('$mapName 실행'),
-          content: SizedBox(
-            width: 460,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  '설정 저장과 디스크 내보내기는 완료되었습니다.',
-                  style: TextStyle(
-                    color: Color(0xFF15803D),
-                    fontWeight: FontWeight.w800,
-                  ),
+    var savedSettings = const ProjectSimulationSettings();
+    try {
+      final saved = await loadProjectSimulationSettings(mapName);
+      savedSettings = saved;
+      backend = saved.backend;
+      gazeboGui = saved.simulatorGui;
+      rviz = saved.rviz;
+    } catch (_) {
+      // v12 설정이 없는 기존 프로젝트는 이 실행 중 기억을 사용한다.
+    }
+    if (!mounted) return null;
+    final chosen =
+        await showMovableDialog<
+          ({SimulationBackend backend, bool gazeboGui, bool rviz})
+        >(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              icon: const Icon(Icons.play_circle_outline, size: 32),
+              title: Text('$mapName 실행'),
+              content: SizedBox(
+                width: 460,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '설정 저장과 디스크 내보내기는 완료되었습니다.',
+                      style: TextStyle(
+                        color: Color(0xFF15803D),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text('물리 시뮬레이션 백엔드를 고르세요.'),
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<SimulationBackend>(
+                      initialValue: backend,
+                      decoration: const InputDecoration(
+                        labelText: '시뮬레이션 백엔드',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final value in SimulationBackend.values)
+                          DropdownMenuItem(
+                            value: value,
+                            child: Text(value.label),
+                          ),
+                      ],
+                      onChanged: (selected) =>
+                          setDialogState(() => backend = selected ?? backend),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(switch (backend) {
+                      SimulationBackend.gazebo =>
+                        '기존 Gazebo Harmonic 월드와 ROS 다리를 사용합니다.',
+                      SimulationBackend.isaacSim =>
+                        'USD stage와 Isaac Sim ROS 2 Bridge를 사용합니다.',
+                      SimulationBackend.none =>
+                        '물리·센서 없이 RMF와 선택한 RViz만 실행합니다.',
+                    }, style: const TextStyle(fontSize: 12)),
+                    const Divider(height: 24),
+                    const Text('표시 화면'),
+                    CheckboxListTile(
+                      value: gazeboGui,
+                      enabled: backend != SimulationBackend.none,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('${backend.label} 3D 창'),
+                      subtitle: const Text(
+                        '선택한 시뮬레이터의 로봇과 건물을 3D로 봅니다.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onChanged: (value) =>
+                          setDialogState(() => gazeboGui = value ?? false),
+                    ),
+                    CheckboxListTile(
+                      value: rviz,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('RViz'),
+                      subtitle: const Text(
+                        'RMF 가 계획한 경로와 교통 정리를 봅니다.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      onChanged: (value) =>
+                          setDialogState(() => rviz = value ?? false),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      gazeboGui || rviz
+                          ? '창을 띄우면 그리는 데 자원을 나눠 써 시뮬레이션이 느려질 수 있습니다.'
+                          : '창 없이 띄웁니다. 시뮬레이션은 그대로 돌고 라이다·카메라도 '
+                                '발행합니다 — 앱의 로봇 화면에서 위치와 센서를 볼 수 있습니다.',
+                      style: const TextStyle(
+                        color: Color(0xFF64748B),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 14),
-                const Text('띄울 화면을 고르세요.'),
-                const SizedBox(height: 10),
-                CheckboxListTile(
-                  value: gazeboGui,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Gazebo 창'),
-                  subtitle: const Text(
-                    '로봇과 건물이 실제로 어디 있는지 3D 로 봅니다.',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  onChanged: (value) =>
-                      setDialogState(() => gazeboGui = value ?? false),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('취소'),
                 ),
-                CheckboxListTile(
-                  value: rviz,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('RViz'),
-                  subtitle: const Text(
-                    'RMF 가 계획한 경로와 교통 정리를 봅니다.',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  onChanged: (value) =>
-                      setDialogState(() => rviz = value ?? false),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  gazeboGui || rviz
-                      ? '창을 띄우면 그리는 데 자원을 나눠 써 시뮬레이션이 느려질 수 있습니다.'
-                      : '창 없이 띄웁니다. 시뮬레이션은 그대로 돌고 라이다·카메라도 '
-                            '발행합니다 — 앱의 로봇 화면에서 위치와 센서를 볼 수 있습니다.',
-                  style: const TextStyle(
-                    color: Color(0xFF64748B),
-                    fontSize: 12,
-                  ),
+                FilledButton.icon(
+                  onPressed: () => Navigator.pop(dialogContext, (
+                    backend: backend,
+                    gazeboGui: backend == SimulationBackend.none
+                        ? false
+                        : gazeboGui,
+                    rviz: rviz,
+                  )),
+                  icon: const Icon(Icons.play_arrow, size: 18),
+                  label: const Text('백엔드 실행'),
                 ),
               ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('취소'),
-            ),
-            FilledButton.icon(
-              onPressed: () => Navigator.pop(dialogContext, (
-                gazeboGui: gazeboGui,
-                rviz: rviz,
-              )),
-              icon: const Icon(Icons.play_arrow, size: 18),
-              label: const Text('백엔드 실행'),
-            ),
-          ],
-        ),
-      ),
-    );
+        );
     if (chosen == null) return null;
     // 고른 것을 다음 실행의 기본값으로 남긴다.
     setState(() {
+      _runBackend = chosen.backend;
       _runWithGazeboGui = chosen.gazeboGui;
       _runWithRviz = chosen.rviz;
     });
+    try {
+      await saveProjectSimulationSettings(
+        mapName,
+        ProjectSimulationSettings(
+          backend: chosen.backend,
+          simulatorGui: chosen.gazeboGui,
+          rviz: chosen.rviz,
+          gazeboSettings: savedSettings.gazeboSettings,
+          isaacSettings: savedSettings.isaacSettings,
+          coordinateTransform: savedSettings.coordinateTransform,
+        ),
+      );
+    } catch (error) {
+      if (mounted) _showProcessingWarning('시뮬레이션 실행 설정 저장', error);
+    }
     return chosen;
   }
 
@@ -10879,6 +10965,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (windows == null || !mounted) return;
     final result = await startProject(
       mapName,
+      backend: windows.backend,
       gazeboGui: windows.gazeboGui,
       rviz: windows.rviz,
     );
@@ -10888,7 +10975,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       title: result.success ? '프로젝트 실행' : '실행하지 못했습니다',
       message: result.success
           ? '${result.message}\n\n'
-                'Gazebo 를 먼저 띄우고 12초 뒤 Open-RMF 를 올립니다.\n'
+                '선택한 백엔드를 준비한 뒤 Open-RMF 를 올립니다.\n'
                 '창을 닫으면 자동으로 정리됩니다. 강제 종료하면 남을 수 있으니 '
                 '그때는 로봇 운영 화면에서 확인하세요.'
           : result.message,
@@ -11428,16 +11515,53 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// `.rmfproject` 파일에서 프로젝트를 연다.
   Future<void> _loadProject() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['rmfproject'],
-        withData: true,
+      final projects = await listProjectFiles();
+      if (!mounted) return;
+      if (projects.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('project 디렉터리에 저장된 프로젝트가 없습니다.')),
+        );
+        return;
+      }
+      final selected = await showMovableDialog<StoredProjectFile>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.folder_copy_outlined, size: 34),
+          title: const Text('project 디렉터리에서 불러오기'),
+          content: SizedBox(
+            width: 460,
+            height: 360,
+            child: ListView.separated(
+              itemCount: projects.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (_, index) {
+                final project = projects[index];
+                return ListTile(
+                  leading: const Icon(Icons.description_outlined),
+                  title: Text(project.projectName),
+                  subtitle: Text(
+                    '${project.fileName}\n'
+                    '${_projectTimestamp(project.modifiedAt)} · '
+                    '${(project.size / 1024).toStringAsFixed(1)} KB',
+                  ),
+                  isThreeLine: true,
+                  onTap: () => Navigator.pop(dialogContext, project),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+          ],
+        ),
       );
-      if (result == null || result.files.single.bytes == null) return;
-      final fileName = result.files.single.name;
-      final data =
-          jsonDecode(utf8.decode(result.files.single.bytes!))
-              as Map<String, dynamic>;
+      if (selected == null) return;
+      final fileName = selected.fileName;
+      final bytes = await readProjectFile(fileName);
+      final data = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
       if (!mounted) return;
       _applyProjectData(
         data,
@@ -19209,8 +19333,9 @@ class _PageHeading extends StatelessWidget {
               ),
             ),
             // 맵 프로젝트의 원장은 MySQL이다. 프로젝트 이름으로 구분해 담으므로
-            // 이 세 버튼이 여러 창고를 오가는 기본 경로다. 파일 저장·불러오기는 다른
-            // PC로 옮기거나 백업할 때 쓰는 보조 수단으로 남겨 둔다.
+            // 이 세 버튼이 여러 창고를 오가는 기본 경로다. 파일 저장·불러오기는
+            // rmf_control_ui/project 한 곳에서만 하는 보조 수단이다. 사용자가
+            // 폴더를 고르게 하면 같은 이름의 파일이 여러 곳에 흩어진다.
             //
             // `새 프로젝트` 가 맨 앞이다. 이름을 먼저 정하고 도면을 올리는 것이
             // 제 차례다 — 도면부터 올리면 그 파일 이름이 프로젝트 이름으로
@@ -19262,7 +19387,7 @@ class _PageHeading extends StatelessWidget {
             OutlinedButton.icon(
               onPressed: onLoadProject,
               icon: const Icon(Icons.folder_open_outlined, size: 18),
-              label: const Text('파일에서 열기'),
+              label: const Text('project에서 열기'),
               style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 15,
@@ -19273,7 +19398,7 @@ class _PageHeading extends StatelessWidget {
             OutlinedButton.icon(
               onPressed: exportEnabled ? onSaveProject : null,
               icon: const Icon(Icons.save_outlined, size: 18),
-              label: const Text('파일로 저장'),
+              label: const Text('project에 저장'),
               style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 15,

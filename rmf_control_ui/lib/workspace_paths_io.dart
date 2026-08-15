@@ -15,5 +15,4 @@ Directory robosapiensRoot() {
   return Directory.current.absolute;
 }
 
-String bundledRmfWorkspace() =>
-    Platform.environment['RMF_WS'] ?? '${robosapiensRoot().path}/rmf_ws';
+String bundledRmfWorkspace() => '${robosapiensRoot().path}/rmf_ws';

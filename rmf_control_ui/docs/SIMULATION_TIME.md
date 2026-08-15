@@ -1,4 +1,4 @@
-# 시뮬레이션 시간 (RTF)
+# Simulation Time and Real-Time Factor (시뮬레이션 시간 및 실시간 계수, RTF)
 
 Gazebo 안의 시계는 벽시계와 다르게 흐릅니다. 그 비율을 **RTF**(Real-Time
 Factor)라고 합니다. RTF 1.0 이면 같은 속도, 0.1 이면 시뮬레이션 1초가 벽시계
@@ -154,7 +154,7 @@ ros2 topic hz /pinky_01/scan   # 설정 10 Hz 인데 1.08 Hz 로 나왔습니다
 ### 3.3 진짜 비용은 센서입니다 — `pinky_gz.urdf.xacro`
 
 ```
-~/robosapiens/pinky_pro/pinky_description/urdf/pinky_gz.urdf.xacro
+~/robosapiens/robot_model/pinky_pro/pinky_description/urdf/pinky_gz.urdf.xacro
 ```
 
 | 센서 | 줄 | 지금 값 | 무게 |

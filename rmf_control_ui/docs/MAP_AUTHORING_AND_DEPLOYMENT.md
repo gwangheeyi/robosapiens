@@ -1,4 +1,4 @@
-# RMF Control UI 맵 작성 및 배포 가이드
+# RMF Control UI Map Authoring and Deployment Guide (RMF Control UI 맵 작성 및 배포 가이드)
 
 ## 1. 문서 목적
 
@@ -26,7 +26,7 @@ Waypoint별 ROS 실행, 외부 설비 Handshake 및 정밀 도킹 구조는
 
 - Linux 데스크톱에서 실행한 `rmf_control_ui`
 - ROS 2 Jazzy: `/opt/ros/jazzy/setup.bash`
-- 빌드된 Open-RMF workspace: 기본값 `$HOME/rmf_ws`
+- 빌드된 Open-RMF workspace: `$HOME/robosapiens/rmf_ws`
 - `rmf_building_map_tools`
 - 프로젝트 안의 `openrmf/scripts`와 `rmf_maps` 디렉터리
 
@@ -39,7 +39,7 @@ Waypoint별 ROS 실행, 외부 설비 Handshake 및 정밀 도킹 구조는
 
 ```bash
 export RMF_ROOT=/home/gyi/robosapiens
-export RMF_WS=$HOME/rmf_ws
+export RMF_WS=$HOME/robosapiens/rmf_ws
 cd "$RMF_ROOT/rmf_control_ui"
 flutter run -d linux
 ```
@@ -644,7 +644,7 @@ AssertionError: Failed to parse config file [.../office/tinyRobot_config.yaml]
 | 변수 | 기본값 | 의미 |
 | --- | --- | --- |
 | `RMF_ROOT` | 현재 디렉터리에서 자동 탐색 | 프로젝트 루트 |
-| `RMF_WS` | `$HOME/rmf_ws` | Open-RMF workspace |
+| `RMF_WS` | `$HOME/robosapiens/rmf_ws` | Open-RMF workspace |
 | `ROS_DOMAIN_ID` | 맵 관리에서 정한 값 | ROS 2 도메인. 앱이 넘깁니다 |
 | `MAP_READY_WAIT` | `25` | 새 지도 수신 확인을 기다리는 초 |
 | `RMF_USE_SIM_TIME` | `true` | ROS simulation time 사용 여부 |

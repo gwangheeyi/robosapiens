@@ -13,6 +13,9 @@ import 'dart:io';
 import 'package:meta/meta.dart';
 
 import 'rmf_config_export.dart';
+import 'simulation_backend.dart';
+
+export 'simulation_backend.dart';
 
 class RmfRunResult {
   const RmfRunResult({required this.success, required this.message});
@@ -121,6 +124,7 @@ Future<int?> _runningPgid(String mapName) async {
 /// 카메라는 돌고, 창 두 개를 함께 띄우면 시뮬레이션이 눈에 띄게 느려진다.
 Future<RmfRunResult> startProject(
   String mapName, {
+  SimulationBackend backend = SimulationBackend.gazebo,
   bool gazeboGui = false,
   bool rviz = false,
 }) async {
@@ -170,8 +174,8 @@ Future<RmfRunResult> startProject(
   // 골랐는데 안 뜬다" 가 되고, 원인이 디스크의 낡은 파일이라는 것은 어디에도
   // 안 보인다. 창을 달라고 했을 때만 막는다 — 안 띄우는 것은 예전 스크립트도
   // 결과가 같다.
-  if ((gazeboGui || rviz) &&
-      !script.readAsStringSync().contains('GAZEBO_GUI')) {
+  final scriptContents = script.readAsStringSync();
+  if ((gazeboGui || rviz) && !scriptContents.contains('GAZEBO_GUI')) {
     return RmfRunResult(
       success: false,
       message:
@@ -179,6 +183,16 @@ Future<RmfRunResult> startProject(
           '설정 파일 메뉴에서 `디스크로 내보내기`를 한 번 눌러 다시 만든 뒤 '
           '실행하세요.\n\n'
           '창 없이 띄우는 것은 지금 그대로도 됩니다.',
+    );
+  }
+  if (backend != SimulationBackend.gazebo &&
+      !scriptContents.contains('SIM_BACKEND')) {
+    return RmfRunResult(
+      success: false,
+      message:
+          '${script.path} 는 Gazebo만 지원하는 예전 판입니다.\n'
+          '설정 파일 메뉴에서 `디스크로 내보내기`를 한 번 눌러 다시 만든 뒤 '
+          '실행하세요.',
     );
   }
   try {
@@ -197,16 +211,24 @@ Future<RmfRunResult> startProject(
       // 스크립트가 고른 값을 그대로 읽는다. 인자가 아니라 환경 변수인 것은,
       // 터미널에서 직접 띄울 때와 같은 방법이라야 앱 밖에서도 재현되기
       // 때문이다.
-      environment: {'GAZEBO_GUI': '$gazeboGui', 'RVIZ': '$rviz'},
+      environment: {
+        'SIM_BACKEND': backend.storageValue,
+        'GAZEBO_GUI': '$gazeboGui',
+        'SIMULATOR_GUI': '$gazeboGui',
+        'RVIZ': '$rviz',
+      },
       mode: ProcessStartMode.detached,
     );
     _startedProject = mapName;
     _startedPid = process.pid;
-    final shown = [if (gazeboGui) 'Gazebo 창', if (rviz) 'RViz'];
+    final shown = [
+      if (gazeboGui && backend != SimulationBackend.none) '${backend.label} 창',
+      if (rviz) 'RViz',
+    ];
     return RmfRunResult(
       success: true,
       message:
-          '`$mapName` 을 띄웠습니다 (pid $_startedPid).\n'
+          '`$mapName` 을 ${backend.label} 백엔드로 띄웠습니다 (pid $_startedPid).\n'
           '${shown.isEmpty ? '창 없이 띄웁니다.' : '${shown.join(' · ')} 을(를) 함께 띄웁니다.'}',
     );
   } catch (error) {

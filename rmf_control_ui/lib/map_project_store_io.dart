@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'map_project_models.dart';
+import 'simulation_backend.dart';
 
 Map<String, String> _mysqlEnvironment() {
   final password =
@@ -575,4 +576,80 @@ SELECT ${_toBase64(aggregate)};
   final data = jsonDecode(decoded) as Map<String, dynamic>;
   if (data['settings'] == null) return null;
   return data;
+}
+
+Future<void> saveProjectSimulationSettings(
+  String mapName,
+  ProjectSimulationSettings settings,
+) async {
+  final payload = jsonEncode({
+    'backend': settings.backend.storageValue,
+    'simulatorGui': settings.simulatorGui,
+    'rviz': settings.rviz,
+    'gazeboSettings': settings.gazeboSettings,
+    'isaacSettings': settings.isaacSettings,
+    'coordinateTransform': settings.coordinateTransform,
+  });
+  await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SET @project_id = (SELECT id FROM map_projects WHERE map_name = @map_name);
+SET @simulation = CAST(
+  CONVERT(FROM_BASE64('${_encode(payload)}') USING utf8mb4) AS JSON
+);
+INSERT INTO map_project_simulation_settings (
+  project_id, default_backend, simulator_gui, rviz_enabled,
+  gazebo_settings, isaac_settings, coordinate_transform, updated_at
+)
+VALUES (
+  @project_id,
+  JSON_UNQUOTE(JSON_EXTRACT(@simulation, '\$.backend')),
+  JSON_EXTRACT(@simulation, '\$.simulatorGui') = TRUE,
+  JSON_EXTRACT(@simulation, '\$.rviz') = TRUE,
+  JSON_EXTRACT(@simulation, '\$.gazeboSettings'),
+  JSON_EXTRACT(@simulation, '\$.isaacSettings'),
+  JSON_EXTRACT(@simulation, '\$.coordinateTransform'),
+  NOW(6)
+)
+ON DUPLICATE KEY UPDATE
+  default_backend = VALUES(default_backend),
+  simulator_gui = VALUES(simulator_gui),
+  rviz_enabled = VALUES(rviz_enabled),
+  gazebo_settings = VALUES(gazebo_settings),
+  isaac_settings = VALUES(isaac_settings),
+  coordinate_transform = VALUES(coordinate_transform),
+  updated_at = NOW(6);
+''');
+}
+
+Future<ProjectSimulationSettings> loadProjectSimulationSettings(
+  String mapName,
+) async {
+  final aggregate = '''CAST(JSON_OBJECT(
+    'backend', s.default_backend,
+    'simulatorGui', s.simulator_gui = 1,
+    'rviz', s.rviz_enabled = 1,
+    'gazeboSettings', s.gazebo_settings,
+    'isaacSettings', s.isaac_settings,
+    'coordinateTransform', s.coordinate_transform
+  ) AS CHAR)''';
+  final output = await _query('''
+SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
+SELECT ${_toBase64(aggregate)}
+FROM map_project_simulation_settings s
+JOIN map_projects p ON p.id = s.project_id
+WHERE p.map_name = @map_name;
+''');
+  final decoded = _decodeResult(output);
+  if (decoded.isEmpty) return const ProjectSimulationSettings();
+  final data = jsonDecode(decoded) as Map<String, dynamic>;
+  Map<String, Object?> objectMap(String key) =>
+      Map<String, Object?>.from(data[key] as Map? ?? const {});
+  return ProjectSimulationSettings(
+    backend: SimulationBackend.parse(data['backend'] as String?),
+    simulatorGui: data['simulatorGui'] == true || data['simulatorGui'] == 1,
+    rviz: data['rviz'] == true || data['rviz'] == 1,
+    gazeboSettings: objectMap('gazeboSettings'),
+    isaacSettings: objectMap('isaacSettings'),
+    coordinateTransform: objectMap('coordinateTransform'),
+  );
 }

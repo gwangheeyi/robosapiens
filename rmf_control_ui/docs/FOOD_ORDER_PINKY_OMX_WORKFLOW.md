@@ -1,4 +1,4 @@
-# 식품 주문 · Pinky · OMX-AI 연동 설계
+# Food Order, Pinky, and OMX-AI Integration Design (식품 주문 · Pinky · OMX-AI 연동 설계)
 
 ## 1. 목적
 
@@ -316,4 +316,3 @@ Pinky-03 → 냉동 상품 ┘
 단계입니다. 실제 장비 운영에서는 로컬 Linux Edge Agent와 게이트웨이가 Pinky 및
 OMX-AI에 명령을 전달해야 합니다. 실제 OMX-AI 단계는 고정 시간이 아니라 반드시
 `loaded` 응답을 받은 후 완료되어야 합니다.
-

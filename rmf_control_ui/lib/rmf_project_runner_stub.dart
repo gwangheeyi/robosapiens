@@ -1,6 +1,10 @@
 /// 웹 빌드용 대체 구현. 브라우저에서는 프로세스를 띄울 수 없다.
 library;
 
+import 'simulation_backend.dart';
+
+export 'simulation_backend.dart';
+
 class RmfRunResult {
   const RmfRunResult({required this.success, required this.message});
   final bool success;
@@ -15,6 +19,7 @@ Future<String?> refreshRunningProject() async => null;
 
 Future<RmfRunResult> startProject(
   String mapName, {
+  SimulationBackend backend = SimulationBackend.gazebo,
   bool gazeboGui = false,
   bool rviz = false,
 }) async => const RmfRunResult(

@@ -1,4 +1,4 @@
-# 로봇 등록과 디렉터리 구조
+# Robot Registration and Directory Structure (로봇 등록과 디렉터리 구조)
 
 ## 1. 이 문서가 답하는 것
 

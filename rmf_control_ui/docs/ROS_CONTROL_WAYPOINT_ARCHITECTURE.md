@@ -1,4 +1,4 @@
-# ROS 관제 시스템 Waypoint 아키텍처 매핑
+# ROS Control System Waypoint Architecture Mapping (ROS 관제 시스템 Waypoint 아키텍처 매핑)
 
 ## 1. 문서 목적
 
@@ -218,4 +218,3 @@ Action 이름과 메시지 형식은 로봇 및 설비 드라이버에 따라 �
 - Parking Spot: 중복 배정이 방지되고 새 작업 시 점유가 정상 해제됨
 - Charger: Nav2 접근과 정밀 도킹이 분리되며 실제 충전 전류까지 확인됨
 - 공통: 실패, 취소, 통신 단절 및 재시작 시 상태가 안전하게 복구됨
-

@@ -1,4 +1,4 @@
-# 관제 노드별 하는 일
+# Roles of RMF Control Nodes (관제 노드별 하는 일)
 
 ## 1. 이 문서가 답하는 것
 
@@ -267,7 +267,7 @@ SIGSEGV(-11) 로 죽은 적이 있습니다. 그 부하의 뿌리는 시뮬레�
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/rmf_ws/install/setup.bash
+source ~/robosapiens/rmf_ws/install/setup.bash
 
 # 무엇이 떠 있나
 ros2 node list

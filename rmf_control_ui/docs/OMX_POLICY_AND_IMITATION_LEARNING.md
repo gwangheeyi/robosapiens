@@ -1,4 +1,4 @@
-# OMX 물품별 Policy와 모방학습 데이터 운영
+# OMX Product-Specific Policies and Imitation Learning Data Operations (OMX 물품별 Policy와 모방학습 데이터 운영)
 
 ## 1. 목적
 

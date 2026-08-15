@@ -1,4 +1,4 @@
-# 앱 전용 Mock 로봇 가이드
+# App-Only Mock Robot Guide (앱 전용 Mock 로봇 가이드)
 
 ## 목적
 

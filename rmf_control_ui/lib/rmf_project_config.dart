@@ -1134,6 +1134,43 @@ List<String> _requiredPackages(List<RmfProjectRobot> robots) => [
     'open_manipulator_description',
 ];
 
+/// Isaac Sim에서 프로젝트 USD stage를 열고 ROS 2 Action Graph를 실행한다.
+///
+/// USD에는 로봇 articulation과 /clock·odom·scan·joint_states·tf·cmd_vel 그래프가
+/// 들어 있어야 한다. 이 실행기는 stage 경로와 GUI/headless 선택을 표준화한다.
+String buildIsaacProjectScript({required String mapName}) =>
+    '''#!/usr/bin/env python3
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--stage', required=True)
+display = parser.add_mutually_exclusive_group()
+display.add_argument('--headless', action='store_true')
+display.add_argument('--gui', action='store_true')
+args = parser.parse_args()
+
+from isaacsim import SimulationApp
+
+app = SimulationApp({'headless': not args.gui})
+
+import omni.timeline
+from isaacsim.core.utils.extensions import enable_extension
+from isaacsim.core.utils.stage import open_stage
+
+enable_extension('isaacsim.ros2.bridge')
+open_stage(args.stage)
+app.update()
+
+timeline = omni.timeline.get_timeline_interface()
+timeline.play()
+try:
+    while app.is_running():
+        app.update()
+finally:
+    timeline.stop()
+    app.close()
+''';
+
 /// 프로젝트를 통째로 띄우는 셸 스크립트.
 ///
 /// ROS 환경을 읽고 bringup 과 RMF 를 순서대로 띄운다. Gazebo 가 먼저 떠야
@@ -1173,6 +1210,30 @@ RMF_WS="\${RMF_WS:-$rmfWorkspace}"
 PINKY_WS="\${PINKY_WS:-$pinkyWorkspace}"
 OMX_WS="\${OMX_WS:-$manipulatorWorkspace}"
 
+# 상용 배포 구조는 하나로 고정한다. 환경 변수로 예전 경로를 넘겨 조용히
+# 실행하면 개발 PC에서는 되지만 고객 패키지에서는 빠지는 파일이 생긴다.
+EXPECTED_RMF_WS="\$APP_ROOT/rmf_ws"
+EXPECTED_PINKY_WS="\$APP_ROOT/robot_model/pinky_pro"
+EXPECTED_OMX_WS="\$APP_ROOT/robot_model/open_manipulator"
+WORKSPACE_ENTRIES=(
+  "RMF_WS|\$RMF_WS|\$EXPECTED_RMF_WS"
+  "PINKY_WS|\$PINKY_WS|\$EXPECTED_PINKY_WS"
+  "OMX_WS|\$OMX_WS|\$EXPECTED_OMX_WS"
+)
+for entry in "\${WORKSPACE_ENTRIES[@]}"; do
+  IFS='|' read -r label actual expected <<< "\$entry"
+  if [[ "\$actual" != "\$expected" || -L "\$actual" || ! -d "\$actual" ]]; then
+    echo "잘못된 RoboSapiens 파일 구조: \$label=\$actual" >&2
+    echo "실제 디렉터리를 다음 위치에 두세요: \$expected" >&2
+    echo "심볼릭 링크와 외부 workspace는 지원하지 않습니다." >&2
+    exit 1
+  fi
+done
+if [[ ! -f "\$RMF_WS/install/setup.bash" ]]; then
+  echo "Open-RMF가 빌드되지 않았습니다: \$RMF_WS/install/setup.bash" >&2
+  exit 1
+fi
+
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="${_requiredPackages(robots).join(' ')}"
 
@@ -1202,7 +1263,17 @@ else
   GUI_DEFAULT=true
 fi
 GAZEBO_GUI="\${GAZEBO_GUI:-\$GUI_DEFAULT}"
+SIMULATOR_GUI="\${SIMULATOR_GUI:-\$GAZEBO_GUI}"
+SIM_BACKEND="\${SIM_BACKEND:-gazebo}"
 RVIZ="\${RVIZ:-\$GUI_DEFAULT}"
+
+case "\$SIM_BACKEND" in
+  gazebo|isaac_sim|none) ;;
+  *)
+    echo "지원하지 않는 SIM_BACKEND: \$SIM_BACKEND (gazebo|isaac_sim|none)" >&2
+    exit 1
+    ;;
+esac
 
 # launch 인자는 반대말(headless)이다. 여기서 한 번만 뒤집는다.
 if is_true "\$GAZEBO_GUI"; then GAZEBO_HEADLESS=false; else GAZEBO_HEADLESS=true; fi
@@ -1298,6 +1369,7 @@ echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
 # 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
 # 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
 echo "Gazebo 창: \$GAZEBO_GUI · RViz: \$RVIZ · ROS_DOMAIN_ID: \$ROS_DOMAIN_ID"
+echo "시뮬레이션 백엔드: \$SIM_BACKEND · 시뮬레이터 창: \$SIMULATOR_GUI"
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
 # 앱이 detached 로 띄우면 이 셸의 PID 는 그룹 리더가 아니므로, PID 가 아니라
@@ -1320,6 +1392,9 @@ trap cleanup EXIT INT TERM
 # 로봇까지 안 뜨는데, 화면에는 찾아본 경로 목록만 잔뜩 나와 원인을 알기 어렵다.
 missing=()
 for pkg in \$REQUIRED_PACKAGES; do
+  if [[ "\$SIM_BACKEND" != gazebo && "\$pkg" == ros_gz_sim ]]; then
+    continue
+  fi
   ros2 pkg prefix "\$pkg" >/dev/null 2>&1 || missing+=("\$pkg")
 done
 if ((\${#missing[@]} > 0)); then
@@ -1481,13 +1556,57 @@ wait_for_gazebo() {
   return 1
 }
 
+# 선택한 물리 백엔드를 시작한다. 양쪽 모두 같은 ROS 토픽(/clock, odom, scan,
+# joint_states, tf, cmd_vel)을 제공해야 이후 Nav2와 RMF를 그대로 쓸 수 있다.
+start_simulator() {
+  case "\$SIM_BACKEND" in
+    gazebo)
+      echo "${projectUsesNav2(robots) ? '[1/3]' : '[1/2]'} Gazebo bringup"
+      ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$GAZEBO_HEADLESS" &
+      if ! wait_for_gazebo "\$MAP_DIR/$mapName.world"; then
+        echo "Gazebo 가 \$GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+        return 1
+      fi
+      ;;
+    isaac_sim)
+      local launcher="\${ISAAC_SIM_PYTHON:-\${ISAAC_SIM_ROOT:-\$HOME/isaacsim}/python.sh}"
+      local script="\${ISAAC_PROJECT_SCRIPT:-\$MAP_DIR/isaac/start_$mapName.py}"
+      local stage="\${ISAAC_STAGE:-\$MAP_DIR/isaac/$mapName.usd}"
+      if [[ ! -x "\$launcher" ]]; then
+        echo "Isaac Sim Python 실행기를 찾지 못했습니다: \$launcher" >&2
+        echo "ISAAC_SIM_ROOT 또는 ISAAC_SIM_PYTHON을 지정하세요." >&2
+        return 1
+      fi
+      if [[ ! -f "\$script" || ! -f "\$stage" ]]; then
+        echo "Isaac Sim 프로젝트 산출물이 없습니다." >&2
+        echo "필요한 파일: \$script" >&2
+        echo "필요한 파일: \$stage" >&2
+        return 1
+      fi
+      local gui_arg="--headless"
+      is_true "\$SIMULATOR_GUI" && gui_arg="--gui"
+      echo "Isaac Sim bringup: \$stage"
+      "\$launcher" "\$script" --stage "\$stage" "\$gui_arg" &
+      local deadline=\$((SECONDS + GAZEBO_WAIT))
+      while ((SECONDS < deadline)); do
+        timeout 5 ros2 topic echo /clock --once >/dev/null 2>&1 && return 0
+        sleep 2
+      done
+      echo "Isaac Sim이 \$GAZEBO_WAIT 초 안에 /clock을 발행하지 않았습니다." >&2
+      return 1
+      ;;
+    none)
+      echo "물리 시뮬레이터 없이 RMF/RViz만 시작합니다."
+      ;;
+  esac
+}
+
 ${projectUsesNav2(robots) ? '''
-echo "[1/3] Gazebo bringup"
-ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$GAZEBO_HEADLESS" &
-if ! wait_for_gazebo "\$MAP_DIR/$mapName.world"; then
+echo "[1/3] 시뮬레이션 백엔드"
+if ! start_simulator; then
   echo "" >&2
-  echo "Gazebo 가 \$GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
-  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 그 둘은" >&2
+  echo "시뮬레이션 백엔드가 준비되지 않았습니다." >&2
+  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 물리가 없으면 그 둘은" >&2
   echo "토픽 이름만 만들어 놓고 값은 하나도 못 받습니다." >&2
   echo "" >&2
   echo "무엇이 있었는지: \$LOG_FILE" >&2
@@ -1608,11 +1727,10 @@ watch_fleet_adapter() {
 echo "[3/3] Nav2 와 RMF 어댑터"
 watch_fleet_adapter &
 ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml"''' : '''
-echo "[1/2] Gazebo bringup"
-ros2 launch "\$MAP_DIR/${mapName}_bringup.launch.xml" headless:="\$GAZEBO_HEADLESS" &
-if ! wait_for_gazebo "\$MAP_DIR/$mapName.world"; then
+echo "[1/2] 시뮬레이션 백엔드"
+if ! start_simulator; then
   echo "" >&2
-  echo "Gazebo 가 \$GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+  echo "시뮬레이션 백엔드가 준비되지 않았습니다." >&2
   echo "Open-RMF 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 토픽 이름만" >&2
   echo "만들어 놓고 값은 하나도 못 받습니다." >&2
   echo "" >&2

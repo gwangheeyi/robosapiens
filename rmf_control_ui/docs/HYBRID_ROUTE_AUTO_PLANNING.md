@@ -1,4 +1,4 @@
-# Waypoint·Lane 혼합형 자동 경로 지정 가이드
+# Hybrid Waypoint and Lane Automatic Route Planning Guide (Waypoint·Lane 혼합형 자동 경로 지정 가이드)
 
 ## 1. 목적
 

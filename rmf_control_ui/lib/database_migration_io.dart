@@ -57,13 +57,13 @@ Future<String> _query(String sql, {bool database = false}) async {
   return output.trim();
 }
 
-Future<void> _apply(File sql) async {
+Future<void> _apply(File sql, {bool database = false}) async {
   if (!RegExp(r'^[A-Za-z0-9_]+$').hasMatch(_database)) {
     throw StateError('ROBOSAPIENS_DB_NAME에는 영문·숫자·밑줄만 사용할 수 있습니다.');
   }
   final process = await Process.start(
     'mysql',
-    _connectionArgs(),
+    _connectionArgs(database: database),
     environment: _environment(),
   );
   // 배포 환경이 별도 DB 이름을 쓰더라도 schema/migration의 기본 이름을 그
@@ -175,7 +175,7 @@ Future<DatabaseMigrationResult> migrateDatabaseSchema() async {
   final applied = <String>[];
   for (final target in targets) {
     final file = migrationFiles[target]!;
-    await _apply(file);
+    await _apply(file, database: true);
     applied.add(file.uri.pathSegments.last);
     final actual = await _query(
       'SELECT version FROM schema_version WHERE id=1;',

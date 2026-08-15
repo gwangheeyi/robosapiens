@@ -4,6 +4,7 @@
 library;
 
 import 'map_project_models.dart';
+import 'simulation_backend.dart';
 
 const String _unsupported =
     '웹 빌드에서는 MySQL 맵 프로젝트 저장소를 쓸 수 없습니다. '
@@ -58,3 +59,12 @@ Future<void> saveMapProjectFleetSettings(
 ) async => throw UnsupportedError(_unsupported);
 
 Future<Map<String, dynamic>?> loadMapProjectFleet(String mapName) async => null;
+
+Future<void> saveProjectSimulationSettings(
+  String mapName,
+  ProjectSimulationSettings settings,
+) async => throw UnsupportedError(_unsupported);
+
+Future<ProjectSimulationSettings> loadProjectSimulationSettings(
+  String mapName,
+) async => const ProjectSimulationSettings();

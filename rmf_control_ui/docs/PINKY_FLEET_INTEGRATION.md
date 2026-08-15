@@ -1,4 +1,4 @@
-# Pinky 가상 로봇 · Fleet Adapter 연동
+# Pinky Virtual Robot and Fleet Adapter Integration (Pinky 가상 로봇 · Fleet Adapter 연동)
 
 ## 1. 문서 목적
 
@@ -48,13 +48,13 @@ Gazebo Pinky ──odom/scan──▶ [Nav2] ──▶ [RMF Fleet Adapter] ─�
 ### 4.2 환경
 
 - Ubuntu 24.04 · ROS 2 Jazzy
-- 빌드된 Open-RMF workspace: 기본값 `$HOME/rmf_ws`
+- 빌드된 Open-RMF workspace: `$HOME/robosapiens/rmf_ws`
 
 확인:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source "$HOME/rmf_ws/install/setup.bash"
+source "$HOME/robosapiens/rmf_ws/install/setup.bash"
 ros2 pkg prefix rmf_fleet_adapter
 ros2 pkg prefix ros_gz_sim
 ```
@@ -89,7 +89,7 @@ ros-jazzy-nav2-bringup           1.3.12-1noble
 ### 5.1 빌드
 
 ```bash
-cd ~/robosapiens/pinky_pro
+cd ~/robosapiens/robot_model/pinky_pro
 source /opt/ros/jazzy/setup.bash
 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
@@ -102,7 +102,7 @@ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 화면으로 보려면 원래 launch를 씁니다.
 
 ```bash
-cd ~/robosapiens/pinky_pro
+cd ~/robosapiens/robot_model/pinky_pro
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 ros2 launch pinky_gz_sim launch_sim.launch.xml
 ```
@@ -419,7 +419,7 @@ ros2 launch rmf_maps/gwanghee/robots/PK-01/spawn.launch.xml
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source $HOME/rmf_ws/install/setup.bash
+source $HOME/robosapiens/rmf_ws/install/setup.bash
 ros2 launch ~/robosapiens/rmf_maps/<맵이름>/<맵이름>.launch.xml
 ```
 

@@ -1,4 +1,4 @@
-# 실제 Pinky 최초 기동과 수동 주행 절차
+# Physical Pinky First Startup and Manual Driving Procedure (실제 Pinky 최초 기동과 수동 주행 절차)
 
 ## 1. 목적과 완료 기준
 
@@ -133,7 +133,7 @@ Pinky 컴퓨터와 관제 PC 양쪽에서 같은 ROS Domain ID를 사용한다. 
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/robosapiens/pinky_pro/install/setup.bash
+source ~/robosapiens/robot_model/pinky_pro/install/setup.bash
 
 export ROS_DOMAIN_ID=22
 export ROS_LOCALHOST_ONLY=0
@@ -142,7 +142,7 @@ export ROS_LOCALHOST_ONLY=0
 Pinky 컴퓨터의 저장소 경로가 다르면 실제 설치 경로를 사용한다.
 
 ```bash
-source ~/pinky_pro/install/setup.bash
+source ~/robosapiens/robot_model/pinky_pro/install/setup.bash
 ```
 
 관제 PC에서 통신을 확인한다.
@@ -167,7 +167,7 @@ Pinky 컴퓨터에서 실행한다.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/robosapiens/pinky_pro/install/setup.bash
+source ~/robosapiens/robot_model/pinky_pro/install/setup.bash
 export ROS_DOMAIN_ID=22
 
 ros2 pkg prefix pinky_bringup
@@ -179,7 +179,7 @@ ros2 pkg prefix sllidar_ros2
 먼저 종료한 다음 진행한다.
 
 ```bash
-cd ~/robosapiens/pinky_pro
+cd ~/robosapiens/robot_model/pinky_pro
 source /opt/ros/jazzy/setup.bash
 colcon build
 source install/setup.bash
@@ -191,7 +191,7 @@ Pinky 컴퓨터에서 실행한다.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/robosapiens/pinky_pro/install/setup.bash
+source ~/robosapiens/robot_model/pinky_pro/install/setup.bash
 
 export ROS_DOMAIN_ID=22
 export ROS_LOCALHOST_ONLY=0
@@ -221,7 +221,7 @@ bringup 터미널은 닫지 않는다. 다음 오류를 확인하고 원문을 �
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/robosapiens/pinky_pro/install/setup.bash
+source ~/robosapiens/robot_model/pinky_pro/install/setup.bash
 
 export ROS_DOMAIN_ID=22
 export ROS_LOCALHOST_ONLY=0
@@ -415,8 +415,8 @@ RMF 작업을 제출하지 않는다.
 
 ## 관련 파일과 문서
 
-- [실물 Pinky bringup launch](../../pinky_pro/pinky_bringup/launch/bringup_robot.launch.xml)
-- [Pinky 모터 파라미터](../../pinky_pro/pinky_bringup/config/pinky_params.yaml)
+- [실물 Pinky bringup launch](../../robot_model/pinky_pro/pinky_bringup/launch/bringup_robot.launch.xml)
+- [Pinky 모터 파라미터](../../robot_model/pinky_pro/pinky_bringup/config/pinky_params.yaml)
 - [THREE_SOURCES.md](THREE_SOURCES.md) — Mock, Gazebo와 실물 출처 차이
 - [NAV2_PATH.md](NAV2_PATH.md) — 실제 지도, AMCL과 Nav2 연결
 - [ROBOT_REGISTRATION.md](ROBOT_REGISTRATION.md) — 실제 로봇 출처 등록
