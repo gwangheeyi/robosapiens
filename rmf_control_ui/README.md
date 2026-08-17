@@ -24,6 +24,7 @@
 - [How a Task Reaches RMF (작업이 RMF까지 가는 길)](docs/TASK_TO_RMF.md)
 - [One Robot, Three Data Sources (로봇 하나, 값이 오는 곳 셋)](docs/THREE_SOURCES.md)
 - [What to Put in a Task (작업에 무엇을 적어야 하나)](docs/WHAT_TO_PUT_IN_A_TASK.md)
+- [WorkCell Policy Lifecycle (WorkCell Policy 한살이 — 설치부터 팔이 움직이기까지)](docs/WORKCELL_POLICY_LIFECYCLE.md)
 
 ## 실행
 

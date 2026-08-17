@@ -30,12 +30,20 @@ void main() {
     expect(syntax.exitCode, 0, reason: syntax.stderr.toString());
   });
 
-  test('schema v12와 순차 migration이 함께 있다', () {
+  test('schema 최신 버전과 순차 migration이 함께 있다', () {
     final schema = File('../db/schema.sql').readAsStringSync();
-    final migration = File('../db/migrate_v11_to_v12.sql').readAsStringSync();
-    expect(schema, contains('VALUES (1, 12, NOW(6))'));
+    // 최신 버전은 schema.sql 이 정한다. 올릴 때마다 여기와 migration 이 함께
+    // 움직여야 한다 — 하나만 올리면 앱이 뜨면서 버전이 안 맞는다고 멈춘다.
+    expect(schema, contains('VALUES (1, 13, NOW(6))'));
     expect(schema, contains('map_project_simulation_settings'));
     expect(schema, contains('map_project_robot_simulation'));
-    expect(migration, contains('VALUES (1, 12, NOW(6))'));
+    expect(schema, contains('workcell_policies'));
+    expect(
+      File('../db/migrate_v11_to_v12.sql').readAsStringSync(),
+      contains('VALUES (1, 12, NOW(6))'),
+    );
+    final latest = File('../db/migrate_v12_to_v13.sql').readAsStringSync();
+    expect(latest, contains('VALUES (1, 13, NOW(6))'));
+    expect(latest, contains('CREATE TABLE IF NOT EXISTS `workcell_policies`'));
   });
 }

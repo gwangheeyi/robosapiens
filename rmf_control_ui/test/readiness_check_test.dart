@@ -62,6 +62,13 @@ void main() {
       marginMeters: 1,
     ),
     int? clockPublishers = 1,
+    // 지도 서버는 켜져 있는 것이 정상이다. 여기가 꺼지면 AMCL 이 map TF 를
+    // 못 내고 로봇이 RMF 에 못 붙는다 — 그 사슬은
+    // `map_server_lifecycle_test.dart` 가 따로 지킨다.
+    String? mapServerState = 'active',
+    // 기본값은 기다려 주는 시간을 한참 지난 값이다. 대부분의 시험은 다 뜬
+    // 뒤의 상태를 본다.
+    Duration? backendUptime = const Duration(minutes: 5),
   }) => buildReadinessReport(
     waypointNames: waypoints,
     robots: robots,
@@ -71,16 +78,20 @@ void main() {
     attachedRobots: attached,
     alignment: alignment,
     clockPublishers: clockPublishers,
+    mapServerState: mapServerState,
+    backendUptime: backendUptime,
   );
 
   ReadinessCheck find(ReadinessReport r, String title) =>
       r.checks.firstWhere((check) => check.title == title);
 
   group('다 됐을 때', () {
-    test('여덟 단계가 다 초록이다', () {
+    test('아홉 단계가 다 초록이다', () {
+      // 여덟에서 아홉이 되었다. `Nav2 지도 서버` 가 늘었다 — 여기가 꺼져 있는
+      // 것을 여태 맨 끝(`어댑터가 죽었습니다`)으로만 봤다.
       final r = report();
       expect(r.isReady, isTrue);
-      expect(r.checks, hasLength(8));
+      expect(r.checks, hasLength(9));
       expect(r.firstBlocked, isNull);
       expect(r.summary, contains('작업을 낼 수 있습니다'));
     });
@@ -108,6 +119,42 @@ void main() {
       expect(adapter.detail, contains('/fleet_states'));
       // RViz 가 왜 비는지도 같이 짚어 준다.
       expect(adapter.detail, contains('RViz'));
+    });
+
+    test('막 띄운 백엔드는 아직 안 온 것이지 죽은 것이 아니다', () {
+      // 어댑터는 Gazebo·RMF core 다음에 붙는다. 실측 32초.
+      final r = report(
+        fleetReachable: false,
+        attached: const {},
+        backendUptime: const Duration(seconds: 20),
+      );
+      final adapter = find(r, 'RMF↔Nav2 어댑터');
+      expect(adapter.state, ReadinessState.unknown);
+      expect(adapter.detail, contains('아직'));
+      expect(adapter.detail, isNot(contains('죽었습니다')));
+      // 모르는 단계가 있으면 다 됐다고 하지 않는다.
+      expect(r.isReady, isFalse);
+      // 그리고 빨간불이 아니므로 `여기부터 손대라` 로 짚지도 않는다.
+      expect(r.firstBlocked, isNull);
+    });
+
+    test('기다려 주는 시간이 지나도 안 오면 그때는 죽은 것이다', () {
+      final r = report(
+        fleetReachable: false,
+        attached: const {},
+        backendUptime: adapterStartupGrace + const Duration(seconds: 1),
+      );
+      expect(find(r, 'RMF↔Nav2 어댑터').state, ReadinessState.blocked);
+    });
+
+    test('언제 떴는지 모르면 기다려 주지 않는다', () {
+      // 기다려 주는 쪽으로 기울면 죽은 어댑터가 영영 `아직` 으로 남는다.
+      final r = report(
+        fleetReachable: false,
+        attached: const {},
+        backendUptime: null,
+      );
+      expect(find(r, 'RMF↔Nav2 어댑터').state, ReadinessState.blocked);
     });
   });
 

@@ -15,13 +15,18 @@ class RobotTelemetryBridge {
 
   Set<String> get attachedRobotIds => const {};
 
+  DateTime? get fleetStatesAt => null;
+
   bool get subscribing => false;
 
   Map<String, RobotPose> get poses => const {};
 
   RobotTelemetryStatus get status => RobotTelemetryStatus.idle;
 
-  Future<void> sync(Iterable<RmfProjectRobot> robots) async {}
+  Future<void> sync(
+    Iterable<RmfProjectRobot> robots, {
+    required int rosDomainId,
+  }) async {}
 
   Future<void> stop() async {}
 }

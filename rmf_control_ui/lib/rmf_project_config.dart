@@ -193,6 +193,27 @@ class RmfProjectRobot {
     rosDomainId: rosDomainId,
   );
 
+  /// 설 자리만 바꾼 사본. 좌표는 비운다.
+  ///
+  /// 자리가 바뀌면 옛 좌표는 거짓이다. 남겨 두면 등록에는 새 자리 이름이
+  /// 적혀 있는데 좌표는 옛 자리인 상태가 되고, 산출물에 나가는 것은 좌표다 —
+  /// 팔은 옛 자리에 서고 핑키만 새 자리로 간다. 좌표는 지도에서 다시 넣는다
+  /// ([robotsWithMapSpawnPoints]).
+  RmfProjectRobot withStation(String? station) => RmfProjectRobot(
+    robotId: robotId,
+    displayName: displayName,
+    model: model,
+    gzName: gzName,
+    zones: zones,
+    kind: kind,
+    dataSource: dataSource,
+    chargerWaypoint: station,
+    spawnX: null,
+    spawnY: null,
+    spawnHeading: spawnHeading,
+    rosDomainId: rosDomainId,
+  );
+
   bool get isMobile => kind == RmfRobotKind.mobile;
 
   /// Gazebo 에 올릴 로봇인가. Mock 은 앱 안에만 있고, 실물은 이미 있다.
@@ -1161,6 +1182,27 @@ enable_extension('isaacsim.ros2.bridge')
 open_stage(args.stage)
 app.update()
 
+import omni.graph.core as og
+try:
+    og.Controller.edit(
+        {'graph_path': '/World/ROS2Clock', 'evaluator_name': 'execution'},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ('Tick', 'omni.graph.action.OnPlaybackTick'),
+                ('SimTime', 'isaacsim.core.nodes.IsaacReadSimulationTime'),
+                ('PublishClock', 'isaacsim.ros2.bridge.ROS2PublishClock'),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ('Tick.outputs:tick', 'PublishClock.inputs:execIn'),
+                ('SimTime.outputs:simulationTime', 'PublishClock.inputs:timeStamp'),
+            ],
+        },
+    )
+except Exception as error:
+    if 'already exists' not in str(error):
+        raise
+app.update()
+
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 try:
@@ -1169,6 +1211,122 @@ try:
 finally:
     timeline.stop()
     app.close()
+''';
+
+/// Gazebo가 생성한 건물 OBJ와 로봇 URDF를 Isaac USD stage로 묶는다.
+String buildIsaacConversionScript({required String mapName}) =>
+    '''#!/usr/bin/env python3
+import argparse
+import os
+import re
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--map-dir', required=True)
+parser.add_argument('--stage', required=True)
+args = parser.parse_args()
+
+from isaacsim import SimulationApp
+app = SimulationApp({'headless': True})
+
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from isaacsim.asset.importer.urdf.impl import URDFImporter, URDFImporterConfig
+
+def safe_name(value):
+    return re.sub(r'[^A-Za-z0-9_]', '_', value)
+
+def read_obj(path, stage, prim_path):
+    points, counts, indices = [], [], []
+    with open(path, encoding='utf-8', errors='replace') as handle:
+        for raw in handle:
+            line = raw.strip()
+            if line.startswith('v '):
+                points.append(Gf.Vec3f(*(float(v) for v in line.split()[1:4])))
+            elif line.startswith('f '):
+                face = [int(v.split('/')[0]) - 1 for v in line.split()[1:]]
+                if len(face) >= 3:
+                    counts.append(len(face))
+                    indices.extend(face)
+    if not points or not counts:
+        raise RuntimeError(f'OBJ에 형상이 없습니다: {path}')
+    mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    mesh.CreatePointsAttr(points)
+    mesh.CreateFaceVertexCountsAttr(counts)
+    mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreateSubdivisionSchemeAttr('none')
+    UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+
+def yaml_value(path, key, default=''):
+    pattern = re.compile(r'^' + re.escape(key) + r':\\s*(.*?)\\s*(?:#.*)?\$')
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            match = pattern.match(line)
+            if match:
+                return match.group(1).strip()
+    return default
+
+def ros_packages_for(urdf_path):
+    with open(urdf_path, encoding='utf-8') as handle:
+        packages = sorted(set(re.findall(r'package://([^/]+)/', handle.read())))
+    prefixes = [p for p in os.environ.get('AMENT_PREFIX_PATH', '').split(':') if p]
+    resolved = []
+    for package in packages:
+        for prefix in prefixes:
+            path = os.path.join(prefix, 'share', package)
+            if os.path.isdir(path):
+                resolved.append({'name': package, 'path': path})
+                break
+        else:
+            raise RuntimeError(f'URDF package를 찾지 못했습니다: {package}')
+    return resolved
+
+stage_path = os.path.abspath(args.stage)
+os.makedirs(os.path.dirname(stage_path), exist_ok=True)
+stage = Usd.Stage.CreateNew(stage_path)
+world = UsdGeom.Xform.Define(stage, '/World')
+stage.SetDefaultPrim(world.GetPrim())
+UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+UsdPhysics.Scene.Define(stage, '/World/PhysicsScene')
+
+mesh_dir = os.path.join(args.map_dir, 'generated_models', '${mapName}_L1', 'meshes')
+for name in ('floor_1.obj', 'wall_1.obj'):
+    source = os.path.join(mesh_dir, name)
+    if not os.path.isfile(source):
+        raise RuntimeError(f'Gazebo 건물 메시가 없습니다: {source}')
+    read_obj(source, stage, '/World/Environment/' + safe_name(name))
+
+robots_dir = os.path.join(args.map_dir, 'robots')
+urdf_dir = os.path.join(args.map_dir, 'isaac', 'robots')
+asset_dir = os.path.join(args.map_dir, 'isaac', 'assets')
+os.makedirs(asset_dir, exist_ok=True)
+if os.path.isdir(urdf_dir):
+    for filename in sorted(os.listdir(urdf_dir)):
+        if not filename.endswith('.urdf'):
+            continue
+        robot_id = filename[:-5]
+        urdf = os.path.join(urdf_dir, filename)
+        config = URDFImporterConfig()
+        config.urdf_path = urdf
+        config.usd_path = os.path.join(asset_dir, robot_id)
+        config.ros_package_paths = ros_packages_for(urdf)
+        config.fix_base = False
+        config.make_default_prim = True
+        output = URDFImporter(config).import_urdf()
+        if not output or not os.path.isfile(output):
+            raise RuntimeError(f'URDF 변환 실패: {urdf}')
+        root = UsdGeom.Xform.Define(stage, '/World/Robots/' + safe_name(robot_id))
+        root.GetPrim().GetReferences().AddReference(output)
+        meta = os.path.join(robots_dir, robot_id, 'robot.yaml')
+        x = float(yaml_value(meta, 'spawn_x', '0') or 0)
+        y = float(yaml_value(meta, 'spawn_y', '0') or 0)
+        heading = float(yaml_value(meta, 'spawn_heading', '0') or 0)
+        transform = UsdGeom.Xformable(root)
+        transform.AddTranslateOp().Set(Gf.Vec3d(x, y, 0.0))
+        transform.AddRotateZOp().Set(heading * 180.0 / 3.141592653589793)
+
+stage.GetRootLayer().Save()
+print(f'Isaac USD 생성 완료: {stage_path}')
+app.close()
 ''';
 
 /// 프로젝트를 통째로 띄우는 셸 스크립트.
@@ -1233,6 +1391,43 @@ if [[ ! -f "\$RMF_WS/install/setup.bash" ]]; then
   echo "Open-RMF가 빌드되지 않았습니다: \$RMF_WS/install/setup.bash" >&2
   exit 1
 fi
+
+# ── 지난 실행이 남긴 DDS 공유메모리 정리 ──────────────────────────────────
+#
+# Fast DDS 는 참가자마다 `/dev/shm/fastrtps_*` 를 만든다. 곱게 끝나면 스스로
+# 지우지만, `kill -9` 로 끊기거나 매달린 채 남으면 그대로 쌓인다. 쌓이면
+# **탐색이 무너진다** — 노드는 살아 있는데 서비스가 안 보이고, 옆 노드는
+# 영영 기다린다.
+#
+# 실측(2026-08-17) —
+#
+#     /dev/shm 의 fastrtps_* 484개 (48MB), 그중 200개가 지난 실행 잔재
+#     [lifecycle_manager_map]: Waiting for service map_server/get_state...
+#     → map_server 는 살아 있는데 서비스가 안 보여 지도가 영영 안 켜졌다
+#
+# **도는 것이 있으면 손대지 않는다.** 살아 있는 참가자의 조각을 지우면 그
+# 노드가 통째로 먹통이 된다. 그래서 이 맵의 ROS 프로세스가 하나도 없을 때만
+# 치운다.
+sweep_stale_dds_segments() {
+  local alive
+  alive="\$(pgrep -u "\$(id -u)" -c -f 'gz sim|ros2 launch|nav2_|rmf_' \\
+    2>/dev/null || true)"
+  if [[ "\${alive:-0}" != 0 ]]; then
+    echo "ROS 프로세스가 도는 중이라 DDS 공유메모리는 건드리지 않습니다." >&2
+    return 0
+  fi
+  local segments
+  segments="\$(find /dev/shm -maxdepth 1 -user "\$(id -u)" \\
+    \\( -name 'fastrtps_*' -o -name 'fastdds_*' \\) 2>/dev/null | wc -l)"
+  if ((segments == 0)); then
+    return 0
+  fi
+  find /dev/shm -maxdepth 1 -user "\$(id -u)" \\
+    \\( -name 'fastrtps_*' -o -name 'fastdds_*' \\) -delete 2>/dev/null || true
+  echo "지난 실행이 남긴 DDS 공유메모리 \$segments 개를 정리했습니다." >&2
+  # 탐색 캐시를 들고 있는 데몬도 함께 내린다. 다음 물음에서 새로 뜬다.
+  ros2 daemon stop >/dev/null 2>&1 || true
+}
 
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="${_requiredPackages(robots).join(' ')}"
@@ -1376,6 +1571,34 @@ echo "시뮬레이션 백엔드: \$SIM_BACKEND · 시뮬레이터 창: \$SIMULAT
 # 실제 PGID 를 적어야 한다.
 PGID_FILE="\$MAP_DIR/.$mapName.pgid"
 ps -o pgid= -p \$\$ | tr -d ' ' > "\$PGID_FILE"
+
+# 배포가 남긴 Building Map Server 를 먼저 내린다.
+#
+# `deploy_map.sh` 는 배포를 마치고 `building_map_server` 하나를 **일부러 띄운
+# 채로** 끝난다(배포한 지도를 바로 볼 수 있게). 그런데 아래 launch 도 같은
+# 파일로 제 것을 띄운다. 그대로 두면 `/building_map_server` 라는 **같은 이름의
+# 노드가 둘**이 되고, `/get_building_map` 을 두 곳이 답한다. 누가 답할지는
+# 그때그때 다르다.
+#
+# 게다가 앱은 맵 디렉터리를 물고 있는 프로세스를 세어 백엔드가 도는지 본다.
+# 배포만 하고 아무것도 안 띄웠는데 그 서버 하나 때문에 `백엔드 실행 중` 이
+# 되어, 정작 띄우려 하면 이미 돈다고 한다.
+#
+# 배포한 지도는 이미 파일로 깔려 있고 아래에서 다시 읽는다. 여기서 내려도
+# 잃는 것이 없다.
+DEPLOY_MAP_SERVER_PID="\$APP_ROOT/openrmf/.runtime/building_map_server.pid"
+if [[ -f "\$DEPLOY_MAP_SERVER_PID" ]]; then
+  stale="\$(cat "\$DEPLOY_MAP_SERVER_PID" 2>/dev/null || true)"
+  if [[ -n "\$stale" ]] && kill -0 "\$stale" 2>/dev/null; then
+    echo "배포가 띄워 둔 Building Map Server(\$stale)를 내립니다 — 이 launch 가"
+    echo "같은 이름으로 제 것을 띄웁니다."
+    kill "\$stale" 2>/dev/null || true
+  fi
+  rm -f "\$DEPLOY_MAP_SERVER_PID"
+fi
+# pid 파일이 없어도 남아 있을 수 있다(앱이 아닌 곳에서 띄웠거나 파일을 지웠거나).
+pkill -u "\$(id -u)" -f \\
+  "/rmf_building_map_tools/building_map_server \$MAP_DIR/" 2>/dev/null || true
 
 cleanup() {
   echo "정리 중..."
@@ -1543,6 +1766,7 @@ ensure_world_collision_detector "\$MAP_DIR/$mapName.world"
 # 떠 있는 것과 물리가 도는 것은 다르다. use_sim_time 을 쓰는 RMF 노드는 /clock
 # 이 없으면 시간이 멈춘 줄 알고 그대로 멈춰 있는다.
 GAZEBO_WAIT="\${GAZEBO_WAIT:-90}"
+ISAAC_WAIT="\${ISAAC_WAIT:-300}"
 wait_for_gazebo() {
   local world="\$1"
   local deadline=\$((SECONDS + GAZEBO_WAIT))
@@ -1569,30 +1793,79 @@ start_simulator() {
       fi
       ;;
     isaac_sim)
-      local launcher="\${ISAAC_SIM_PYTHON:-\${ISAAC_SIM_ROOT:-\$HOME/isaacsim}/python.sh}"
+      local launcher="\${ISAAC_SIM_PYTHON:-}"
+      if [[ -z "\$launcher" ]]; then
+        local candidate
+        local candidates=(
+          "\${ISAAC_SIM_ROOT:+\$ISAAC_SIM_ROOT/python.sh}"
+          "\$HOME/isaacsim/python.sh"
+          "\$HOME/isaac/isaacsim/_build/linux-x86_64/release/python.sh"
+          "\$HOME/isaac/env_isaaclab/bin/python"
+        )
+        for candidate in "\${candidates[@]}"; do
+          if [[ -n "\$candidate" && -x "\$candidate" ]]; then
+            launcher="\$candidate"
+            break
+          fi
+        done
+      fi
       local script="\${ISAAC_PROJECT_SCRIPT:-\$MAP_DIR/isaac/start_$mapName.py}"
+      local converter="\${ISAAC_PROJECT_CONVERTER:-\$MAP_DIR/isaac/convert_$mapName.py}"
       local stage="\${ISAAC_STAGE:-\$MAP_DIR/isaac/$mapName.usd}"
       if [[ ! -x "\$launcher" ]]; then
-        echo "Isaac Sim Python 실행기를 찾지 못했습니다: \$launcher" >&2
-        echo "ISAAC_SIM_ROOT 또는 ISAAC_SIM_PYTHON을 지정하세요." >&2
+        echo "Isaac Sim Python 실행기를 찾지 못했습니다." >&2
+        echo "확인한 기본 위치: \$HOME/isaacsim, \$HOME/isaac/isaacsim, \$HOME/isaac/env_isaaclab" >&2
+        echo "다른 위치라면 ISAAC_SIM_ROOT 또는 ISAAC_SIM_PYTHON을 지정하세요." >&2
         return 1
       fi
-      if [[ ! -f "\$script" || ! -f "\$stage" ]]; then
+      echo "Isaac Sim Python: \$launcher"
+      if [[ ! -f "\$script" || ! -f "\$converter" ]]; then
         echo "Isaac Sim 프로젝트 산출물이 없습니다." >&2
         echo "필요한 파일: \$script" >&2
-        echo "필요한 파일: \$stage" >&2
+        echo "필요한 파일: \$converter" >&2
+        return 1
+      fi
+      local rebuild=false
+      [[ ! -f "\$stage" || "\$MAP_DIR/$mapName.world" -nt "\$stage" ]] && rebuild=true
+      local generator
+      for generator in "\$MAP_DIR"/robots/*/robot_description.sh; do
+        [[ -e "\$generator" ]] || continue
+        [[ "\$generator" -nt "\$stage" ]] && rebuild=true
+      done
+      if is_true "\$rebuild"; then
+        echo "Gazebo 맵·로봇을 Isaac USD로 자동 변환합니다."
+        mkdir -p "\$MAP_DIR/isaac/robots"
+        for generator in "\$MAP_DIR"/robots/*/robot_description.sh; do
+          [[ -e "\$generator" ]] || continue
+          local robot_id
+          robot_id="\$(basename "\$(dirname "\$generator")")"
+          bash "\$generator" > "\$MAP_DIR/isaac/robots/\$robot_id.urdf"
+        done
+        if ! "\$launcher" "\$converter" --map-dir "\$MAP_DIR" --stage "\$stage"; then
+          echo "Gazebo → Isaac USD 자동 변환에 실패했습니다." >&2
+          return 1
+        fi
+      fi
+      if [[ ! -f "\$stage" ]]; then
+        echo "Isaac USD가 생성되지 않았습니다: \$stage" >&2
         return 1
       fi
       local gui_arg="--headless"
       is_true "\$SIMULATOR_GUI" && gui_arg="--gui"
       echo "Isaac Sim bringup: \$stage"
       "\$launcher" "\$script" --stage "\$stage" "\$gui_arg" &
-      local deadline=\$((SECONDS + GAZEBO_WAIT))
+      local isaac_pid=\$!
+      local deadline=\$((SECONDS + ISAAC_WAIT))
       while ((SECONDS < deadline)); do
         timeout 5 ros2 topic echo /clock --once >/dev/null 2>&1 && return 0
+        if ! kill -0 "\$isaac_pid" 2>/dev/null; then
+          wait "\$isaac_pid" || true
+          echo "Isaac Sim 프로세스가 /clock 발행 전에 종료됐습니다." >&2
+          return 1
+        fi
         sleep 2
       done
-      echo "Isaac Sim이 \$GAZEBO_WAIT 초 안에 /clock을 발행하지 않았습니다." >&2
+      echo "Isaac Sim이 \$ISAAC_WAIT 초 안에 /clock을 발행하지 않았습니다." >&2
       return 1
       ;;
     none)
@@ -1602,6 +1875,8 @@ start_simulator() {
 }
 
 ${projectUsesNav2(robots) ? '''
+# 띄우기 전에 지난 실행의 잔재부터 치운다. 쌓인 조각은 탐색을 무너뜨린다.
+sweep_stale_dds_segments
 echo "[1/3] 시뮬레이션 백엔드"
 if ! start_simulator; then
   echo "" >&2
@@ -1635,6 +1910,114 @@ ADAPTER_HEALTH_GRACE="\${ADAPTER_HEALTH_GRACE:-120}"
 ADAPTER_HEALTH_INTERVAL="\${ADAPTER_HEALTH_INTERVAL:-30}"
 ADAPTER_HEALTH_FAILURES="\${ADAPTER_HEALTH_FAILURES:-3}"
 EXPECTED_FLEET_ROBOTS="${robots.where((robot) => robot.isMobile && robot.runsInGazebo).map((robot) => robot.robotId).join(' ')}"
+
+# ── 지도 서버가 정말 켜졌는지 ──────────────────────────────────────────────
+#
+# `map_server` 는 생명주기 노드다. `nav2_lifecycle_manager` 가 configure 로
+# 지도를 읽히고 activate 로 넘겨야 비로소 지도를 낸다.
+#
+# **그 사이가 끊어진다.** 관리자가 부르는 `change_state` 의 응답 시한이 5초로
+# **코드에 박혀 있다** — 파라미터가 없어 늘릴 수 없다(`ros2 param list
+# /lifecycle_manager_map` 에 `service_timeout` 이 없다). 기계가 바쁘면 지도를
+# 읽는 데 5초가 넘고, map_server 는 제대로 configure 를 마쳤는데 응답만 늦게
+# 간다. 관리자는 그것을 실패로 보고 **거기서 멈춘다. 다시 시도하지 않는다.**
+#
+#     [map_server.rclcpp]: failed to send response to /map_server/change_state
+#                          (timeout): client will not receive response
+#
+# 그러면 map_server 가 inactive 로 남고, 증상은 세 단계 떨어진 곳에 뜬다 —
+#
+#     amcl:            Waiting for map....
+#     global_costmap:  Invalid frame ID "map" ... frame does not exist
+#     어댑터:          TF 를 못 읽어 로봇을 등록 못 함
+#     화면:            "rmf-nav2 연결 실패"
+#
+# 어댑터를 아무리 다시 띄워도 소용없다. 지도가 없는 한 등록할 수 없다.
+# 그래서 어댑터를 탓하기 전에 여기부터 본다. 그리고 멈춰 있으면 **직접
+# 넘긴다** — 관리자가 안 하는 일을 대신 하는 것이라 안전하다.
+#
+# 생명주기 전이 번호: 1=configure 2=cleanup 3=activate 4=deactivate
+MAP_SERVER_WAIT="\${MAP_SERVER_WAIT:-90}"
+
+# ── 지난 실행이 남긴 지도 서버 문의 정리 ─────────────────────────────────
+#
+# `ros2 service call` 은 상대가 없으면 **영원히 기다린다.** 지금은 `timeout` 을
+# 씌우지만, 그것이 없던 판으로 띄운 것이 남아 있으면 계속 매달린 채로 같은
+# 도메인을 쓴다 — 실측(2026-08-17) 세 개가 30분 넘게 남아 있었다.
+#
+# **`ros2 service call` 을 통째로 죽이지 않는다.** 사람이 터미널에서 다른
+# 서비스를 부르고 있을 수 있다. 우리가 부르는 그 서비스 이름만 고르고, 지금 이
+# 스크립트의 프로세스 그룹은 건드리지 않는다(우리 것은 timeout 이 거둔다).
+sweep_stale_map_server_calls() {
+  local mine killed=0 pid pgid
+  mine="\$(ps -o pgid= -p \$\$ 2>/dev/null | tr -d ' ')"
+  for pid in \$(pgrep -u "\$(id -u)" -f \\
+      'ros2 service call /map_server/' 2>/dev/null || true); do
+    pgid="\$(ps -o pgid= -p "\$pid" 2>/dev/null | tr -d ' ')"
+    if [[ -z "\$pgid" || "\$pgid" == "\$mine" ]]; then
+      continue
+    fi
+    if kill "\$pid" 2>/dev/null; then
+      killed=\$((killed + 1))
+    fi
+  done
+  if ((killed > 0)); then
+    echo "지난 실행이 남긴 지도 서버 문의 \$killed 개를 정리했습니다." >&2
+  fi
+  return 0
+}
+
+map_server_state() {
+  timeout 15 ros2 service call /map_server/get_state \\
+      lifecycle_msgs/srv/GetState 2>/dev/null \\
+    | grep -o "label='[a-z]*'" | tail -1 | cut -d"'" -f2
+}
+map_server_transition() {
+  timeout 25 ros2 service call /map_server/change_state \\
+    lifecycle_msgs/srv/ChangeState "{transition: {id: \$1}}" >/dev/null 2>&1
+}
+# 켜져 있으면 0. 켰으면 0. 아직 못 켜면 1.
+ensure_map_server_active() {
+  local state
+  state="\$(map_server_state)"
+  case "\$state" in
+    active) return 0 ;;
+    '') return 1 ;;
+    unconfigured|finalized)
+      echo "지도 서버가 [\$state] 입니다. 지도를 읽힙니다." >&2
+      map_server_transition 1
+      sleep 2
+      state="\$(map_server_state)"
+      ;;
+  esac
+  [ "\$state" = inactive ] || return 1
+  echo "지도 서버가 [inactive] 에 멈춰 있습니다. 직접 켭니다." >&2
+  echo "(생명주기 관리자의 5초 시한을 넘겨 activate 가 오지 않았습니다.)" >&2
+  map_server_transition 3
+  sleep 2
+  if [ "\$(map_server_state)" = active ]; then
+    echo "지도 서버를 켰습니다. AMCL 이 지도를 받습니다." >&2
+    return 0
+  fi
+  return 1
+}
+watch_map_server() {
+  # 묻기 전에 지난 실행이 남긴 문의부터 거둔다.
+  sweep_stale_map_server_calls
+  local deadline=\$((SECONDS + MAP_SERVER_WAIT))
+  while ((SECONDS < deadline)); do
+    ensure_map_server_active && return 0
+    sleep 3
+  done
+  echo "" >&2
+  echo "지도 서버를 \$MAP_SERVER_WAIT 초 안에 켜지 못했습니다." >&2
+  echo "지도가 없으면 AMCL 이 map → <로봇>/odom 을 못 내고, 어댑터는 로봇의" >&2
+  echo "위치를 몰라 플릿에 등록하지 못합니다. 화면에는 연결 실패로만 보입니다." >&2
+  echo "지도 파일을 확인하세요: \$MAP_DIR/nav2_map/$mapName.yaml" >&2
+  echo "오류만 모은 것: \$ERR_FILE" >&2
+  return 1
+}
+
 watch_fleet_adapter() {
   local pattern="\$MAP_DIR/${mapName}_nav2_adapter.py"
   local deadline=\$((SECONDS + ADAPTER_WAIT))
@@ -1673,6 +2056,16 @@ watch_fleet_adapter() {
           fi
         done
         if ((missing)); then
+          # 어댑터를 탓하기 전에 지도부터 본다. 지도 서버가 꺼져 있으면 AMCL 이
+          # map TF 를 못 내고, 어댑터는 로봇 위치를 몰라 **영원히** 등록하지
+          # 못한다. 그 상태에서 어댑터만 다시 띄우면 30초마다 되풀이될 뿐이다.
+          if ! ensure_map_server_active; then
+            echo "지도 서버가 아직 안 켜져 있습니다. 어댑터는 그대로 둡니다 —" >&2
+            echo "지도가 없으면 몇 번을 다시 띄워도 등록할 수 없습니다." >&2
+            failed_health=0
+            sleep 5
+            continue
+          fi
           failed_health=\$((failed_health + 1))
           if ((failed_health >= ADAPTER_HEALTH_FAILURES)); then
             echo "fleet 등록 확인이 \$failed_health 회 연속 실패했습니다. 어댑터를 재기동합니다." >&2
@@ -1725,8 +2118,12 @@ watch_fleet_adapter() {
 #
 # RMF core 다음이라야 한다. 어댑터는 뜨자마자 schedule node 를 찾는다.
 echo "[3/3] Nav2 와 RMF 어댑터"
+# 지도 서버를 먼저 지킨다. 어댑터 감시자보다 앞이라야 한다 — 어댑터가 등록에
+# 실패하는 첫 이유가 지도가 없어서이기 때문이다.
+watch_map_server &
 watch_fleet_adapter &
 ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml"''' : '''
+sweep_stale_dds_segments
 echo "[1/2] 시뮬레이션 백엔드"
 if ! start_simulator; then
   echo "" >&2
@@ -1953,6 +2350,35 @@ if [[ -n "\$remaining_zombies" ]]; then
   echo "오류: $mapName 관련 좀비 프로세스가 남았습니다:" >&2
   echo "\$remaining_zombies" >&2
   exit 1
+fi
+
+# 배포가 남긴 Building Map Server 도 함께 내린다.
+#
+# 그것은 이 프로젝트의 프로세스 그룹 밖에 있어서 위의 그룹 끊기로는 안 죽는다.
+# 남겨 두면 앱이 맵 디렉터리를 물고 있는 프로세스를 세다가 **백엔드가 아직
+# 돈다** 고 보고, 화면에서 백엔드가 영영 안 내려간 것처럼 보인다.
+DEPLOY_MAP_SERVER_PID="\$APP_ROOT/openrmf/.runtime/building_map_server.pid"
+if [[ -f "\$DEPLOY_MAP_SERVER_PID" ]]; then
+  stale="\$(cat "\$DEPLOY_MAP_SERVER_PID" 2>/dev/null || true)"
+  if [[ -n "\$stale" ]] && kill -0 "\$stale" 2>/dev/null; then
+    kill "\$stale" 2>/dev/null || true
+  fi
+  rm -f "\$DEPLOY_MAP_SERVER_PID"
+fi
+pkill -u "\$(id -u)" -f \\
+  "/rmf_building_map_tools/building_map_server \$MAP_DIR/" 2>/dev/null || true
+
+# 지도 서버 상태를 묻던 `ros2 service call` 이 남아 있으면 상대가 사라진 뒤에도
+# **영원히 기다린다.** 실측(2026-08-17) 세 개가 30분 넘게 매달려 있었다.
+#
+# 우리가 부르는 그 서비스 이름만 고른다 — `ros2 service call` 을 통째로 죽이면
+# 사람이 터미널에서 부르던 것까지 함께 죽는다.
+stale_calls="\$(pgrep -u "\$(id -u)" -f 'ros2 service call /map_server/' \\
+  2>/dev/null | tr '\\n' ' ' || true)"
+if [[ -n "\${stale_calls// /}" ]]; then
+  # shellcheck disable=SC2086
+  kill \$stale_calls 2>/dev/null || true
+  echo "매달려 있던 지도 서버 문의를 정리했습니다: \$stale_calls"
 fi
 
 echo "$mapName 프로젝트 프로세스를 정리했습니다."
@@ -2409,9 +2835,19 @@ from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from rmf_dispenser_msgs.msg import DispenserRequest, DispenserRequestItem, DispenserResult
+from rmf_fleet_msgs.msg import FleetState
+from rmf_task_msgs.msg import ApiRequest
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from std_msgs.msg import String as StringMsg
 import tf2_ros
+
+# 워크셀이 실패라고 답했을 때 다시 물어보는 횟수.
+#
+# 실패가 늘 영구적인 것은 아니다. 로봇이 도착 직후 마지막 자세를 다듬는 동안
+# 걸리면, 몇 초 뒤에는 멀쩡히 된다. 한 번 실패했다고 작업을 접으면 멀쩡한
+# 픽업이 버려진다.
+WORKCELL_RETRIES = 3
+WORKCELL_RETRY_SECONDS = 5.0
 
 # 진행 상황을 내보내는 자리. 앱이 이것을 읽어 단계를 넘긴다.
 #
@@ -2482,8 +2918,26 @@ class RobotAdapter:
         self.dispenser_execution = None
         self.dispenser_request_guid = None
         self.dispenser_target_guid = None
+        self.dispenser_item = 'policy_1'
+        self.dispenser_quantity = 1
+        self.dispenser_attempt = 0
+
+        # 워크셀이 끝내 안 되면 작업을 취소해야 한다. 취소하려면 작업 번호가
+        # 필요한데, 그것은 우리가 만든 것이 아니라 RMF 가 붙인 것이다.
+        # `/fleet_states` 에 실려 오므로 여기서 받아 둔다.
+        self.current_task_id = ''
+        self.task_api = node.create_publisher(
+            ApiRequest, 'task_api_requests', request_qos)
+        self.fleet_state_subscription = node.create_subscription(
+            FleetState, '/fleet_states', self.on_fleet_state, 10)
         # pybind C++가 콜백을 사용하는 동안 Python 객체가 회수되지 않게 한다.
         self.callbacks = self.make_callbacks()
+
+    def on_fleet_state(self, msg):
+        for robot in msg.robots:
+            if robot.name == self.name:
+                self.current_task_id = robot.task_id
+                return
 
     # ── RMF 가 부르는 쪽 ────────────────────────────────────────────────
 
@@ -2621,17 +3075,33 @@ class RobotAdapter:
             execution.finished()
             return
 
-        request_guid = f'{self.name}-{uuid.uuid4()}'
         with self.lock:
             self.execution = execution
             self.dispenser_execution = execution
-            self.dispenser_request_guid = request_guid
             self.dispenser_target_guid = str(target_guid)
-        self.node.get_logger().info(
-            f'[{self.name}] 동작 [{category}] → 워크셀 [{target_guid}] 요청 '
-            f'({request_guid})')
+            self.dispenser_item = item_type
+            self.dispenser_quantity = quantity
+            self.dispenser_attempt = 0
         report(robot=self.name, event='action_start',
                category=category, seconds=seconds)
+        self.send_workcell_request()
+
+    def send_workcell_request(self):
+        """워크셀에 적재를 부탁한다. 다시 부탁할 때도 여기로 온다."""
+        request_guid = f'{self.name}-{uuid.uuid4()}'
+        with self.lock:
+            if self.dispenser_execution is None:
+                return
+            self.dispenser_request_guid = request_guid
+            self.dispenser_attempt += 1
+            attempt = self.dispenser_attempt
+            target_guid = self.dispenser_target_guid
+            item_type = self.dispenser_item
+            quantity = self.dispenser_quantity
+        again = '' if attempt == 1 else f' (다시 {attempt - 1}번째)'
+        self.node.get_logger().info(
+            f'[{self.name}] 동작 [armLoad] → 워크셀 [{target_guid}] 요청'
+            f'{again} ({request_guid})')
         request = DispenserRequest()
         request.time = self.node.get_clock().now().to_msg()
         request.request_guid = request_guid
@@ -2645,30 +3115,95 @@ class RobotAdapter:
         self.dispenser_requests.publish(request)
 
     def on_dispenser_result(self, result):
+        """워크셀의 답. 셋 중 하나이고, **셋 다 반드시 처리해야 한다.**
+
+        예전에는 실패를 오류로 적고 그냥 돌아갔다. 그러면 RMF 는 이 동작이
+        끝나기를 영원히 기다리고 로봇은 그 자리에 선 채로 남는다 — 오류
+        팝업도 안 뜨고, 로그를 열어 보기 전에는 아무도 모른다. 2026-08-17 에
+        핑키가 픽업3 에서 그렇게 멈춰 있었다.
+        """
         with self.lock:
             if (result.request_guid != self.dispenser_request_guid or
                     self.dispenser_execution is None):
                 return
+            target = self.dispenser_target_guid
             if result.status == DispenserResult.ACKNOWLEDGED:
                 self.node.get_logger().info(
-                    f'[{self.name}] 워크셀 [{self.dispenser_target_guid}]이 '
-                    '요청을 받았습니다.')
+                    f'[{self.name}] 워크셀 [{target}]이 요청을 받았습니다.')
                 return
-            if result.status != DispenserResult.SUCCESS:
-                self.node.get_logger().error(
-                    f'[{self.name}] 워크셀 요청 실패 (status={result.status})')
-                return
-            execution = self.dispenser_execution
-            target = self.dispenser_target_guid
-            self.dispenser_execution = None
+            attempt = self.dispenser_attempt
+            retry = (result.status != DispenserResult.SUCCESS
+                     and attempt <= WORKCELL_RETRIES)
             self.dispenser_request_guid = None
-            self.dispenser_target_guid = None
-            if self.execution is execution:
-                self.execution = None
-        self.node.get_logger().info(
-            f'[{self.name}] 워크셀 [{target}] 동작 완료.')
-        report(robot=self.name, event='action_done', category='armLoad')
-        execution.finished()
+            if retry:
+                # 다시 부탁할 것이라 execution 은 그대로 쥐고 있는다.
+                execution = None
+            else:
+                execution = self.dispenser_execution
+                self.dispenser_execution = None
+                self.dispenser_target_guid = None
+                if self.execution is execution:
+                    self.execution = None
+
+        # 락 밖에서 알린다. 여기서 부르는 것들이 다시 락을 잡는다.
+        if result.status == DispenserResult.SUCCESS:
+            self.node.get_logger().info(f'[{self.name}] 워크셀 [{target}] 동작 완료.')
+            report(robot=self.name, event='action_done', category='armLoad')
+            execution.finished()
+            return
+
+        self.node.get_logger().error(
+            f'[{self.name}] 워크셀 [{target}] 요청 실패 (status={result.status})')
+        if retry:
+            # 늘 영구적인 실패가 아니다. 로봇이 도착 직후 마지막 자세를 다듬는
+            # 동안 걸리면 몇 초 뒤에는 멀쩡히 된다. 한 번 실패했다고 작업을
+            # 접으면 멀쩡한 픽업이 버려진다.
+            self.node.get_logger().warning(
+                f'[{self.name}] {WORKCELL_RETRY_SECONDS:.0f}초 뒤에 다시 '
+                f'부탁합니다 ({attempt}/{WORKCELL_RETRIES}).')
+            self.retry_workcell_later()
+            return
+        self.node.get_logger().error(
+            f'[{self.name}] 워크셀 [{target}] 요청이 {WORKCELL_RETRIES}번 다시 '
+            '부탁해도 계속 실패했습니다. 작업을 취소합니다 — 그냥 두면 로봇이 '
+            '그 자리에 영원히 서 있습니다.')
+        report(robot=self.name, event='action_failed', category='armLoad')
+        self.cancel_current_task()
+
+    def retry_workcell_later(self):
+        """조금 뒤에 다시 부탁한다. 콜백 안에서 자므로 타이머를 쓴다."""
+        timer = None
+
+        def again():
+            timer.cancel()
+            self.send_workcell_request()
+
+        timer = self.node.create_timer(WORKCELL_RETRY_SECONDS, again)
+
+    def cancel_current_task(self):
+        """이 로봇이 하던 RMF 작업을 취소한다.
+
+        RMF 에 "이 동작이 실패했다" 고 말할 방법이 없다 — EasyFullControl 의
+        `CommandExecution` 에는 `finished()` 만 있고 `okay()` 는 읽기 전용이다
+        (RMF 가 우리에게 알리는 쪽이다). `finished()` 를 부르면 성공한 척이
+        되어 빈 수납함으로 다음 자리에 간다.
+
+        그래서 작업을 취소한다. 로봇이 풀려나고, 화면에도 취소로 보인다.
+        아무 말 없이 서 있는 것보다 낫다.
+        """
+        task_id = self.current_task_id
+        if not task_id:
+            self.node.get_logger().error(
+                f'[{self.name}] 취소할 작업 번호를 모릅니다. 로봇이 이 자리에 '
+                '남습니다 — 화면에서 작업을 취소해 주세요.')
+            return
+        request = ApiRequest()
+        request.request_id = f'{self.name}-cancel-{str(uuid.uuid4())[:8]}'
+        request.json_msg = json.dumps(
+            {'type': 'cancel_task', 'task_id': task_id}, ensure_ascii=False)
+        self.task_api.publish(request)
+        self.node.get_logger().error(
+            f'[{self.name}] 작업 [{task_id}] 취소를 보냈습니다.')
 
     # ── RMF 에 알리는 쪽 ────────────────────────────────────────────────
 
@@ -2988,6 +3523,9 @@ String buildProjectNav2LaunchXml({
 /// null 을 돌려주고, 그런 로봇은 건드리지 않는다 — 지도가 아직 안 올라왔을 수
 /// 있고, 그때 지워 버리면 멀쩡한 등록이 좌표를 잃는다.
 ///
+/// **설비 로봇은 언제나 자리 Waypoint 를 따라온다.** 이동 로봇만 등록해 둔 유효한
+/// 시작 좌표를 지킨다. 까닭은 아래 `hasExplicitSpawn` 자리에 적었다.
+///
 /// 바꿀 것이 없으면 받은 목록을 그대로 돌려준다. 부르는 쪽이 `identical` 로
 /// 달라졌는지 가려서 쓸데없이 다시 그리거나 저장하지 않게 한다.
 List<RmfProjectRobot> robotsWithMapSpawnPoints(
@@ -3009,8 +3547,17 @@ List<RmfProjectRobot> robotsWithMapSpawnPoints(
     // 선택한 것이다. 충전은 작업 후 복귀 지점이고 spawn은 Gazebo 최초 위치라
     // 둘이 같을 필요가 없다. 예전 좌표계 버그는 화면 y를 그대로 저장해 spawnY가
     // 양수였으므로 그 값만 아래에서 현재 지도 기준으로 교정한다.
+    //
+    // **이동 로봇만 그렇다.** 설비 로봇은 그 Waypoint 에 붙박여 있어서 "따로 고른
+    // 시작 자리" 라는 것이 없다. 등록 좌표와 설비 Waypoint 가 다르면 둘 중 하나는
+    // 거짓이고, 배포에 나가는 것은 등록 좌표다 — 설비 Waypoint 를 옮겨 팔을 떼어
+    // 놓았는데 팔이 옛 자리에 그대로 서는 것이 이 예외 때문이었다. 그때 `자리
+    // 맞추기` 는 여기서 막혀 0대를 고치고도 고쳤다고 말했다.
     final hasExplicitSpawn =
-        robot.spawnX != null && robot.spawnY != null && robot.spawnY! <= 0;
+        robot.isMobile &&
+        robot.spawnX != null &&
+        robot.spawnY != null &&
+        robot.spawnY! <= 0;
     if (hasExplicitSpawn) {
       result.add(robot);
       continue;
@@ -3507,6 +4054,64 @@ String buildRobotSpawnLaunchXml(RmfProjectRobot robot) {
 /// 통째로 굳는다.
 ///
 /// 그래서 펼친 URDF 에 네임스페이스를 끼워 넣는다.
+/// 핑키에 카메라를 달 것인가. **안 단다.**
+///
+/// 벤더 xacro 는 1280×720 을 30Hz 로, 그것도 `always_on` 으로 돌린다. 라이다를
+/// 살리려고 월드에 `gz::sim::systems::Sensors` 를 넣은 뒤로는 그 카메라가 매
+/// 프레임 렌더되기 시작했다.
+///
+/// 실측(2026-08-17, project1-ver2 월드) —
+///
+///     real_time_factor: 0.16      시뮬이 실시간의 16% 로 돈다
+///     gz sim 서버 107% CPU        GUI 70% CPU
+///
+/// **그런데 그 그림을 받는 곳이 하나도 없다.** `<맵>_gz_bridge.yaml` 에 카메라
+/// 항목이 없어 ROS 로 넘어오지도 않고, `<맵>_sensor_relay.py` 는 `/scan` 만
+/// 구독한다. 아무도 안 보는 그림을 그리느라 시뮬이 1/6 속도로 돈 것이다.
+///
+/// 그래서 아예 안 단다. 카메라가 필요해지면 그때는 브리지와 릴레이까지 함께
+/// 손봐야 하고, 급하면 생성된 `robot_description.sh` 에 `CAM_ENABLED=1` 로
+/// 되살릴 수 있다 — 그때도 아래 값(640×360·5Hz·`always_on` 0)으로 붙는다.
+const bool cameraEnabled = false;
+const int cameraWidth = 640;
+const int cameraHeight = 360;
+const int cameraHz = 5;
+
+/// 펼친 URDF 에서 카메라를 떼거나(기본) 값을 낮춰 다는 파이썬 조각.
+///
+/// `camera` (붙일지·너비·높이·주기·always_on) 와 `urdf` 가 이미 있다고 보고
+/// `urdf` 를 고쳐 놓는다. 스크립트 안에 박아 넣지 않고 따로 둔 것은, 이 조각만
+/// 떼어 실제 URDF 에 돌려 볼 수 있게 하기 위해서다.
+const String cameraTuningPython = r'''
+enabled, width, height, hz, always_on = camera
+
+
+def tune(match):
+    block = match.group(0)
+    block = re.sub(r'<width>\d+</width>',
+                   '<width>' + width + '</width>', block)
+    block = re.sub(r'<height>\d+</height>',
+                   '<height>' + height + '</height>', block)
+    block = re.sub(r'<update_rate>[^<]+</update_rate>',
+                   '<update_rate>' + hz + '</update_rate>', block)
+    block = re.sub(r'<always_on>[^<]+</always_on>',
+                   '<always_on>' + always_on + '</always_on>', block)
+    return block
+
+
+camera_block = r'<sensor[^>]*type="camera"[\s\S]*?</sensor>\s*'
+if enabled == '1':
+    urdf, touched = re.subn(camera_block, tune, urdf)
+else:
+    # 카메라를 떼어 낸다. 받는 곳이 없는 그림을 그리느라 시뮬이 느려진다.
+    urdf, touched = re.subn(camera_block, '', urdf)
+    # 센서가 빠져 껍데기만 남은 <gazebo reference="...camera..."> 도 걷어낸다.
+    urdf = re.sub(
+        r'<gazebo reference="[^"]*camera[^"]*">\s*</gazebo>\s*', '', urdf)
+if touched == 0:
+    sys.stderr.write('카메라 sensor 를 못 찾았습니다.\n')
+''';
+
 String buildRobotDescriptionScript(RmfProjectRobot robot) => robot.isMobile
     ? _buildMobileDescriptionScript(robot)
     : _buildWorkcellDescriptionScript(robot);
@@ -3546,6 +4151,18 @@ set -euo pipefail
 NAMESPACE="\${NAMESPACE:-${robot.gzName}}"
 CAM_TILT_DEG="\${CAM_TILT_DEG:-0}"
 
+# 핑키에 카메라를 달지. 기본은 안 단다 — 받는 곳이 없는 그림을 그리느라
+# 시뮬이 1/6 속도로 돌았다. 까닭과 실측은 rmf_project_config.dart 의
+# cameraEnabled 주석에 있다.
+CAM_ENABLED="\${CAM_ENABLED:-${cameraEnabled ? 1 : 0}}"
+
+# 되살릴 때 붙는 값.
+CAM_WIDTH="\${CAM_WIDTH:-$cameraWidth}"
+CAM_HEIGHT="\${CAM_HEIGHT:-$cameraHeight}"
+CAM_HZ="\${CAM_HZ:-$cameraHz}"
+# 1 로 두면 보는 사람이 없어도 계속 그린다. 벤더 값이 그렇다.
+CAM_ALWAYS_ON="\${CAM_ALWAYS_ON:-0}"
+
 XACRO="\$(ros2 pkg prefix pinky_description)"
 XACRO="\$XACRO/share/pinky_description/urdf/robot.urdf.xacro"
 
@@ -3560,13 +4177,19 @@ xacro "\$XACRO" \\
   is_sim:=true \\
   cam_tilt_deg:="\$CAM_TILT_DEG" > "\$RAW"
 
-python3 - "\$RAW" "\$NAMESPACE" <<'PYTHON'
+python3 - "\$RAW" "\$NAMESPACE" "\$CAM_ENABLED" "\$CAM_WIDTH" "\$CAM_HEIGHT" \\
+  "\$CAM_HZ" "\$CAM_ALWAYS_ON" <<'PYTHON'
 import re
 import sys
 
 path, namespace = sys.argv[1], sys.argv[2]
+camera = sys.argv[3:8]
 with open(path, encoding="utf-8") as handle:
     urdf = handle.read()
+
+# ── 카메라 ──────────────────────────────────
+# 기본은 안 단다. 까닭과 실측은 rmf_project_config.dart 의 cameraEnabled 주석.
+$cameraTuningPython
 
 links = set(re.findall('<link name="([^"]+)"', urdf))
 joints = set(re.findall('<joint name="([^"]+)"', urdf))
@@ -3735,8 +4358,22 @@ String buildWorkcellScript({
   required String mapName,
   required WorkcellPairingResult pairing,
   List<WorkcellPolicy> policies = const [],
+  Map<String, double> dockHeadings = const {},
+  Map<String, String> policyArchives = const {},
+  String policyRunnerPath = '',
 }) {
   final nodeName = _rosNodeName('${mapName}_workcell');
+  final archiveEntries = policyArchives.entries
+      .where((item) => item.value.trim().isNotEmpty)
+      .map((item) => "    '${item.key}': '${item.value}',")
+      .join('\n');
+  final headingEntries = dockHeadings.entries
+      .map(
+        (item) =>
+            "    '${item.key}': ${(item.value * math.pi / 180).toStringAsFixed(6)},"
+            '  # ${_n(item.value)}도',
+      )
+      .join('\n');
   final entries = pairing.pairings
       .map(
         (item) =>
@@ -3758,34 +4395,182 @@ rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다�
 
 답하지 않으면 RMF 는 영원히 기다린다. 오류는 안 난다 — 작업이 그 자리에서
 멈춰 있을 뿐이다.
+
+**시계로 판단하지 않는다.** 예전에는 관절 궤적을 토픽에 던지고 4초 뒤에
+성공을 알렸다. 던지고 끝이라 팔이 받았는지, 움직였는지, 끝냈는지 아무도 묻지
+않았다 — 팔이 느리든 막혔든 구독자가 아예 없든 똑같이 성공이었고, 핑키는 빈
+채로 떠났다. 지금은 세 가지를 **토픽으로 듣고** 정한다.
+
+    ① 로봇이 제자리에 제 자세로 섰나   /fleet_states
+    ② 팔이 궤적을 끝냈나               follow_joint_trajectory 액션 결과
+    ③ 팔이 정말 멈췄나                 <네임스페이스>/joint_states
+
+그리고 ①은 팔이 움직이는 **내내** 다시 본다. 적재 중에 로봇이 흔들리면 궤적을
+취소하고 실패로 답한다 — 움직이는 로봇에 물건을 올리지 않는다.
 """
 
+import math
+import os
+import subprocess
 import sys
 import threading
+import time
 
 import rclpy
 import rclpy.node
+from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 from builtin_interfaces.msg import Time
+from control_msgs.action import FollowJointTrajectory
 from rmf_dispenser_msgs.msg import DispenserRequest, DispenserResult, DispenserState
+from rmf_fleet_msgs.msg import FleetState
 from rmf_ingestor_msgs.msg import IngestorRequest, IngestorResult, IngestorState
+from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-# 로봇 ID, ROS 네임스페이스, 모델, 맡은 자리와 배포된 policy.
+# 로봇 ID, ROS 네임스페이스, 모델, 맡은 자리와 **이 팔에 붙인** policy.
+#
+# 팔마다 배운 것이 다르다. 프로젝트에 등록했다고 모든 팔이 쓰는 것이 아니라,
+# 로봇 관리에서 그 팔에 붙인 것만 여기 온다.
 WORKCELLS = [
 $entries
 ]
+
+# policy 별 학습 결과 ZIP. 러너가 이것을 풀어 쓴다.
+#
+# ZIP 은 git 에 올리지 않으므로 이 자리에 없을 수 있다. 없으면 아래 시험
+# 동작으로 대신하고, 앱의 `Policy 관리` 에서 다시 받으라고 로그에 남긴다.
+POLICY_ARCHIVES = {
+$archiveEntries
+}
+
+# 학습 policy 를 실제로 돌리는 러너. 같은 배포 산출물 안에 함께 나온다.
+#
+# **Gazebo 든 실물이든 같은 것을 쓴다.** 러너는 네임스페이스만 달리 받아
+# `/<네임스페이스>/joint_states` 를 보고 `/<네임스페이스>/arm_controller/
+# joint_trajectory` 로 낸다 — 시뮬과 실물의 차이는 그 토픽 뒤에 무엇이 붙어
+# 있느냐뿐이다.
+POLICY_RUNNER = '$policyRunnerPath'
+
+# 러너가 이 시간 안에 안 끝나면 끊고 실패로 답한다 [s, 벽시계].
+POLICY_TIMEOUT = 600.0
+
+# 러너가 남긴 말. 왜 추론이 안 돌았는지는 여기에 있다.
+POLICY_LOG = os.path.join(
+    os.path.dirname(POLICY_RUNNER) if POLICY_RUNNER else '.',
+    '${mapName}_policy_runner.log')
+
+# 자리마다 로봇이 볼 방향 [rad]. 맵 관리의 `적재 방향` 에서 온다.
+#
+# 핑키는 수납함을 뒤에 달고 다닌다. 들어온 그대로 서면 수납함이 팔에서 가장
+# 먼 자리에 온다. 그래서 그 자리로 가는 작업의 `go_to_place` 에 이 각도가
+# `orientation` 으로 실리고, 여기서는 **정말 그렇게 섰는지** 다시 본다.
+#
+# RMF 가 맞다고 하는 것과 로봇이 실제로 그렇게 선 것은 다른 이야기다.
+DOCK_HEADINGS = {
+$headingEntries
+}
 
 # 팔이 한 번 움직이는 데 걸리는 시간 [s].
 #
 # RMF 는 이 시간을 모른다. 우리가 끝났다고 알릴 때까지 기다릴 뿐이다.
 ACTION_SECONDS = 4.0
 
-# 팔 궤적의 마지막 시각과 동시에 RMF에 성공을 알리면 관절 컨트롤러가
-# 마지막 자세를 정착시키는 동안 모바일 로봇이 출발할 수 있다. 궤적이 끝난
-# 뒤 이 시간만큼 더 기다린 다음 성공을 알려 핑키가 안전하게 출발하게 한다.
-ARM_SETTLE_SECONDS = 3.0
+# 자세가 이만큼 어긋나도 그 자세로 섰다고 본다 [rad]. 약 10도.
+#
+# **Nav2 의 `yaw_goal_tolerance`(약 5도)보다 일부러 헐겁다.** 둘은 하는 일이
+# 다르다 —
+#
+#   Nav2 쪽은 **요구**다. 그 각도에 들어올 때까지 도착으로 안 친다.
+#   여기는 **관문**이다. 잘못 선 로봇에 팔이 나가는 것을 막는다.
+#
+# 같은 값으로 묶으면 안 된다. 제자리 회전은 1.0 rad/s 로 돌다가 도착 판정이
+# 나는 순간 멈추므로, 실제로 멎는 자세는 판정 문턱보다 조금 더 간다. 얼마나
+# 더 가는지는 로봇을 돌려 재 봐야 아는 값인데 아직 안 쟀다. 같은 값으로 묶어
+# 두면 Nav2 가 도착이라고 놓아준 로봇을 워크셀이 매번 거절해, 멀쩡한 작업이
+# 전부 실패한다.
+#
+# 잡으려는 것은 몇 도의 오차가 아니라 **안 돈 로봇**이다. 수납함을 뒤에 달고
+# 들어온 그대로 선 로봇은 180도가 어긋난다 — 10도로도 넉넉히 걸린다.
+DOCK_YAW_TOLERANCE = 0.175
+
+# 로봇이 섰다고 보는 문턱. **거리가 아니라 속도다.**
+#
+# 예전에는 두 번의 `/fleet_states` 사이에 얼마나 움직였나로 쟀다. 그것이
+# 시뮬레이터 속도에 휘둘린다 — `/fleet_states` 는 벽시계 10Hz 인데 로봇은 시뮬
+# 시계로 움직이므로, 시뮬이 느리면 눈금당 이동이 그만큼 줄어든다.
+#
+# 실측(2026-08-17) — Gazebo 실시간 배율(RTF) 0.101, `/fleet_states` 10.00Hz.
+# 0.2m/s 로 달리는 로봇이 눈금당 0.002m 밖에 안 움직인다. 2cm 문턱이면
+# **달리는 로봇이 섰다고 나온다.**
+#
+# `Location.t` 는 시뮬 시계 시각이다. 그것으로 나누면 진짜 속도가 나오고,
+# 시뮬이 몇 배로 느리든 값이 같다.
+ROBOT_STILL_SPEED = 0.03      # [m/s] 핑키 순항은 0.2
+ROBOT_STILL_TURN_RATE = 0.20  # [rad/s] 제자리 회전은 1.0
+
+# 적재를 시작한 자리에서 이만큼 벗어나면 중단한다.
+#
+# 시작할 때의 자세를 기준으로 잰다. **눈금 사이의 차이로 재면 안 된다** —
+# 위에서 본 흔들림이 그대로 중단 사유가 되기 때문이다. 잡으려는 것은 몇 도의
+# 떨림이 아니라 **로봇이 자리를 떠난 것**이고, 그것은 몇십 cm 단위로 뚜렷하다.
+#
+# 팔이 이미 움직이는 중에 끊는 것 자체가 위험하므로, 정말 떠났을 때만 끊는다.
+ARM_ABORT_METERS = 0.15
+ARM_ABORT_RADIANS = 0.52
+
+# 이보다 오래된 로봇 소식은 안 믿는다 [s]. 어댑터는 10Hz 로 낸다.
+FLEET_STATE_MAX_AGE = 3.0
+
+# 로봇이 자리에 설 때까지 기다려 주는 시간 [s, 벽시계].
+#
+# RMF 는 도착했다고 보고 우리를 부르는데, 그 순간 로봇이 마지막 몇 도를 돌고
+# 있을 수 있다. 여기서 바로 거절하면 멀쩡한 작업이 실패한다.
+#
+# 넉넉해야 한다. 시뮬이 실시간의 1/10 로 돌면(실측 RTF 0.101) 로봇이 마지막
+# 자세를 다듬는 데도 벽시계로 열 배가 걸린다.
+ROBOT_SETTLE_TIMEOUT = 60.0
+
+# 팔이 궤적을 끝낼 때까지 기다리는 한계 [s, 벽시계].
+#
+# **성능 예산이 아니라 멈춤 감지다.** 답을 안 하면 RMF 는 영원히 기다리므로
+# 언젠가는 끊어야 하지만, 조이면 느린 시뮬에서 멀쩡한 궤적을 끊는다.
+#
+# 실측(2026-08-17) — 시뮬 4초짜리 궤적이 벽시계로 55.5초 걸렸다(RTF 0.101).
+#
+#     [omx_01.arm_controller] Accepted new action goal   435.180
+#     [omx_01.arm_controller] Goal reached, success!     490.698
+#
+# 샌드위치 재생은 시뮬 35초짜리라 같은 배율이면 벽시계 350초가 넘는다. 예전
+# 값(120초)이면 그것이 매번 끊겼다.
+ARM_RESULT_TIMEOUT = 600.0
+
+# 액션이 끝난 뒤 두는 여유 [s].
+#
+# **판정이 아니라 여유다.** 끝났다고 정하는 것은 액션 결과이고, 이 시간은
+# 로봇이 곧바로 튀어 나가지 않게 두는 것뿐이다. 이만큼 지나면 관절이 멎었다고
+# 보이든 아니든 넘어간다.
+ARM_SETTLE_SECONDS = 2.0
+
+# 관절이 멎었다고 보는 속도 [rad/s].
+#
+# 이 값 아래로 내려오면 여유를 다 안 쓰고 바로 넘어간다. 못 내려와도 막지
+# 않는다 — 이 팔에서는 실제로 못 내려온다.
+#
+# 실측(2026-08-17, OMX in Gazebo, 팔이 멈춰 있는 상태, 표본 148) —
+#
+#     최소 0.113   중앙 1.291   최대 1.443  [rad/s]
+#     0.02 아래인 비율 0%    0.10 아래인 비율 0%
+#
+# 멈춰 있는 팔이 1.3 rad/s 로 도는 것으로 나온다. `joint_states` 의 velocity
+# 가 이 설정에서는 믿을 값이 아니라는 뜻이다. 그래서 이 확인은 **거부권이
+# 없다.** 문턱을 실측에 맞춰 올리지 마라 — 올려 봐야 늘 통과가 되어 확인이
+# 아니게 된다. 못 믿는 신호는 못 믿는 채로 두고, 판정은 액션 결과가 한다.
+ARM_STILL_VELOCITY = 0.02
+
+# 감시 주기 [s]. 이 노드는 `use_sim_time` 을 안 쓰므로 시스템 시계로 돈다.
+WATCHDOG_PERIOD = 0.2
 
 # 물품 종류별 가상 모방학습 policy. 모든 OMX가 같은 다섯 policy를 제공한다.
 # 각 값은 시간 비율과 joint1~4 자세이며 실제 추론기 연결 전 동작 검증용이다.
@@ -3862,6 +4647,48 @@ def now_msg(node):
     return Time(sec=stamp.sec, nanosec=stamp.nanosec)
 
 
+def wrap_angle(radians):
+    """-pi 초과 pi 이하로 접는다. 179도와 -179도는 2도 차이지 358도가 아니다."""
+    return (radians + math.pi) % (2 * math.pi) - math.pi
+
+
+def trajectory_of(joint_names, poses, seconds):
+    """자세 목록을 시간에 고르게 펴서 궤적 하나로 만든다."""
+    message = JointTrajectory()
+    message.joint_names = list(joint_names)
+    for index, pose in enumerate(poses, start=1):
+        point = JointTrajectoryPoint()
+        point.positions = [float(value) for value in pose]
+        at = seconds * index / len(poses)
+        point.time_from_start.sec = int(at)
+        point.time_from_start.nanosec = int((at % 1) * 1e9)
+        message.points.append(point)
+    return message
+
+
+class Job:
+    """처리 중인 요청 하나. 어디까지 왔는지와 언제까지 기다릴지를 들고 있다."""
+
+    def __init__(self, msg, dispenser, robot_name, required_yaw, trajectory,
+                 policy_id=None, policy_archive=None):
+        self.msg = msg
+        self.dispenser = dispenser
+        self.robot_name = robot_name
+        self.required_yaw = required_yaw
+        self.trajectory = trajectory
+        # 학습 policy 로 돌릴 일이면 그 policy 와 ZIP 자리. 아니면 None.
+        self.policy_id = policy_id
+        self.policy_archive = policy_archive
+        # 러너 프로세스. 'policy' 단계에서만 있다.
+        self.process = None
+        # 'waiting_robot' → ('policy' | 'moving') → 'settling'
+        self.stage = 'waiting_robot'
+        self.goal_handle = None
+        self.deadline = time.monotonic() + ROBOT_SETTLE_TIMEOUT
+        # 팔을 움직이기 시작한 순간의 로봇 자리. 적재 중에는 이것과 견준다.
+        self.anchor = None
+
+
 class Workcell:
     """설비 한 대. 맡은 자리 이름으로 불린다."""
 
@@ -3878,45 +4705,75 @@ class Workcell:
         self.active_request = None
         self.completed_requests = set()
         self.lock = threading.Lock()
-        self.arm = node.create_publisher(
-            JointTrajectory, f'/{namespace}/arm_controller/joint_trajectory', 10)
+        self.job = None
+
+        # 토픽이 아니라 **액션**이다. 토픽 publish 는 던지고 끝이라 팔이
+        # 끝냈는지 물을 방법이 없다. 액션은 받았다(accepted)와 끝났다(result)를
+        # 돌려준다 — 우리가 RMF 에 성공을 알리는 근거가 그 result 다.
+        self.arm_action_name = (
+            f'/{namespace}/arm_controller/follow_joint_trajectory')
+        self.arm = ActionClient(node, FollowJointTrajectory,
+                                self.arm_action_name)
+
+        # 액션이 끝났다고 한 뒤 관절이 정말 멎었는지 보는 곳.
+        self.joint_velocity = None
+        self.joint_state_at = 0.0
+        # 속도로는 멎었는지 알 수 없다는 말을 한 번만 적는다.
+        self.warned_arm_velocity = False
+        node.create_subscription(
+            JointState, f'/{namespace}/joint_states', self.on_joint_state, 10)
 
     def serves(self, guid):
         return guid in self.dispensers or guid in self.ingestors
 
-    def run_policy(self, policy_id, seconds):
-        """선택한 가상 policy의 관절 궤적 전체를 한 번에 보낸다."""
-        message = JointTrajectory()
-        message.joint_names = list(JOINT_NAMES)
-        poses = [*POLICY_MOTIONS[policy_id], HOME_POSE]
-        for index, pose in enumerate(poses, start=1):
-            point = JointTrajectoryPoint()
-            point.positions = list(pose)
-            at = seconds * index / len(poses)
-            point.time_from_start.sec = int(at)
-            point.time_from_start.nanosec = int((at % 1) * 1e9)
-            message.points.append(point)
-        self.arm.publish(message)
+    def on_joint_state(self, msg):
+        if not msg.velocity:
+            # 속도를 안 내는 컨트롤러도 있다. 그러면 이 확인은 건너뛴다.
+            return
+        self.joint_velocity = max(abs(value) for value in msg.velocity)
+        self.joint_state_at = time.monotonic()
 
-    def run_deployed_policy_test(self, policy_id, seconds):
-        """배포 policy의 추론기 연결 전, 모델별 안전 시험 궤적을 보낸다."""
-        profile = MODEL_TEST_MOTIONS[self.model]
-        message = JointTrajectory()
-        message.joint_names = list(profile['joints'])
-        poses = [*profile['poses'], profile['home']]
-        for index, pose in enumerate(poses, start=1):
-            point = JointTrajectoryPoint()
-            point.positions = list(pose)
-            at = seconds * index / len(poses)
-            point.time_from_start.sec = int(at)
-            point.time_from_start.nanosec = int((at % 1) * 1e9)
-            message.points.append(point)
+    def arm_still(self):
+        """관절이 멎었나. 속도를 못 들으면 판단을 미룬다(None)."""
+        if self.joint_velocity is None:
+            return None
+        if time.monotonic() - self.joint_state_at > FLEET_STATE_MAX_AGE:
+            return None
+        return self.joint_velocity <= ARM_STILL_VELOCITY
+
+    # ── 무엇을 시킬지 정하는 쪽 ────────────────────────────────────────────
+
+    def policy_trajectory(self, policy_id, seconds):
+        """선택한 가상 policy의 관절 궤적."""
+        return trajectory_of(
+            JOINT_NAMES, [*POLICY_MOTIONS[policy_id], HOME_POSE], seconds)
+
+    def test_trajectory(self, reason, seconds=None):
+        """관절 몇 개를 눈에 보이게 움직였다가 집으로 돌아오는 시험 동작.
+
+        **붙인 policy 가 없을 때 여기로 온다.** 아무것도 안 보내면 기다릴 것도
+        없어 그 자리에서 성공이 되고, 그러면 팔이 살아 있는지조차 모르는 채로
+        작업만 넘어간다. 그래서 짧게라도 실제로 움직이고, 그 동작이 끝난 것을
+        액션 결과로 확인한 뒤에 RMF 에 성공을 알린다 — 다음 단계는 그때 간다.
+
+        학습한 동작이 아니다. 팔·컨트롤러·RMF 의 고리가 살아 있는지 보는 것뿐이다.
+        """
+        seconds = ACTION_SECONDS if seconds is None else seconds
         self.node.get_logger().warning(
-            f'[{self.robot_id}] [{policy_id}] ACT 추론 전 controller 시험 동작')
-        self.arm.publish(message)
+            f'[{self.robot_id}] [TEST] {reason}')
+        profile = MODEL_TEST_MOTIONS.get(self.model)
+        if profile is None:
+            # 모르는 모델이다. 기본 관절 이름으로 조금씩만 움직인다.
+            return trajectory_of(
+                JOINT_NAMES,
+                [[0.20, -0.85, 0.25, 0.65], [-0.20, -0.85, 0.25, 0.65],
+                 HOME_POSE],
+                seconds)
+        return trajectory_of(
+            profile['joints'], [*profile['poses'], profile['home']], seconds)
 
-    def run_sandwich_replay(self, policy_id):
-        """학습 episode의 샌드위치 집기 시연을 Gazebo에서 관절 재생한다."""
+    def sandwich_replay_trajectory(self, policy_id):
+        """학습 episode의 샌드위치 집기 시연을 관절 재생한다."""
         message = JointTrajectory()
         message.joint_names = list(MODEL_TEST_MOTIONS['omx_f']['joints'])
         lead_in = 1.0
@@ -3929,8 +4786,12 @@ class Workcell:
             message.points.append(point)
         self.node.get_logger().info(
             f'[{self.robot_id}] [{policy_id}] 학습 episode 0 샌드위치 동작 재생')
-        self.arm.publish(message)
-        return lead_in + SANDWICH_REPLAY_DEG[-1][0]
+        return message
+
+    def policy_archive(self, policy_id):
+        """이 policy 의 학습 결과 ZIP. 이 자리에 없으면 None."""
+        path = POLICY_ARCHIVES.get(policy_id)
+        return path if path and os.path.exists(path) else None
 
 
 class WorkcellAdapter(rclpy.node.Node):
@@ -3968,12 +4829,116 @@ class WorkcellAdapter(rclpy.node.Node):
             IngestorRequest, '/ingestor_requests',
             lambda msg: self.on_request(msg, dispenser=False), state_qos)
 
+        # 로봇이 정말 그 자리에 그 자세로 섰는지 보는 곳. 어댑터가 10Hz 로
+        # 낸다. RMF 가 "도착했다" 고 말하는 것과 로봇이 실제로 그렇게 선
+        # 것은 다른 이야기라, 팔을 움직이기 전에 여기서 직접 확인한다.
+        self.robot_pose = {}
+        self.create_subscription(
+            FleetState, '/fleet_states', self.on_fleet_state, 10)
+
         # 상태를 안 내면 RMF 가 이 워크셀을 없는 것으로 보고 요청조차 안 한다.
         self.create_timer(1.0, self.publish_states)
+        self.create_timer(WATCHDOG_PERIOD, self.watch)
 
         served = sum(len(c.dispensers) + len(c.ingestors) for c in self.cells)
         self.get_logger().info(
             f'워크셀 {len(self.cells)}대, 맡은 자리 {served}곳을 RMF 에 이었습니다.')
+        if DOCK_HEADINGS:
+            places = ', '.join(
+                f'{name} {math.degrees(yaw):.0f}도'
+                for name, yaw in sorted(DOCK_HEADINGS.items()))
+            self.get_logger().info(f'적재 방향을 정해 둔 자리: {places}')
+
+    # ── 로봇이 어디에 어떻게 서 있나 ──────────────────────────────────────
+
+    def on_fleet_state(self, msg):
+        for robot in msg.robots:
+            previous = self.robot_pose.get(robot.name)
+            location = robot.location
+            # 시뮬 시계 시각. 속도를 여기서 뽑는다 — 벽시계로 나누면 시뮬이
+            # 느릴 때 달리는 로봇도 섰다고 나온다.
+            stamp = location.t.sec + location.t.nanosec * 1e-9
+            # 첫 소식만으로는 섰는지 알 수 없다. 속도는 **두 소식 사이**에서
+            # 나오므로 한 건으로는 잴 것이 없다. 0 으로 채워 두면 방금 처음
+            # 본 로봇이 멈춰 있는 것으로 보여, 달려오는 중에 팔이 움직인다.
+            speed = None
+            turn_rate = None
+            if previous is not None:
+                span = stamp - previous['stamp']
+                if span > 1e-6:
+                    speed = math.hypot(location.x - previous['x'],
+                                       location.y - previous['y']) / span
+                    turn_rate = abs(
+                        wrap_angle(location.yaw - previous['yaw'])) / span
+                else:
+                    # 같은 시각이 두 번 왔다. 이전 값을 그대로 들고 간다 —
+                    # 모른다고 하면 그때마다 처음부터 다시 기다리게 된다.
+                    speed = previous['speed']
+                    turn_rate = previous['turn_rate']
+            self.robot_pose[robot.name] = {
+                'x': location.x,
+                'y': location.y,
+                'yaw': location.yaw,
+                'stamp': stamp,
+                'speed': speed,
+                'turn_rate': turn_rate,
+                'at': time.monotonic(),
+            }
+
+    def robot_problem(self, job):
+        """로봇이 팔을 움직여도 되는 상태인가. 괜찮으면 None, 아니면 이유."""
+        if not job.robot_name:
+            # 어댑터가 `transporter_type` 에 로봇 이름을 넣는다. 비어 있으면
+            # 어느 로봇인지 알 수 없어 확인 자체를 못 한다.
+            return '요청에 로봇 이름이 없습니다'
+        pose = self.robot_pose.get(job.robot_name)
+        if pose is None:
+            return f'{job.robot_name} 의 위치를 /fleet_states 에서 못 받았습니다'
+        age = time.monotonic() - pose['at']
+        if age > FLEET_STATE_MAX_AGE:
+            return f'{job.robot_name} 의 마지막 소식이 {age:.1f}초 전입니다'
+        if pose['speed'] is None:
+            return f'{job.robot_name} 의 소식이 아직 한 건뿐입니다'
+        if pose['speed'] > ROBOT_STILL_SPEED or \\
+                pose['turn_rate'] > ROBOT_STILL_TURN_RATE:
+            return (f'{job.robot_name} 이 아직 움직이고 있습니다 '
+                    f'({pose["speed"]:.3f}m/s · '
+                    f'{math.degrees(pose["turn_rate"]):.1f}도/s)')
+        if job.required_yaw is None:
+            return None
+        error = abs(wrap_angle(pose['yaw'] - job.required_yaw))
+        if error > DOCK_YAW_TOLERANCE:
+            return (f'{job.robot_name} 이 {math.degrees(pose["yaw"]):.1f}도를 '
+                    f'보고 있습니다. 이 자리는 '
+                    f'{math.degrees(job.required_yaw):.1f}도가 필요합니다 '
+                    f'(차이 {math.degrees(error):.1f}도)')
+        return None
+
+    def robot_left(self, job):
+        """적재를 시작한 자리를 떠났나. 안 떠났으면 None, 떠났으면 이유.
+
+        **시작할 때의 자세와 견준다.** 눈금 사이의 차이로 재면 도착 직후의
+        떨림(실측 3.4도)이 그대로 중단 사유가 된다. 잡으려는 것은 떨림이
+        아니라 로봇이 자리를 뜬 것이다.
+        """
+        if job.anchor is None:
+            return None
+        pose = self.robot_pose.get(job.robot_name)
+        if pose is None:
+            return None
+        age = time.monotonic() - pose['at']
+        if age > FLEET_STATE_MAX_AGE:
+            return f'{job.robot_name} 의 마지막 소식이 {age:.1f}초 전입니다'
+        moved = math.hypot(pose['x'] - job.anchor['x'],
+                           pose['y'] - job.anchor['y'])
+        if moved > ARM_ABORT_METERS:
+            return (f'{job.robot_name} 이 적재를 시작한 자리에서 '
+                    f'{moved*100:.0f}cm 벗어났습니다')
+        turned = abs(wrap_angle(pose['yaw'] - job.anchor['yaw']))
+        if turned > ARM_ABORT_RADIANS:
+            return (f'{job.robot_name} 이 적재를 시작한 자세에서 '
+                    f'{math.degrees(turned):.0f}도 돌았습니다')
+        return None
 
     def publish_states(self):
         for cell in self.cells:
@@ -4021,44 +4986,313 @@ class WorkcellAdapter(rclpy.node.Node):
             f'({msg.request_guid})')
         self.answer(msg, dispenser, DispenserResult.ACKNOWLEDGED)
 
-        policy_id = msg.items[0].type_guid if msg.items else 'policy_1'
+        # 무엇으로 움직일지 정하는 사다리.
+        #
+        #   ① 이 팔에 붙인 학습 policy + ZIP + 러너가 다 있으면 → 러너로 추론
+        #   ② 붙어는 있으나 러너가 없거나 ZIP 이 없으면   → 시험 동작 (이유를 남김)
+        #   ③ 가상 policy(policy_1..5)                   → 그 policy 의 궤적
+        #   ④ 붙인 policy 가 없으면(armLoad)             → 시험 동작
+        #
+        # 어느 길로 가든 **끝났다는 것을 확인한 뒤** RMF 에 성공을 알린다.
+        # 그래야 다음 단계로 넘어간다.
+        policy_id = msg.items[0].type_guid if msg.items else 'armLoad'
         is_deployed = policy_id in cell.deployed_policies
         if (policy_id != 'armLoad' and policy_id not in POLICY_MOTIONS
                 and not is_deployed):
-            self.get_logger().error(
-                f'[{cell.robot_id}] 알 수 없는 물품 policy [{policy_id}]')
-            with cell.lock:
-                cell.busy = False
-                cell.active_request = None
-            self.answer(msg, dispenser, DispenserResult.FAILED)
+            # 이 팔에 붙지 않은 policy 다. 조용히 다른 동작으로 바꾸면 어느
+            # 팔이 무엇을 했는지 알 수 없게 되므로 실패로 답한다.
+            self.fail(
+                cell, msg, dispenser,
+                f'[{cell.robot_id}] 에 붙지 않은 policy 입니다 [{policy_id}] — '
+                f'붙은 것: {sorted(cell.deployed_policies) or "없음"}')
             return
-        execution_seconds = ACTION_SECONDS
+
+        archive = cell.policy_archive(policy_id) if is_deployed else None
+        runner_ready = bool(POLICY_RUNNER) and os.path.exists(POLICY_RUNNER)
         replay_name = policy_id.split('@', 1)[0].lower()
-        if (is_deployed and cell.model == 'omx_f'
-                and replay_name in ('sandwich', 'sandwitch')):
-            execution_seconds = cell.run_sandwich_replay(policy_id)
-        elif is_deployed:
-            cell.run_deployed_policy_test(policy_id, ACTION_SECONDS)
-        elif policy_id == 'armLoad':
-            # Mock 또는 별도 policy가 없는 실설비의 기본 적재 동작. RMF 요청은
-            # 정상 완료하되 존재하지 않는 관절 policy를 억지로 실행하지 않는다.
+        if is_deployed and archive is not None and runner_ready:
             self.get_logger().info(
-                f'[{cell.robot_id}] 기본 armLoad 실행 (등록 policy 없음)')
+                f'[{cell.robot_id}] [{policy_id}] 학습 policy 로 움직입니다')
+            trajectory = None
+        elif (is_deployed and cell.model == 'omx_f'
+                and replay_name in ('sandwich', 'sandwitch')):
+            trajectory = cell.sandwich_replay_trajectory(policy_id)
+        elif is_deployed:
+            trajectory = cell.test_trajectory(
+                f'[{policy_id}] 학습 결과 파일이 없어' if archive is None
+                else f'[{policy_id}] 러너({POLICY_RUNNER})가 없어')
+            archive = None
+        elif policy_id == 'armLoad':
+            trajectory = cell.test_trajectory('붙인 policy 가 없어')
         else:
             self.get_logger().info(
                 f'[{cell.robot_id}] 물품 [{policy_id}] 가상 policy 실행')
-            cell.run_policy(policy_id, ACTION_SECONDS)
+            trajectory = cell.policy_trajectory(policy_id, ACTION_SECONDS)
 
-        def finish():
-            timer.cancel()
-            with cell.lock:
-                cell.busy = False
-                cell.active_request = None
-                cell.completed_requests.add(msg.request_guid)
-            self.get_logger().info(f'[{cell.robot_id}] {msg.target_guid} 끝.')
-            self.answer(msg, dispenser, DispenserResult.SUCCESS)
+        # 팔이 없으면 시작하지 않는다. 예전에는 토픽에 던지고 4초 뒤 성공이라
+        # 답했으므로, 팔이 아예 안 떠 있어도 작업이 그대로 넘어갔다.
+        if not cell.arm.server_is_ready():
+            self.fail(
+                cell, msg, dispenser,
+                f'팔이 없습니다. {cell.arm_action_name} 액션 서버가 안 보입니다')
+            return
 
-        timer = self.create_timer(execution_seconds + ARM_SETTLE_SECONDS, finish)
+        job = Job(msg, dispenser, msg.transporter_type,
+                  DOCK_HEADINGS.get(msg.target_guid), trajectory,
+                  policy_id=policy_id if archive is not None else None,
+                  policy_archive=archive)
+        with cell.lock:
+            cell.job = job
+        # 로봇이 설 때까지 감시자가 기다렸다가 보낸다. 여기서 바로 보내면
+        # 마지막 몇 도를 돌고 있는 멀쩡한 로봇을 거절하게 된다.
+
+    # ── 단계를 넘기는 쪽. 전부 토픽·액션이 알려 준 것으로만 정한다 ────────
+
+    def watch(self):
+        for cell in self.cells:
+            job = cell.job
+            if job is None:
+                continue
+            if job.stage == 'waiting_robot':
+                self.watch_robot(cell, job)
+            elif job.stage == 'policy':
+                self.watch_policy(cell, job)
+            elif job.stage == 'moving':
+                self.watch_arm(cell, job)
+            elif job.stage == 'settling':
+                self.watch_settle(cell, job)
+
+    def watch_robot(self, cell, job):
+        problem = self.robot_problem(job)
+        if problem is None:
+            job.stage = 'moving'
+            job.deadline = time.monotonic() + ARM_RESULT_TIMEOUT
+            # 지금 이 자리가 기준이 된다. 적재 중에는 여기서 얼마나 벗어났나만
+            # 본다.
+            pose = self.robot_pose.get(job.robot_name)
+            job.anchor = None if pose is None else dict(pose)
+            if job.policy_archive is not None:
+                self.start_policy_runner(cell, job)
+                return
+            self.get_logger().info(
+                f'[{cell.robot_id}] {job.msg.target_guid}: 로봇이 제자리에 '
+                '섰습니다. 팔을 움직입니다.')
+            goal = FollowJointTrajectory.Goal()
+            goal.trajectory = job.trajectory
+            future = cell.arm.send_goal_async(goal)
+            future.add_done_callback(
+                lambda done: self.on_arm_accepted(cell, job, done))
+            return
+        if time.monotonic() > job.deadline:
+            self.fail(cell, job.msg, job.dispenser, f'로봇을 기다리다 지쳤습니다 — {problem}')
+
+    def on_arm_accepted(self, cell, job, future):
+        if cell.job is not job:
+            return
+        try:
+            handle = future.result()
+        except Exception as error:
+            self.fail(cell, job.msg, job.dispenser, f'팔에 궤적을 못 보냈습니다: {error}')
+            return
+        if not handle.accepted:
+            self.fail(cell, job.msg, job.dispenser, '팔이 궤적을 거절했습니다')
+            return
+        job.goal_handle = handle
+        handle.get_result_async().add_done_callback(
+            lambda done: self.on_arm_result(cell, job, done))
+
+    def on_arm_result(self, cell, job, future):
+        if cell.job is not job:
+            return
+        try:
+            result = future.result().result
+        except Exception as error:
+            self.fail(cell, job.msg, job.dispenser, f'팔의 결과를 못 받았습니다: {error}')
+            return
+        if result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
+            self.fail(
+                cell, job.msg, job.dispenser,
+                f'팔이 궤적을 못 끝냈습니다 (error_code={result.error_code} '
+                f'{result.error_string})')
+            return
+        job.stage = 'settling'
+        job.deadline = time.monotonic() + ARM_SETTLE_SECONDS
+
+    # ── 학습 policy 를 실제로 돌리는 쪽 ───────────────────────────────────
+
+    def start_policy_runner(self, cell, job):
+        """이 팔에 붙인 학습 policy 로 움직이게 한다.
+
+        **Gazebo 든 실물이든 같은 러너다.** 네임스페이스만 달리 받아 그 팔의
+        `joint_states` 를 보고 그 팔의 컨트롤러로 낸다 — 시뮬과 실물의 차이는
+        토픽 뒤에 무엇이 붙어 있느냐뿐이다.
+
+        못 띄우면 여기서 작업을 실패시키지 않는다. 시험 동작으로 갈아타 다음
+        단계로 넘어가게 하고, 왜 추론이 안 돌았는지는 로그에 남긴다.
+        """
+        command = [
+            sys.executable, POLICY_RUNNER,
+            '--policy', job.policy_archive,
+            '--policy-id', job.policy_id,
+            '--namespace', cell.namespace,
+            '--model', cell.model,
+            '--seconds', str(ACTION_SECONDS),
+        ]
+        try:
+            log = open(POLICY_LOG, 'a', buffering=1)
+            at = time.strftime('%Y-%m-%d %H:%M:%S')
+            log.write(f'\\n=== {at} {cell.robot_id} {job.policy_id} ===\\n')
+            job.process = subprocess.Popen(
+                command, stdout=log, stderr=subprocess.STDOUT)
+        except Exception as error:
+            self.get_logger().error(
+                f'[{cell.robot_id}] policy 러너를 못 띄웠습니다: {error}')
+            self.fall_back_to_test(cell, job, f'[{job.policy_id}] 러너를 못 띄워')
+            return
+        job.stage = 'policy'
+        job.deadline = time.monotonic() + POLICY_TIMEOUT
+        self.get_logger().info(
+            f'[{cell.robot_id}] [{job.policy_id}] 학습 policy 추론 시작 — '
+            f'기록은 {POLICY_LOG}')
+
+    def watch_policy(self, cell, job):
+        """추론이 끝나기를 기다린다. 끝나야 RMF 에 성공을 알린다."""
+        # 적재 중에 로봇이 자리를 뜨면 팔 궤적 때와 똑같이 중단한다.
+        problem = self.robot_left(job)
+        if problem is not None:
+            self.stop_runner(job)
+            self.fail(cell, job.msg, job.dispenser,
+                      f'적재 중에 로봇이 자리를 떴습니다 — {problem}')
+            return
+        code = job.process.poll() if job.process is not None else 1
+        if code is None:
+            if time.monotonic() > job.deadline:
+                self.stop_runner(job)
+                self.fail(
+                    cell, job.msg, job.dispenser,
+                    f'[{job.policy_id}] 추론이 {POLICY_TIMEOUT:.0f}초 안에 '
+                    '안 끝났습니다')
+            return
+        if code == 0:
+            self.get_logger().info(
+                f'[{cell.robot_id}] [{job.policy_id}] 추론 동작을 끝냈습니다')
+            job.stage = 'settling'
+            job.deadline = time.monotonic() + ARM_SETTLE_SECONDS
+            return
+        # 추론기가 이 자리에 없거나 policy 를 못 읽었다. 작업까지 멈추지는
+        # 않는다 — 무엇이 없어서 못 했는지만 분명히 남기고 시험 동작으로 간다.
+        self.get_logger().warning(
+            f'[{cell.robot_id}] [{job.policy_id}] 추론이 안 됐습니다 '
+            f'(종료 코드 {code}). 까닭은 {POLICY_LOG} 에 있습니다.')
+        self.fall_back_to_test(cell, job, f'[{job.policy_id}] 추론이 안 돼')
+
+    def stop_runner(self, job):
+        if job.process is None or job.process.poll() is not None:
+            return
+        job.process.terminate()
+        try:
+            job.process.wait(timeout=5)
+        except Exception:
+            job.process.kill()
+
+    def fall_back_to_test(self, cell, job, reason):
+        """추론 대신 시험 동작으로 간다.
+
+        팔이 정말 움직이고 끝냈는지는 그대로 확인한다. 확인 없이 성공만
+        돌려주면 팔이 안 떠 있어도 작업이 넘어간다.
+        """
+        job.policy_archive = None
+        job.process = None
+        job.trajectory = cell.test_trajectory(reason)
+        job.stage = 'moving'
+        job.deadline = time.monotonic() + ARM_RESULT_TIMEOUT
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = job.trajectory
+        future = cell.arm.send_goal_async(goal)
+        future.add_done_callback(
+            lambda done: self.on_arm_accepted(cell, job, done))
+
+    def watch_arm(self, cell, job):
+        # 적재 중에도 로봇이 그 자리에 있는지 계속 본다. 자리를 뜨면 물건이
+        # 엉뚱한 곳에 놓이므로 궤적을 취소하고 실패로 답한다.
+        #
+        # 시작한 자리와 견준다. 눈금 사이의 차이로 재면 도착 직후의 떨림이
+        # 그대로 중단 사유가 된다 — 실제로 그래서 멀쩡한 적재가 1초 만에
+        # 끊겼다(2026-08-17, 0.6cm · 3.4도).
+        problem = self.robot_left(job)
+        if problem is not None:
+            if job.goal_handle is not None:
+                job.goal_handle.cancel_goal_async()
+            self.fail(cell, job.msg, job.dispenser,
+                      f'적재 중에 로봇이 자리를 떴습니다 — {problem}')
+            return
+        if time.monotonic() > job.deadline:
+            if job.goal_handle is not None:
+                job.goal_handle.cancel_goal_async()
+            self.fail(
+                cell, job.msg, job.dispenser,
+                f'팔이 {ARM_RESULT_TIMEOUT:.0f}초 안에 안 끝났습니다')
+
+    def watch_settle(self, cell, job):
+        """팔이 멎기를 잠깐 기다린다. **막지는 않는다.**
+
+        끝났다고 정하는 것은 액션 결과다. 컨트롤러가 `Goal reached, success!`
+        를 냈으면 궤적은 끝난 것이고, 여기는 로봇이 곧바로 튀어 나가지 않게
+        두는 짧은 여유일 뿐이다.
+
+        여기서 거부하면 안 된다. 예전에는 `joint_states` 속도가 문턱 아래로
+        안 내려가면 실패로 답했는데, 이 팔은 **멈춰 있어도** 그 값이 안
+        내려간다. 실측(2026-08-17, OMX in Gazebo, 표본 148) —
+
+            최소 0.113  중앙 1.291  최대 1.443  [rad/s]
+            0.02 아래인 비율 0%   0.10 아래인 비율 0%
+
+        그래서 픽업이 매번 실패했다. 팔은 멀쩡히 끝냈는데도 —
+
+            [omx_01.arm_controller] Goal reached, success!
+            [omx_01] 픽업3: 팔이 5초가 지나도 안 멎었습니다   ← 여기서 막힘
+        """
+        if cell.arm_still() is True:
+            self.succeed(cell, job)
+            return
+        if time.monotonic() <= job.deadline:
+            return
+        # 여유를 다 썼다. 액션이 끝났다고 했으므로 그 말을 믿는다.
+        if not cell.warned_arm_velocity:
+            cell.warned_arm_velocity = True
+            measured = ('못 읽음' if cell.joint_velocity is None
+                        else f'{cell.joint_velocity:.3f} rad/s')
+            self.get_logger().warning(
+                f'[{cell.robot_id}] {cell.namespace}/joint_states 로는 팔이 '
+                f'멎었는지 알 수 없습니다 (속도 {measured}). 액션 결과만 믿고 '
+                '넘어갑니다. 이 줄은 한 번만 적습니다.')
+        self.succeed(cell, job)
+
+    def succeed(self, cell, job):
+        with cell.lock:
+            cell.busy = False
+            cell.active_request = None
+            cell.completed_requests.add(job.msg.request_guid)
+            cell.job = None
+        self.get_logger().info(f'[{cell.robot_id}] {job.msg.target_guid} 끝.')
+        self.answer(job.msg, job.dispenser, DispenserResult.SUCCESS)
+
+    def fail(self, cell, msg, dispenser, reason):
+        """실패를 **말한다.** 조용히 두면 RMF 가 영원히 기다린다.
+
+        답할 요청을 인자로 받는다. `cell.job` 에서 꺼내면, 아직 job 을 만들기
+        전에 걸린 실패(모르는 policy · 팔 없음)에서 답할 곳을 잃는다.
+        """
+        # 추론이 돌고 있었으면 먼저 세운다. 두고 나가면 팔이 계속 움직인다.
+        if cell.job is not None:
+            self.stop_runner(cell.job)
+        with cell.lock:
+            cell.busy = False
+            cell.active_request = None
+            cell.job = None
+        self.get_logger().error(
+            f'[{cell.robot_id}] {msg.target_guid}: {reason}')
+        self.answer(msg, dispenser, DispenserResult.FAILED)
 
     def answer(self, msg, dispenser, status):
         if dispenser:
@@ -4087,6 +5321,272 @@ if __name__ == '__main__':
     main()
 ''';
 }
+
+/// 붙여 둔 학습 policy 로 로봇팔을 움직이는 실행기.
+///
+/// 워크셀 노드가 픽업 요청을 받으면 이것을 따로 띄우고 **종료 코드로만** 판단
+/// 한다. 0 이면 추론 동작을 끝낸 것이고, 0 이 아니면 이 자리에 추론기가 없다는
+/// 뜻이라 노드가 시험 동작으로 대신한다 — 작업은 어느 쪽이든 다음 단계로 간다.
+///
+/// Gazebo 와 실물을 가리지 않는다. 받는 것은 네임스페이스 하나뿐이고, 그 뒤에
+/// 시뮬레이터가 있든 실제 컨트롤러가 있든 토픽은 같다.
+String buildPolicyRunnerScript({required String mapName}) =>
+    '''#!/usr/bin/env python3
+"""$mapName 프로젝트의 학습 policy 실행기.
+
+rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다음 저장 때
+덮어써진다.
+
+하는 일은 하나다 — **붙여 둔 policy 로 그 팔을 움직이고 끝나면 0 으로 끝난다.**
+
+    /<네임스페이스>/joint_states                    관측(관절 위치)
+    /<네임스페이스>/arm_controller/joint_trajectory 명령
+    /<네임스페이스>/camera/image_raw                policy 가 이미지를 볼 때만
+
+Gazebo 와 실물의 차이는 그 토픽 뒤에 무엇이 붙어 있느냐뿐이라, 같은 러너가
+둘 다 움직인다.
+
+**추론기가 없는 것은 오류가 아니다.** torch·lerobot 이 이 자리에 없으면 2 로
+끝내고, 워크셀 노드가 시험 동작으로 대신한다. 그래야 추론기를 아직 안 깐
+자리에서도 RMF 작업이 멈추지 않는다.
+
+종료 코드
+    0  추론 동작을 끝냈다
+    2  추론기가 없거나 policy 를 못 읽었다
+    3  관절 상태가 안 온다 (팔이 안 떠 있다)
+    4  policy 압축이 이상하다
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import zipfile
+
+# 관측을 몇 Hz 로 넣고 명령을 몇 Hz 로 낼지.
+CONTROL_HZ = 10.0
+
+# 첫 관절 상태를 이만큼 기다린다 [s]. 안 오면 팔이 없는 것이다.
+OBSERVATION_TIMEOUT = 10.0
+
+# 명령 하나가 목표에 닿을 시간 [s]. 너무 짧으면 컨트롤러가 따라오지 못한다.
+COMMAND_HORIZON = 0.3
+
+# 끝내고 집으로 돌아가는 데 주는 시간 [s].
+HOME_SECONDS = 2.0
+
+
+def log(message):
+    print(f'[policy_runner] {message}', flush=True)
+
+
+def unpack(archive, policy_id):
+    """policy ZIP 을 캐시에 한 번만 푼다. 수백 MB 를 매번 풀 이유가 없다."""
+    safe = ''.join(c if c.isalnum() or c in '-_' else '_' for c in policy_id)
+    target = os.path.join(
+        os.path.expanduser('~/.cache/robosapiens/policies'), safe)
+    marker = os.path.join(target, 'config.json')
+    if os.path.exists(marker):
+        return target
+    os.makedirs(target, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for entry in bundle.namelist():
+                # ZIP 안의 경로를 그대로 믿지 않는다.
+                if entry.startswith('/') or '..' in entry.split('/'):
+                    continue
+                bundle.extract(entry, target)
+    except (zipfile.BadZipFile, OSError) as error:
+        log(f'policy 압축을 못 풀었습니다: {error}')
+        sys.exit(4)
+    if not os.path.exists(marker):
+        log('config.json 이 없습니다. LeRobot policy 가 아닙니다.')
+        sys.exit(4)
+    return target
+
+
+def load_policy(directory):
+    """LeRobot policy 를 불러온다. 추론기가 없으면 2 로 끝낸다."""
+    try:
+        import torch
+    except Exception as error:
+        log(f'torch 가 없습니다: {error}')
+        log('이 자리에는 추론기가 없습니다. 워크셀이 시험 동작으로 대신합니다.')
+        sys.exit(2)
+    loaders = []
+    try:
+        from lerobot.common.policies.factory import get_policy_class
+        loaders.append(lambda: get_policy_class(
+            json.load(open(os.path.join(directory, 'config.json')))
+            .get('type', 'act')).from_pretrained(directory))
+    except Exception:
+        pass
+    try:
+        from lerobot.common.policies.act.modeling_act import ACTPolicy
+        loaders.append(lambda: ACTPolicy.from_pretrained(directory))
+    except Exception:
+        pass
+    if not loaders:
+        log('lerobot 이 없습니다. 워크셀이 시험 동작으로 대신합니다.')
+        sys.exit(2)
+    last = None
+    for loader in loaders:
+        try:
+            policy = loader()
+            policy.eval()
+            return torch, policy
+        except Exception as error:
+            last = error
+    log(f'policy 를 못 불러왔습니다: {last}')
+    sys.exit(2)
+
+
+def image_features(directory):
+    """policy 가 이미지를 요구하는가. 요구하면 그 키 이름들."""
+    try:
+        with open(os.path.join(directory, 'config.json')) as handle:
+            config = json.load(handle)
+    except Exception:
+        return []
+    features = config.get('input_features') or {}
+    return [key for key in features if 'image' in key]
+
+
+def to_array(numpy, message):
+    """sensor_msgs/Image 를 HxWx3 배열로. cv_bridge 없이 직접 옮긴다."""
+    data = numpy.frombuffer(message.data, dtype=numpy.uint8)
+    frame = data.reshape(message.height, message.width, -1)
+    if message.encoding == 'bgr8':
+        frame = frame[:, :, ::-1]
+    return frame[:, :, :3]
+
+
+def main(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--policy', required=True, help='policy ZIP 자리')
+    parser.add_argument('--policy-id', required=True)
+    parser.add_argument('--namespace', required=True)
+    parser.add_argument('--model', default='')
+    parser.add_argument('--seconds', type=float, default=6.0)
+    args = parser.parse_args(argv[1:])
+
+    if not os.path.exists(args.policy):
+        log(f'학습 결과 파일이 없습니다: {args.policy}')
+        log('앱의 `Policy 관리` 에서 다시 받으세요.')
+        sys.exit(2)
+
+    directory = unpack(args.policy, args.policy_id)
+    torch, policy = load_policy(directory)
+    images = image_features(directory)
+    import numpy
+
+    import rclpy
+    import rclpy.node
+    from sensor_msgs.msg import Image, JointState
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+    rclpy.init(args=argv)
+    node = rclpy.node.Node('policy_runner')
+    state = {'joints': None, 'names': None, 'frame': None}
+
+    def on_joint_state(message):
+        state['names'] = list(message.name)
+        state['joints'] = list(message.position)
+
+    def on_image(message):
+        state['frame'] = to_array(numpy, message)
+
+    node.create_subscription(
+        JointState, f'/{args.namespace}/joint_states', on_joint_state, 10)
+    if images:
+        node.create_subscription(
+            Image, f'/{args.namespace}/camera/image_raw', on_image, 1)
+    command = node.create_publisher(
+        JointTrajectory,
+        f'/{args.namespace}/arm_controller/joint_trajectory', 10)
+
+    # 팔이 무엇을 하고 있는지 알기 전에는 명령하지 않는다.
+    deadline = time.monotonic() + OBSERVATION_TIMEOUT
+    while state['joints'] is None and time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+    if state['joints'] is None:
+        log(f'/{args.namespace}/joint_states 가 안 옵니다. 팔이 떠 있습니까?')
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(3)
+    if images and state['frame'] is None:
+        log('policy 가 이미지를 요구하는데 카메라 토픽이 안 옵니다: '
+            f'/{args.namespace}/camera/image_raw')
+        node.destroy_node()
+        rclpy.shutdown()
+        sys.exit(3)
+
+    home = list(state['joints'])
+    names = list(state['names'])
+    log(f'[{args.policy_id}] 추론 시작 — 관절 {len(names)}개, '
+        f'이미지 {len(images)}개, {args.seconds:.1f}초')
+
+    period = 1.0 / CONTROL_HZ
+    finish = time.monotonic() + args.seconds
+    sent = 0
+    while time.monotonic() < finish:
+        rclpy.spin_once(node, timeout_sec=period)
+        observation = {
+            'observation.state': torch.tensor(
+                [state['joints']], dtype=torch.float32),
+        }
+        for key in images:
+            if state['frame'] is None:
+                continue
+            frame = numpy.ascontiguousarray(
+                state['frame'].transpose(2, 0, 1))
+            observation[key] = torch.tensor(
+                frame[None], dtype=torch.float32) / 255.0
+        try:
+            with torch.no_grad():
+                action = policy.select_action(observation)
+        except Exception as error:
+            log(f'추론이 실패했습니다: {error}')
+            node.destroy_node()
+            rclpy.shutdown()
+            sys.exit(2)
+        target = [float(value) for value in action.squeeze(0).tolist()]
+        if len(target) < len(names):
+            # 액션이 관절보다 적으면 앞에서부터 채우고 나머지는 그대로 둔다.
+            target = target + list(state['joints'])[len(target):]
+        message = JointTrajectory()
+        message.joint_names = names[:len(target)]
+        point = JointTrajectoryPoint()
+        point.positions = target[:len(message.joint_names)]
+        point.time_from_start.sec = int(COMMAND_HORIZON)
+        point.time_from_start.nanosec = int((COMMAND_HORIZON % 1) * 1e9)
+        message.points.append(point)
+        command.publish(message)
+        sent += 1
+
+    # 끝내고 시작 자세로 돌아간다. 다음 요청이 늘 같은 자리에서 시작하도록.
+    message = JointTrajectory()
+    message.joint_names = names
+    point = JointTrajectoryPoint()
+    point.positions = home
+    point.time_from_start.sec = int(HOME_SECONDS)
+    message.points.append(point)
+    command.publish(message)
+    end = time.monotonic() + HOME_SECONDS
+    while time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    log(f'[{args.policy_id}] 추론 동작을 끝냈습니다 (명령 {sent}회)')
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+''';
 
 /// 파이썬 문자열 목록 리터럴.
 String _pyList(List<String> values) =>

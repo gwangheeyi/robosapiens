@@ -39,13 +39,6 @@
     </include>
   </group>
 
-  <!-- pinky_02 · PK-02 -->
-  <group>
-    <include file="$(var map_dir)/robots/pinky_02/nav2.launch.xml">
-      <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    </include>
-  </group>
-
   <!-- RMF 와 Nav2 를 잇는다. 이것이 없으면 RMF 가 배차해도
        로봇이 안 움직인다.
 
@@ -59,7 +52,7 @@
        /fleet_states 의 실제 로봇 등록 상태도 별도로 감시한다. -->
   <executable output="screen"
               respawn="true" respawn_delay="5.0"
-              cmd="python3 $(var map_dir)/project1-ver2_nav2_adapter.py -c $(var map_dir)/project1_pinky_config.yaml -n $(var map_dir)/nav_graphs/0.yaml -s"/>
+              cmd="python3 $(var map_dir)/project1-ver2_nav2_adapter.py -c $(var map_dir)/pinky_config.yaml -n $(var map_dir)/nav_graphs/0.yaml -s"/>
 
   <!-- 설비 로봇을 RMF 워크셀로 잇는다. 이것이 없으면 로봇이
        픽업 자리에 닿아도 RMF 가 답을 못 받아 영원히

@@ -8,6 +8,7 @@ import 'dart:io';
 
 import 'rmf_config_export.dart';
 import 'rmf_runtime_models.dart';
+import 'ros_probe_io.dart';
 import 'workspace_paths_io.dart';
 
 /// 노드 이름이 이 조각을 담고 있으면 RMF 백엔드로 본다.
@@ -52,6 +53,24 @@ Directory? _findProjectRoot() {
 /// 것이든 터미널에서 띄운 것이든 똑같이 잡힌다.
 ///
 /// 중지 스크립트 자신은 세지 않는다 — 그 경로에도 맵 디렉터리가 들어 있다.
+///
+/// **`building_map_server` 도 세지 않는다.** 맵을 배포하면 `deploy_map.sh` 가
+/// 그것 하나를 띄워 두고 끝난다(일부러 남긴다 — 배포한 지도를 바로 볼 수 있게).
+/// 그 명령줄에 `<맵 디렉터리>/<맵>.building.yaml` 이 들어 있어서, 예전에는
+/// 그것 하나만으로 이 함수가 프로젝트를 돌고 있다고 답했다.
+///
+/// 실측(2026-08-17) — 배포만 하고 백엔드는 안 띄운 상태:
+///
+///     $ pgrep -af .../rmf_maps/project1-ver2 | grep -cv stop_
+///     2        ← ros2 run 껍데기와 building_map_server
+///
+/// 그러면 앱은 **Gazebo 도 RMF 도 Nav2 도 어댑터도 없는데** 백엔드가 돈다고
+/// 본다. 그 상태로 확인표를 매기면 뒤 단계가 전부 `모른다` 가 아니라 `막힘`
+/// 이 되어 `rmf-nav2 연결 실패` 로 보이고, 백엔드를 띄우려 해도 이미 돈다고
+/// 한다.
+///
+/// 지도 서버 하나는 백엔드가 아니다. 백엔드는 실행 스크립트·Gazebo·RMF·Nav2·
+/// 어댑터이고, 그것들도 전부 맵 디렉터리를 물고 있어서 빼도 놓치지 않는다.
 Future<List<String>> runningBackendProjects() async {
   // 위젯 테스트에서는 프로세스를 뒤지지 않는다. 진짜 pgrep 을 띄우면 그
   // 프로세스가 테스트보다 오래 살고, 확인하는 것도 없다.
@@ -70,7 +89,8 @@ Future<List<String>> runningBackendProjects() async {
       final found = await Process.run('bash', [
         '-lc',
         'pgrep -u "\$(id -u)" -af ${_shellQuote(entry.path)} 2>/dev/null '
-            "| grep -cv 'stop_' || true",
+            "| grep -v 'stop_' "
+            "| grep -cv 'building_map_server' || true",
       ]).timeout(const Duration(seconds: 10));
       final count = int.tryParse(found.stdout.toString().trim()) ?? 0;
       if (count > 0) running.add(name);
@@ -167,8 +187,7 @@ Future<String> sweepOrphanBackends(String rootPath) async {
   if (Platform.environment.containsKey('FLUTTER_TEST')) {
     return '테스트에서는 쓸어내지 않습니다.';
   }
-  final rmfWorkspace =
-      Platform.environment['RMF_WS'] ?? '$rootPath/rmf_ws';
+  final rmfWorkspace = Platform.environment['RMF_WS'] ?? '$rootPath/rmf_ws';
   try {
     final result = await Process.run('bash', [
       '-c',
@@ -307,12 +326,35 @@ String _withRosEnvironment(String command) {
 }
 
 /// 떠 있는 RMF 노드를 확인한다.
-Future<RmfRuntimeStatus> probeRmfRuntime() async {
+///
+/// **이것은 곁들이는 정보다. 백엔드가 떠 있는지는 프로세스로 판정한다.**
+/// 노드 목록은 아무리 정확히 읽어도 실제보다 늦다 — 강제 종료된 노드는 DDS 에
+/// 떠난다고 알리지 못해 십수 초 더 남는다(실측 약 16초). 부르는 쪽에서
+/// `runningBackendProjects()` 와 함께 보고, 둘이 어긋나면 유령으로 적는다.
+///
+/// [rosDomainId] 를 반드시 넘긴다. 백엔드는 프로젝트가 정한 도메인에서 도는데
+/// 여기만 안 넘기면 0 번을 세게 되고, 22 번에서 멀쩡히 도는 백엔드를 두고
+/// `떠 있는 Open-RMF 백엔드가 없습니다` 라고 답한다 — 오류는 안 난다.
+Future<RmfRuntimeStatus> probeRmfRuntime({required int rosDomainId}) async {
   try {
     final result = await Process.run('bash', [
       '-lc',
-      _withRosEnvironment('ros2 node list'),
-    ]).timeout(const Duration(seconds: 12));
+      // `--no-daemon` 을 쓴다. ros2 데몬은 CLI 가 빠르라고 두는 **캐시**라,
+      // 죽은 노드를 한참 동안 살아 있다고 답한다. 실측 — 백엔드를 전부 내리고
+      // 프로세스가 하나도 없는데도 데몬은 `/pinky_01/amcl` `/map_server`
+      // `/gz_bridge` 등 12개가 넘게 살아 있다고 했고, 같은 순간 `--no-daemon`
+      // 은 하나도 없다고 답했다. 그동안 화면은 계속 `백엔드가 떠 있습니다`
+      // 였다.
+      //
+      // 캐시는 도메인도 붙들고 있다. 데몬이 다른 도메인에서 먼저 떴으면 여기서
+      // 도메인을 넘겨도 그쪽 그래프를 그대로 내놓는다.
+      //
+      // 대신 탐색 시간을 준다. 1초로는 멀쩡히 떠 있는 것을 절반쯤 놓친다.
+      _withRosEnvironment(
+        'export ROS_DOMAIN_ID=$rosDomainId; '
+        'ros2 node list --no-daemon --spin-time 3',
+      ),
+    ]).timeout(const Duration(seconds: 20));
     if (result.exitCode != 0) {
       final error = result.stderr.toString().trim();
       return RmfRuntimeStatus(
@@ -489,7 +531,7 @@ Future<RmfFleetSnapshot> probeFleetStates({
   }
 }
 
-/// `/clock` 을 내는 곳이 몇 군데인지 센다. 못 세면 null.
+/// `/clock` 을 ROS 에 내는 곳이 몇 군데인지 센다. 못 세면 null.
 ///
 /// **하나여야 한다.** 둘이면 언제나 잘못된 상태다 — 이전 실행에서 남은
 /// `parameter_bridge` 가 살아 있다는 뜻이고, 두 시계가 번갈아 나오니 시각이
@@ -498,33 +540,109 @@ Future<RmfFleetSnapshot> probeFleetStates({
 ///
 /// 로봇은 멀쩡한데 가만히 서 있고, 원인이 한 시간 전에 남은 프로세스라는 것은
 /// 어디에도 안 보인다. 실제로 그렇게 39번 튀었다.
+///
+/// ## DDS 그래프가 아니라 프로세스를 센다
+///
+/// 예전에는 `ros2 topic info /clock` 으로 발행자 수를 물었다. 그런데 그 답이
+/// **틀린다.** `--no-daemon` 은 그때그때 참가자를 새로 만들어 DDS 를 훑는데,
+/// 탐색이 짧으면 멀쩡히 도는 발행자를 못 본다. 실측(2026-08-15, 발행자가 정확히
+/// 하나인 상태) —
+///
+/// ```
+/// spin-time 3 → 1 1 0 1 0 1 1 1     8번 중 2번이 0
+/// spin-time 5 → 1 1 1 1 0 1         6번 중 1번이 0
+/// spin-time 8 → 1 1 1 1 1 1
+/// ```
+///
+/// `0` 은 화면에서 `Gazebo 가 죽었다` 로 읽힌다. 그래서 확인표가 켜졌다 꺼졌다
+/// 했다. 시간을 늘리면 확률만 낮아질 뿐 없어지지 않고, 8초짜리 프로세스를
+/// 10초마다 띄우는 값도 싸지 않다.
+///
+/// ROS 의 `/clock` 을 내는 것은 **`ros_gz_bridge` 의 `parameter_bridge` 하나뿐**
+/// 이다. Gazebo 는 제 전송(gz-transport)으로 낼 뿐이고, 그것을 ROS 토픽으로
+/// 옮기는 것이 다리다. 그러니 다리를 세면 된다 — 즉시 참이고, 탐색 경합이 없고,
+/// 애초에 잡으려던 원인(남은 다리)을 바로 가리킨다.
+///
+/// 설정 파일에 `/clock` 이 없는 다리는 세지 않는다. 한 프로젝트가 다리를 여럿
+/// 띄우더라도 시계를 내는 것만 문제이기 때문이다. 설정을 못 읽으면 세는 쪽으로
+/// 둔다 — 놓치는 것보다 한 번 더 묻는 편이 낫다.
 Future<int?> probeClockPublishers({
   required int rosDomainId,
-  // 탐색에 3초를 쓰므로 그보다 넉넉해야 한다.
-  Duration timeout = const Duration(seconds: 15),
+  Duration timeout = const Duration(seconds: 10),
 }) async {
-  final seconds = timeout.inSeconds.clamp(2, 60);
   try {
     final result = await Process.run('bash', [
       '-lc',
-      _withRosEnvironment(
-        // `--no-daemon` 을 쓴다. 데몬은 CLI 가 빠르라고 두는 **캐시**라, 죽은
-        // 발행자를 한동안 살아 있다고 답한다. 유령 다리를 죽인 직후에도
-        // "2곳" 이 남아 확인표가 거짓말을 한다.
-        //
-        // 대신 탐색 시간을 늘려야 한다. 기본값으로 그냥 부르면 멀쩡히 도는
-        // Gazebo 를 못 보고 0 을 돌려준다 — 실측: spin-time 1 → 0, 3 → 1,
-        // 5 → 1. 0 은 `Gazebo 가 죽었다` 로 읽히므로 낡은 값보다 나쁘다.
-        'export ROS_DOMAIN_ID=$rosDomainId; '
-        'timeout $seconds ros2 topic info /clock --no-daemon --spin-time 3',
-      ),
-    ]).timeout(timeout + const Duration(seconds: 4));
+      // 다리 프로세스의 명령줄을 그대로 받아 온다. 설정 파일 경로가 거기 있다.
+      'pgrep -u "\$(id -u)" -af "ros_gz_bridge/parameter_bridge" 2>/dev/null'
+          ' || true',
+    ]).timeout(timeout);
     if (result.exitCode != 0) return null;
-    final match = RegExp(
-      r'Publisher count:\s*(\d+)',
-    ).firstMatch(result.stdout.toString());
-    return match == null ? null : int.tryParse(match.group(1)!);
+    // 명령이 **다리 실행 파일 자신**인 줄만 센다.
+    //
+    // `pgrep -af` 는 그 글자를 명령줄에 담은 것을 전부 잡는다 — 이 검사를 띄운
+    // 셸도 걸린다. 실측으로 다리가 하나인데 2 가 나왔다. 이 저장소는 `gz sim`
+    // 에서 같은 함정을 이미 겪었다.
+    final bridge = RegExp(r'^\d+\s+\S*ros_gz_bridge/parameter_bridge(\s|$)');
+    var count = 0;
+    for (final line in result.stdout.toString().split('\n')) {
+      if (!bridge.hasMatch(line)) continue;
+      final config = RegExp(r'config_file:=(\S+)').firstMatch(line);
+      if (config == null) {
+        // 설정을 안 넘긴 다리는 무엇을 잇는지 알 수 없다. 세어 둔다.
+        count++;
+        continue;
+      }
+      final file = File(config.group(1)!);
+      if (!file.existsSync()) {
+        count++;
+        continue;
+      }
+      try {
+        if (file.readAsStringSync().contains('/clock')) count++;
+      } catch (_) {
+        count++;
+      }
+    }
+    return count;
   } catch (_) {
     return null;
   }
+}
+
+/// Nav2 `map_server` 의 생명주기 상태. 못 물으면 null.
+///
+/// `active` 여야 지도를 낸다. 여기가 아니면 아래가 전부 무너지는데, 증상은
+/// 세 단계 떨어진 곳에 뜬다 —
+///
+///     amcl:            Waiting for map....
+///     global_costmap:  Invalid frame ID "map" ... frame does not exist
+///     어댑터:          TF 를 못 읽어 로봇을 등록 못 함
+///     화면:            "어댑터가 죽었습니다"  ← 어댑터는 멀쩡한데
+///
+/// 실제로 2026-08-17 에 그렇게 나왔다. 어댑터는 살아서 30초마다 재기동되고
+/// 있었고, 진짜로 멈춰 있던 것은 `map_server` 였다(`inactive`).
+///
+/// **프로세스로는 알 수 없다.** map_server 는 꺼져 있어도 프로세스로는 멀쩡히
+/// 살아 있다 — 생명주기 노드라 상태가 프로세스와 따로 논다. 그래서 이 검사만
+/// 물어보는 방식을 쓴다. 서비스 호출은 토픽 탐색과 달리 상대가 살아 있으면
+/// 즉시 답하므로 경합이 없다.
+Future<String?> probeMapServerState({
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 15),
+}) async {
+  // 답이 없으면 이 호출은 영영 안 끝난다. 시한을 넘기면 프로세스까지 끊는다.
+  final result = await runRosProbe(
+    _withRosEnvironment(
+      'export ROS_DOMAIN_ID=$rosDomainId; '
+      'ros2 service call /map_server/get_state '
+      'lifecycle_msgs/srv/GetState',
+    ),
+    timeout: timeout,
+  );
+  if (result == null) return null;
+  final match = RegExp(
+    r"label='([a-z]+)'",
+  ).firstMatch(result.stdout.toString());
+  return match?.group(1);
 }

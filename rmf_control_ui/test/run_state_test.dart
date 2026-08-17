@@ -203,4 +203,57 @@ sleep 300
       expect((await findOrphanedProjects()).map((p) => p.mapName), [mapName]);
     });
   });
+
+  group('백엔드 실패 진단', () {
+    test('컨트롤러를 정말 못 올렸으면 그 이름을 짚는다', () async {
+      File('${mapDir.path}/$mapName.err.log').writeAsStringSync('''
+[ERROR] Loader for controller 'arm_controller' (type 'joint_trajectory_controller/JointTrajectoryController') not available.
+[ERROR] Loader for controller 'gripper_controller' (type 'position_controllers/GripperActionController') not available.
+''');
+
+      final report = await diagnoseProjectBackendFailure(mapName);
+
+      expect(report, contains('arm_controller'));
+      expect(report, contains('gripper_controller'));
+      // `position_controllers/GripperActionController` 는 **틀린 이름이 아니다.**
+      // `gripper_controllers` 패키지가 내보내는 클래스 이름이 그것이다(패키지
+      // 이름과 클래스 이름이 다르다). Jazzy 가 권하는 새 이름은
+      // `parallel_gripper_controllers/...` 이고, 없는 이름을 쓰라고 하면 사람이
+      // 고칠 수 없는 것을 고치러 간다.
+      expect(report, isNot(contains('잘못 지정됐습니다')));
+      expect(report, isNot(contains('Jazzy에서는 gripper_controllers 패키지')));
+      // 형식 이름을 권한다면 **있는 이름**이라야 한다.
+      if (report.contains('GripperActionController 로 바꿔')) {
+        expect(
+          report,
+          contains('parallel_gripper_controllers/GripperActionController'),
+        );
+      }
+      expect(report, contains('최근 오류 로그'));
+
+      // 깔려 있으면 깔라고 하지 않는다. 그것이 예전에 사람을 헛되이 돌린
+      // 부분이다(2026-08-17, 셋 다 active 인데 apt install 을 시켰다).
+      final installed = File(
+        '/opt/ros/jazzy/lib/libgripper_action_controller.so',
+      ).existsSync();
+      expect(
+        report.contains('sudo apt install ros-jazzy-gripper-controllers'),
+        installed ? isFalse : isTrue,
+      );
+    });
+
+    test('정상 기동 로그를 실패로 읽지 않는다', () async {
+      // 컨트롤러가 멀쩡히 올라올 때도 형식 이름과 [Deprecated] 는 찍힌다.
+      File('${mapDir.path}/$mapName.err.log').writeAsStringSync('''
+[INFO] Loading controller : 'gripper_controller' of type 'position_controllers/GripperActionController'
+[WARN] [Deprecated]: the `position_controllers/GripperActionController` controllers are replaced by 'parallel_gripper_controllers/GripperActionController' controller
+''');
+
+      final report = await diagnoseProjectBackendFailure(mapName);
+
+      expect(report, isNot(contains('플러그인이 설치되지 않았습니다')));
+      expect(report, isNot(contains('apt install')));
+      expect(report, contains('자동으로 특정하지 못했습니다'));
+    });
+  });
 }

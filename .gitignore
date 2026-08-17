@@ -5,9 +5,10 @@
 # 벤더 ROS 패키지. 각 상위 저장소에서 받는다.
 # rmf_control_ui/docs/PINKY_FLEET_INTEGRATION.md 참고.
 /robot_model/
-# 이전 실행 스크립트와 외부 문서를 위한 호환 링크.
-/pinky_pro
-/open_manipulator
+# 이전 위치가 다시 생겨도 Git에 올라가지 않게 한다. 호환 심볼릭 링크는
+# 만들지 않으며, 앱은 이 경로가 있으면 디렉터리 구조 경고를 보여 준다.
+/pinky_pro/
+/open_manipulator/
 
 # 맵 배포 산출물. 앱의 `배포하기`로 다시 만든다.
 /rmf_maps/*/nav_graphs/
@@ -17,6 +18,8 @@
 
 # 전역 WorkCell Policy 보관함. Hugging Face/ZIP 원본은 로컬에서 관리한다.
 /workcell_policies/
+/policies/
+**/policies/
 
 # 프로젝트별 WorkCell Policy 연결과 레거시 모델·ZIP 배포본.
 # 프로젝트 삭제·재생성과 관계없이 모두 로컬 운영 데이터로 취급한다.

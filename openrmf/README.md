@@ -23,7 +23,7 @@ openrmf_app (Flutter)
 
 Prerequisites:
 
-- Ubuntu 24.04, ROS 2 Jazzy and a built `~/rmf_ws`
+- Ubuntu 24.04, ROS 2 Jazzy and a built `~/robosapiens/rmf_ws`
 - Docker access for the current user
 - Flutter with Linux desktop support
 
@@ -164,7 +164,7 @@ console offline.
 
 | Variable | Default |
 | --- | --- |
-| `RMF_WS` | `$HOME/rmf_ws` |
+| `RMF_WS` | `$HOME/robosapiens/rmf_ws` |
 | `RMF_API_URL` | `http://127.0.0.1:8000` |
 | `RMF_SERVER_URI` | `ws://127.0.0.1:8000/_internal` |
 | `ROS_DOMAIN_ID` | `0` |

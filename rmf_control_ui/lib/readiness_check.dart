@@ -76,11 +76,24 @@ class ReadinessReport {
   }
 }
 
+/// 어댑터가 `/fleet_states` 를 내기까지 기다려 주는 시간.
+///
+/// 백엔드를 띄우면 Gazebo·RMF core 가 먼저 서고 어댑터는 마지막에 붙는다. 그
+/// 사이에는 토픽이 없는 것이 **정상**이다. 실측(2026-08-15) — 실행 14:44:59,
+/// 어댑터 노드 14:45:23, 로봇 등록 14:45:31 로 32초가 걸렸다. 넉넉히 두 배를
+/// 준다.
+///
+/// 이 시간을 안 두면 띄울 때마다 30초 동안 `어댑터가 죽었습니다` 가 뜬다.
+const adapterStartupGrace = Duration(seconds: 60);
+
 /// 지금 상태로 확인표를 만든다.
 ///
 /// [attachedRobots] 는 `/fleet_states` 에서 읽은 로봇 이름이다. [fleetReachable]
 /// 이 false 면 그 토픽을 못 읽었다는 뜻이라, 빈 목록을 "로봇이 하나도 안 붙었다"
 /// 로 읽으면 안 된다.
+///
+/// [backendUptime] 은 백엔드가 뜬 뒤로 지난 시간이다. 못 읽은 것이 **아직**인지
+/// **끊긴 것**인지는 이것으로 가른다.
 ReadinessReport buildReadinessReport({
   required List<String> waypointNames,
   required List<RmfProjectRobot> robots,
@@ -92,6 +105,11 @@ ReadinessReport buildReadinessReport({
   Nav2MapAlignment? alignment,
   // `/clock` 을 내는 곳의 수. null 이면 못 셌다.
   int? clockPublishers,
+  // Nav2 `map_server` 의 생명주기 상태(`active` 여야 지도가 나온다).
+  // null 이면 못 물었다.
+  String? mapServerState,
+  // 백엔드가 뜬 뒤로 지난 시간. null 이면 언제 떴는지 모른다.
+  Duration? backendUptime,
 }) {
   final places = waypointNames
       .where((name) => name.trim().isNotEmpty)
@@ -252,6 +270,56 @@ ReadinessReport buildReadinessReport({
     );
   }
 
+  // ④-1 지도 서버. 어댑터보다 **앞**이라야 한다.
+  //
+  //     map_server → (지도) → AMCL → (map TF) → 어댑터 → /fleet_states
+  //
+  // 여기가 끊기면 뒤가 전부 무너지는데, 예전에는 맨 끝만 보고 `어댑터가
+  // 죽었습니다` 라고 했다. 2026-08-17 에 실제로 그랬다 — 어댑터는 멀쩡히
+  // 살아서 30초마다 재기동되고 있었고, 멈춰 있던 것은 map_server 였다.
+  //
+  // 생명주기 관리자가 activate 를 안 보내는 일이 있다. change_state 응답
+  // 시한이 5초로 코드에 박혀 있어(파라미터가 없다) 기계가 바쁘면 늦고,
+  // 관리자는 실패로 보고 거기서 멈춘 채 다시 시도하지 않는다.
+  final mapServerReady = mapServerState == 'active';
+  if (!backendRunning) {
+    checks.add(
+      const ReadinessCheck(
+        title: 'Nav2 지도 서버',
+        state: ReadinessState.unknown,
+        detail: '백엔드가 떠야 확인할 수 있습니다',
+      ),
+    );
+  } else if (mapServerState == null) {
+    checks.add(
+      const ReadinessCheck(
+        title: 'Nav2 지도 서버',
+        state: ReadinessState.unknown,
+        detail: 'map_server 에 상태를 묻지 못했습니다. 아직 뜨는 중일 수 있습니다.',
+      ),
+    );
+  } else if (mapServerReady) {
+    checks.add(
+      const ReadinessCheck(
+        title: 'Nav2 지도 서버',
+        state: ReadinessState.ready,
+        detail: 'map_server 가 active 입니다. 지도가 나옵니다.',
+      ),
+    );
+  } else {
+    checks.add(
+      ReadinessCheck(
+        title: 'Nav2 지도 서버',
+        state: ReadinessState.blocked,
+        detail:
+            'map_server 가 [$mapServerState] 에 멈춰 있어 지도가 안 나옵니다. '
+            'AMCL 이 map TF 를 못 내고, 그래서 로봇이 RMF 에 못 붙습니다. '
+            '실행 스크립트가 스스로 켜려고 하지만 안 되면 백엔드를 다시 '
+            '실행하세요. 로그: <맵>.err.log 의 "Waiting for map"',
+      ),
+    );
+  }
+
   // ⑤ 어댑터. 이것이 RMF 안에서 /nav_graphs 와 /fleet_states 를 내는 유일한
   //    노드다. 죽으면 RViz 에서 경로와 로봇이 통째로 사라지는데 오류는 안 난다.
   if (!backendRunning) {
@@ -268,6 +336,33 @@ ReadinessReport buildReadinessReport({
         title: 'RMF↔Nav2 어댑터',
         state: ReadinessState.ready,
         detail: '/fleet_states 가 나오고 있습니다',
+      ),
+    );
+  } else if (backendUptime != null && backendUptime < adapterStartupGrace) {
+    // 아직 안 온 것과 끊긴 것은 다르다. 뜨는 중을 빨간불로 보여 주면, 30초만
+    // 기다리면 될 것을 두고 멀쩡한 어댑터의 원인을 찾게 된다.
+    checks.add(
+      ReadinessCheck(
+        title: 'RMF↔Nav2 어댑터',
+        state: ReadinessState.unknown,
+        detail:
+            '/fleet_states 를 아직 못 받았습니다. 어댑터는 Gazebo·RMF core 다음에 '
+            '붙어서 ${adapterStartupGrace.inSeconds}초쯤 걸립니다 — 조금 기다려 '
+            '주세요.',
+      ),
+    );
+  } else if (mapServerState != null && !mapServerReady) {
+    // 지도가 없으면 어댑터는 **살아 있어도** 등록할 수 없다. 로봇 위치를
+    // TF 에서 읽는데 AMCL 이 map TF 를 안 내기 때문이다. 여기서 어댑터를
+    // 죽었다고 하면, 멀쩡한 어댑터의 원인을 찾느라 시간을 버린다.
+    checks.add(
+      const ReadinessCheck(
+        title: 'RMF↔Nav2 어댑터',
+        state: ReadinessState.blocked,
+        detail:
+            '/fleet_states 가 안 나옵니다. 다만 어댑터 탓이 아닙니다 — '
+            '위의 Nav2 지도 서버부터 켜져야 합니다. 지도가 없으면 어댑터가 '
+            '로봇 위치를 읽지 못해 플릿에 등록할 수 없습니다.',
       ),
     );
   } else {

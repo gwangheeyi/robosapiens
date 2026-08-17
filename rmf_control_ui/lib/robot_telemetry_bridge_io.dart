@@ -119,8 +119,28 @@ class RobotTelemetryBridge {
   Process? _fleetProcess;
   StreamSubscription<String>? _fleetLines;
 
+  /// 백엔드가 도는 ROS 도메인.
+  ///
+  /// **`ros2` 를 부를 때마다 넘겨야 한다.** 앱은 ROS 를 source 하지 않은 셸에서
+  /// 도는데, `bash -lc` 는 로그인 셸이어도 비대화형이라 `~/.bashrc` 의 export 를
+  /// 못 읽는다(`case $- in *i*` 에서 곧바로 return). 그래서 아무것도 안 넘기면
+  /// 0 번 도메인에서 듣게 되고, 22 번에서 도는 백엔드의 토픽이 하나도 안 보인다
+  /// — 오류는 안 난다.
+  ///
+  /// 실제로 그래서 어댑터가 멀쩡히 10Hz 로 `/fleet_states` 를 내고 있는데
+  /// 확인표는 `어댑터가 죽었습니다` 라고 했다. 도메인을 넘기는 다른 확인
+  /// (`probeClockPublishers`)만 초록이라 더 헷갈렸다.
+  int _rosDomainId = defaultRosDomainId;
+
   /// RMF 가 알려 준 로봇 자세. odom 으로 계산한 것보다 이쪽이 옳다.
   final Map<String, RobotPose> _fleetPoses = {};
+
+  /// `/fleet_states` 를 마지막으로 **받은** 시각. 한 번도 못 받았으면 null.
+  ///
+  /// 프로세스가 살아 있는 것과 값이 오는 것은 다르다. 어댑터가 죽어도
+  /// `ros2 topic echo` 는 그대로 기다리고 있어서, 프로세스만 보면 영영 정상으로
+  /// 읽힌다. 마지막으로 받은 때를 함께 들고 있어야 끊긴 것을 안다.
+  DateTime? _fleetStatesAt;
 
   /// 지금까지 받은 자세.
   ///
@@ -140,6 +160,12 @@ class RobotTelemetryBridge {
   /// 마지막 `/fleet_states` 메시지에 실제로 들어 있던 RMF 로봇 ID.
   Set<String> get attachedRobotIds => _fleetPoses.keys.toSet();
 
+  /// `/fleet_states` 를 마지막으로 받은 시각. 한 번도 못 받았으면 null.
+  ///
+  /// 부르는 쪽이 이것으로 **아직 못 받았다**와 **끊겼다**를 가른다. 빈 로봇
+  /// 목록 하나로 뭉뚱그리면 뜨는 중인 어댑터가 죽은 것으로 읽힌다.
+  DateTime? get fleetStatesAt => _fleetStatesAt;
+
   RobotTelemetryStatus get status {
     if (_wanted.isEmpty) return RobotTelemetryStatus.idle;
     final live = _wanted.keys.where(poses.containsKey).length;
@@ -154,7 +180,19 @@ class RobotTelemetryBridge {
   ///
   /// 이미 붙어 있는 것은 그대로 두고, 빠진 것만 끊고 새로 생긴 것만 붙인다.
   /// 매번 전부 다시 띄우면 화면이 잠깐씩 빈다.
-  Future<void> sync(Iterable<RmfProjectRobot> robots) async {
+  ///
+  /// [rosDomainId] 는 백엔드가 도는 도메인이다. 반드시 넘긴다 — [_rosDomainId]
+  /// 를 보라.
+  Future<void> sync(
+    Iterable<RmfProjectRobot> robots, {
+    required int rosDomainId,
+  }) async {
+    // 도메인이 바뀌면 읽고 있던 것을 끊는다. 그대로 두면 아무 오류 없이 옛
+    // 도메인만 계속 듣는다.
+    if (_rosDomainId != rosDomainId) {
+      _rosDomainId = rosDomainId;
+      await _closeFleetStates();
+    }
     final wanted = {
       for (final robot in robots)
         if (robot.runsInGazebo) robot.robotId: robot,
@@ -203,7 +241,10 @@ class RobotTelemetryBridge {
     try {
       final process = await Process.start('bash', [
         '-lc',
-        _withRosEnvironment('exec ros2 topic echo /fleet_states'),
+        _withRosEnvironment(
+          'export ROS_DOMAIN_ID=$_rosDomainId; '
+          'exec ros2 topic echo /fleet_states',
+        ),
       ]);
       _fleetProcess = process;
       // 메시지 하나가 여러 줄이다. `---` 가 나올 때까지 모았다가 한 번에 푼다.
@@ -220,6 +261,7 @@ class RobotTelemetryBridge {
             block.clear();
             if (parsed.isEmpty) return;
             final at = DateTime.now();
+            _fleetStatesAt = at;
             for (final entry in parsed.entries) {
               _fleetPoses[entry.key] = RobotPose(
                 x: entry.value.x,
@@ -237,6 +279,7 @@ class RobotTelemetryBridge {
           // 값을 지운다. 남겨 두면 백엔드가 내려간 뒤에도 마지막 자리에
           // 로봇이 서 있는 것처럼 보인다.
           _fleetPoses.clear();
+          _fleetStatesAt = null;
           _controller.add(status);
         }),
       );
@@ -244,6 +287,20 @@ class RobotTelemetryBridge {
       // 토픽이 아직 없을 수 있다. 다음 sync 나 healer 가 다시 부른다.
       _fleetProcess = null;
     }
+  }
+
+  /// `/fleet_states` 읽기를 끊는다.
+  ///
+  /// 프로세스를 비우고 나서 죽인다 — 순서를 바꾸면 `exitCode` 처리기가 아직
+  /// 제 것인 줄 알고 방금 띄운 다음 프로세스의 값을 지운다.
+  Future<void> _closeFleetStates() async {
+    await _fleetLines?.cancel();
+    _fleetLines = null;
+    final target = _fleetProcess;
+    _fleetProcess = null;
+    target?.kill(ProcessSignal.sigint);
+    _fleetPoses.clear();
+    _fleetStatesAt = null;
   }
 
   /// 5초마다 죽은 구독을 다시 띄운다.
@@ -268,11 +325,7 @@ class RobotTelemetryBridge {
     _healer?.cancel();
     _healer = null;
     _wanted.clear();
-    await _fleetLines?.cancel();
-    _fleetLines = null;
-    _fleetProcess?.kill(ProcessSignal.sigint);
-    _fleetProcess = null;
-    _fleetPoses.clear();
+    await _closeFleetStates();
     for (final feed in _feeds.values.toList()) {
       await feed.close();
     }

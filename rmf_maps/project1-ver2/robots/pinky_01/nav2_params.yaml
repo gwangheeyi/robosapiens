@@ -42,7 +42,7 @@
       x: 1.613276
       y: -1.087752
       z: 0.0
-      yaw: 0.000000
+      yaw: -3.132866
 
 /pinky_01/bt_navigator:
   ros__parameters:
@@ -99,7 +99,7 @@
 
       # 제자리 회전 (고개 먼저 돌리기)
       use_rotate_to_heading: true            # 경로 방향과 로봇 헤딩이 다를 때 제자리 회전 먼저 하기
-      rotate_to_heading_min_angle: 0.35      # [rad] 약 20도 이상 차이나면 제자리 회전 모드 진입
+      rotate_to_heading_min_angle: 0.785 # [rad] 약 20도 이상 차이나면 제자리 회전 모드 진입
       rotate_to_heading_angular_vel: 1.0     # [rad/s] 제자리 회전할 때의 회전 속도
 
       # 커브길 감속 (Regulated)
@@ -160,7 +160,7 @@
       plugin: "nav2_controller::SimpleGoalChecker"
       stateful: true
       xy_goal_tolerance: 0.100 # [m] 목표 지점 반경 0.25m 안에 들어오면 도착 인정
-      yaw_goal_tolerance: 0.25                   # [rad] 목표 각도 오차 약 14도 이내면 올바르게 본 것으로 인정
+      yaw_goal_tolerance: 0.087 # [rad] 목표 각도 오차 약 14도 이내면 올바르게 본 것으로 인정
 
     # ==========================================================
     # 4. 주행 진척도 검사 (Progress Checker)

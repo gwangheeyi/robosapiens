@@ -16,6 +16,7 @@ import json
 import math
 import sys
 import threading
+import math
 import time
 import uuid
 
@@ -33,16 +34,26 @@ from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from rmf_dispenser_msgs.msg import DispenserRequest, DispenserRequestItem, DispenserResult
+from rmf_fleet_msgs.msg import FleetState
+from rmf_task_msgs.msg import ApiRequest
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from std_msgs.msg import String as StringMsg
 import tf2_ros
+
+# 워크셀이 실패라고 답했을 때 다시 물어보는 횟수.
+#
+# 실패가 늘 영구적인 것은 아니다. 로봇이 도착 직후 마지막 자세를 다듬는 동안
+# 걸리면, 몇 초 뒤에는 멀쩡히 된다. 한 번 실패했다고 작업을 접으면 멀쩡한
+# 픽업이 버려진다.
+WORKCELL_RETRIES = 3
+WORKCELL_RETRY_SECONDS = 5.0
 
 # 진행 상황을 내보내는 자리. 앱이 이것을 읽어 단계를 넘긴다.
 #
 # RMF 의 작업 상태는 rmf-web 의 웹소켓으로만 나간다. 웹서버를 띄우지 않으면
 # 어디에서도 볼 수 없다. 그런데 목적지를 하나씩 받는 것은 이 어댑터이므로,
 # 여기가 진행을 아는 가장 이른 자리다.
-PROGRESS_TOPIC = 'project1_pinky/task_progress'
+PROGRESS_TOPIC = 'pinky/task_progress'
 _progress = None
 
 
@@ -57,7 +68,6 @@ def report(**fields):
 # RMF 가 아는 이름 -> ROS 네임스페이스.
 ROBOT_NAMESPACES = {
     'pinky_01': 'pinky_01',
-    'pinky_02': 'pinky_02',
 }
 
 # 건물 층 이름. nav graph 의 level 과 같아야 한다.
@@ -107,8 +117,26 @@ class RobotAdapter:
         self.dispenser_execution = None
         self.dispenser_request_guid = None
         self.dispenser_target_guid = None
+        self.dispenser_item = 'policy_1'
+        self.dispenser_quantity = 1
+        self.dispenser_attempt = 0
+
+        # 워크셀이 끝내 안 되면 작업을 취소해야 한다. 취소하려면 작업 번호가
+        # 필요한데, 그것은 우리가 만든 것이 아니라 RMF 가 붙인 것이다.
+        # `/fleet_states` 에 실려 오므로 여기서 받아 둔다.
+        self.current_task_id = ''
+        self.task_api = node.create_publisher(
+            ApiRequest, 'task_api_requests', request_qos)
+        self.fleet_state_subscription = node.create_subscription(
+            FleetState, '/fleet_states', self.on_fleet_state, 10)
         # pybind C++가 콜백을 사용하는 동안 Python 객체가 회수되지 않게 한다.
         self.callbacks = self.make_callbacks()
+
+    def on_fleet_state(self, msg):
+        for robot in msg.robots:
+            if robot.name == self.name:
+                self.current_task_id = robot.task_id
+                return
 
     # ── RMF 가 부르는 쪽 ────────────────────────────────────────────────
 
@@ -246,17 +274,33 @@ class RobotAdapter:
             execution.finished()
             return
 
-        request_guid = f'{self.name}-{uuid.uuid4()}'
         with self.lock:
             self.execution = execution
             self.dispenser_execution = execution
-            self.dispenser_request_guid = request_guid
             self.dispenser_target_guid = str(target_guid)
-        self.node.get_logger().info(
-            f'[{self.name}] 동작 [{category}] → 워크셀 [{target_guid}] 요청 '
-            f'({request_guid})')
+            self.dispenser_item = item_type
+            self.dispenser_quantity = quantity
+            self.dispenser_attempt = 0
         report(robot=self.name, event='action_start',
                category=category, seconds=seconds)
+        self.send_workcell_request()
+
+    def send_workcell_request(self):
+        """워크셀에 적재를 부탁한다. 다시 부탁할 때도 여기로 온다."""
+        request_guid = f'{self.name}-{uuid.uuid4()}'
+        with self.lock:
+            if self.dispenser_execution is None:
+                return
+            self.dispenser_request_guid = request_guid
+            self.dispenser_attempt += 1
+            attempt = self.dispenser_attempt
+            target_guid = self.dispenser_target_guid
+            item_type = self.dispenser_item
+            quantity = self.dispenser_quantity
+        again = '' if attempt == 1 else f' (다시 {attempt - 1}번째)'
+        self.node.get_logger().info(
+            f'[{self.name}] 동작 [armLoad] → 워크셀 [{target_guid}] 요청'
+            f'{again} ({request_guid})')
         request = DispenserRequest()
         request.time = self.node.get_clock().now().to_msg()
         request.request_guid = request_guid
@@ -270,30 +314,95 @@ class RobotAdapter:
         self.dispenser_requests.publish(request)
 
     def on_dispenser_result(self, result):
+        """워크셀의 답. 셋 중 하나이고, **셋 다 반드시 처리해야 한다.**
+
+        예전에는 실패를 오류로 적고 그냥 돌아갔다. 그러면 RMF 는 이 동작이
+        끝나기를 영원히 기다리고 로봇은 그 자리에 선 채로 남는다 — 오류
+        팝업도 안 뜨고, 로그를 열어 보기 전에는 아무도 모른다. 2026-08-17 에
+        핑키가 픽업3 에서 그렇게 멈춰 있었다.
+        """
         with self.lock:
             if (result.request_guid != self.dispenser_request_guid or
                     self.dispenser_execution is None):
                 return
+            target = self.dispenser_target_guid
             if result.status == DispenserResult.ACKNOWLEDGED:
                 self.node.get_logger().info(
-                    f'[{self.name}] 워크셀 [{self.dispenser_target_guid}]이 '
-                    '요청을 받았습니다.')
+                    f'[{self.name}] 워크셀 [{target}]이 요청을 받았습니다.')
                 return
-            if result.status != DispenserResult.SUCCESS:
-                self.node.get_logger().error(
-                    f'[{self.name}] 워크셀 요청 실패 (status={result.status})')
-                return
-            execution = self.dispenser_execution
-            target = self.dispenser_target_guid
-            self.dispenser_execution = None
+            attempt = self.dispenser_attempt
+            retry = (result.status != DispenserResult.SUCCESS
+                     and attempt <= WORKCELL_RETRIES)
             self.dispenser_request_guid = None
-            self.dispenser_target_guid = None
-            if self.execution is execution:
-                self.execution = None
-        self.node.get_logger().info(
-            f'[{self.name}] 워크셀 [{target}] 동작 완료.')
-        report(robot=self.name, event='action_done', category='armLoad')
-        execution.finished()
+            if retry:
+                # 다시 부탁할 것이라 execution 은 그대로 쥐고 있는다.
+                execution = None
+            else:
+                execution = self.dispenser_execution
+                self.dispenser_execution = None
+                self.dispenser_target_guid = None
+                if self.execution is execution:
+                    self.execution = None
+
+        # 락 밖에서 알린다. 여기서 부르는 것들이 다시 락을 잡는다.
+        if result.status == DispenserResult.SUCCESS:
+            self.node.get_logger().info(f'[{self.name}] 워크셀 [{target}] 동작 완료.')
+            report(robot=self.name, event='action_done', category='armLoad')
+            execution.finished()
+            return
+
+        self.node.get_logger().error(
+            f'[{self.name}] 워크셀 [{target}] 요청 실패 (status={result.status})')
+        if retry:
+            # 늘 영구적인 실패가 아니다. 로봇이 도착 직후 마지막 자세를 다듬는
+            # 동안 걸리면 몇 초 뒤에는 멀쩡히 된다. 한 번 실패했다고 작업을
+            # 접으면 멀쩡한 픽업이 버려진다.
+            self.node.get_logger().warning(
+                f'[{self.name}] {WORKCELL_RETRY_SECONDS:.0f}초 뒤에 다시 '
+                f'부탁합니다 ({attempt}/{WORKCELL_RETRIES}).')
+            self.retry_workcell_later()
+            return
+        self.node.get_logger().error(
+            f'[{self.name}] 워크셀 [{target}] 요청이 {WORKCELL_RETRIES}번 다시 '
+            '부탁해도 계속 실패했습니다. 작업을 취소합니다 — 그냥 두면 로봇이 '
+            '그 자리에 영원히 서 있습니다.')
+        report(robot=self.name, event='action_failed', category='armLoad')
+        self.cancel_current_task()
+
+    def retry_workcell_later(self):
+        """조금 뒤에 다시 부탁한다. 콜백 안에서 자므로 타이머를 쓴다."""
+        timer = None
+
+        def again():
+            timer.cancel()
+            self.send_workcell_request()
+
+        timer = self.node.create_timer(WORKCELL_RETRY_SECONDS, again)
+
+    def cancel_current_task(self):
+        """이 로봇이 하던 RMF 작업을 취소한다.
+
+        RMF 에 "이 동작이 실패했다" 고 말할 방법이 없다 — EasyFullControl 의
+        `CommandExecution` 에는 `finished()` 만 있고 `okay()` 는 읽기 전용이다
+        (RMF 가 우리에게 알리는 쪽이다). `finished()` 를 부르면 성공한 척이
+        되어 빈 수납함으로 다음 자리에 간다.
+
+        그래서 작업을 취소한다. 로봇이 풀려나고, 화면에도 취소로 보인다.
+        아무 말 없이 서 있는 것보다 낫다.
+        """
+        task_id = self.current_task_id
+        if not task_id:
+            self.node.get_logger().error(
+                f'[{self.name}] 취소할 작업 번호를 모릅니다. 로봇이 이 자리에 '
+                '남습니다 — 화면에서 작업을 취소해 주세요.')
+            return
+        request = ApiRequest()
+        request.request_id = f'{self.name}-cancel-{str(uuid.uuid4())[:8]}'
+        request.json_msg = json.dumps(
+            {'type': 'cancel_task', 'task_id': task_id}, ensure_ascii=False)
+        self.task_api.publish(request)
+        self.node.get_logger().error(
+            f'[{self.name}] 작업 [{task_id}] 취소를 보냈습니다.')
 
     # ── RMF 에 알리는 쪽 ────────────────────────────────────────────────
 
@@ -357,7 +466,7 @@ class RobotAdapter:
 def main(argv=sys.argv):
     rclpy.init(args=argv)
     rmf_adapter.init_rclcpp()
-    parser = argparse.ArgumentParser(prog='project1_pinky' + '_nav2_adapter')
+    parser = argparse.ArgumentParser(prog='pinky' + '_nav2_adapter')
     parser.add_argument('-c', '--config_file', required=True)
     parser.add_argument('-n', '--nav_graph', required=True)
     parser.add_argument('-s', '--use_sim_time', action='store_true')

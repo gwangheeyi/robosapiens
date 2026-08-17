@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'ros_probe_io.dart';
 import 'workspace_paths_io.dart';
 
 export 'robot_link_check.dart';
@@ -64,11 +65,13 @@ Future<RobotLinkProbe> probeRobotLinks({
   bool? topicSeen;
   bool? topicFlowing;
   try {
-    final graph = await Process.run('bash', [
-      '-lc',
+    // DDS 가 어긋나면 이 물음은 영영 안 끝난다. 시한을 넘기면 프로세스까지
+    // 끊어야 매달린 `ros2` 가 쌓이지 않는다.
+    final graph = await runRosProbe(
       _withRosEnvironment('ros2 node list; echo "---"; ros2 topic list'),
-    ]).timeout(const Duration(seconds: 12));
-    final text = '${graph.stdout}';
+      timeout: const Duration(seconds: 12),
+    );
+    final text = '${graph?.stdout ?? ''}';
     if (text.trim().isNotEmpty) {
       final parts = text.split('---');
       final nodes = parts.first;

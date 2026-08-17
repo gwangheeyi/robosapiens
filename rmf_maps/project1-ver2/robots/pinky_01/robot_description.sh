@@ -13,6 +13,18 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-pinky_01}"
 CAM_TILT_DEG="${CAM_TILT_DEG:-0}"
 
+# 핑키에 카메라를 달지. 기본은 안 단다 — 받는 곳이 없는 그림을 그리느라
+# 시뮬이 1/6 속도로 돌았다. 까닭과 실측은 rmf_project_config.dart 의
+# cameraEnabled 주석에 있다.
+CAM_ENABLED="${CAM_ENABLED:-0}"
+
+# 되살릴 때 붙는 값.
+CAM_WIDTH="${CAM_WIDTH:-640}"
+CAM_HEIGHT="${CAM_HEIGHT:-360}"
+CAM_HZ="${CAM_HZ:-5}"
+# 1 로 두면 보는 사람이 없어도 계속 그린다. 벤더 값이 그렇다.
+CAM_ALWAYS_ON="${CAM_ALWAYS_ON:-0}"
+
 XACRO="$(ros2 pkg prefix pinky_description)"
 XACRO="$XACRO/share/pinky_description/urdf/robot.urdf.xacro"
 
@@ -27,13 +39,46 @@ xacro "$XACRO" \
   is_sim:=true \
   cam_tilt_deg:="$CAM_TILT_DEG" > "$RAW"
 
-python3 - "$RAW" "$NAMESPACE" <<'PYTHON'
+python3 - "$RAW" "$NAMESPACE" "$CAM_ENABLED" "$CAM_WIDTH" "$CAM_HEIGHT" \
+  "$CAM_HZ" "$CAM_ALWAYS_ON" <<'PYTHON'
 import re
 import sys
 
 path, namespace = sys.argv[1], sys.argv[2]
+camera = sys.argv[3:8]
 with open(path, encoding="utf-8") as handle:
     urdf = handle.read()
+
+# ── 카메라 ──────────────────────────────────
+# 기본은 안 단다. 까닭과 실측은 rmf_project_config.dart 의 cameraEnabled 주석.
+enabled, width, height, hz, always_on = camera
+
+
+def tune(match):
+    block = match.group(0)
+    block = re.sub(r'<width>\d+</width>',
+                   '<width>' + width + '</width>', block)
+    block = re.sub(r'<height>\d+</height>',
+                   '<height>' + height + '</height>', block)
+    block = re.sub(r'<update_rate>[^<]+</update_rate>',
+                   '<update_rate>' + hz + '</update_rate>', block)
+    block = re.sub(r'<always_on>[^<]+</always_on>',
+                   '<always_on>' + always_on + '</always_on>', block)
+    return block
+
+
+camera_block = r'<sensor[^>]*type="camera"[\s\S]*?</sensor>\s*'
+if enabled == '1':
+    urdf, touched = re.subn(camera_block, tune, urdf)
+else:
+    # 카메라를 떼어 낸다. 받는 곳이 없는 그림을 그리느라 시뮬이 느려진다.
+    urdf, touched = re.subn(camera_block, '', urdf)
+    # 센서가 빠져 껍데기만 남은 <gazebo reference="...camera..."> 도 걷어낸다.
+    urdf = re.sub(
+        r'<gazebo reference="[^"]*camera[^"]*">\s*</gazebo>\s*', '', urdf)
+if touched == 0:
+    sys.stderr.write('카메라 sensor 를 못 찾았습니다.\n')
+
 
 links = set(re.findall('<link name="([^"]+)"', urdf))
 joints = set(re.findall('<joint name="([^"]+)"', urdf))

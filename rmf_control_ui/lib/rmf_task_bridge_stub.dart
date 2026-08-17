@@ -7,6 +7,9 @@ import 'rmf_task_models.dart';
 
 export 'rmf_task_models.dart';
 
+/// io 판과 짝을 맞춘다. 웹에서는 붙을 토픽이 없어 아무도 안 기다린다.
+const Duration topicDiscoveryDelay = Duration.zero;
+
 class RmfTaskBridge {
   RmfTaskBridge._();
 
@@ -22,12 +25,13 @@ class RmfTaskBridge {
     required String mapDirectory,
     required String mapName,
     required String requestJson,
+    required int rosDomainId,
   }) async => const RmfTaskSubmission(
     accepted: false,
     message: '웹에서는 RMF 에 작업을 넣을 수 없습니다.',
   );
 
-  Future<void> watch(String fleetName) async {}
+  Future<void> watch(String fleetName, {required int rosDomainId}) async {}
 
   Future<void> stop() async {}
 }

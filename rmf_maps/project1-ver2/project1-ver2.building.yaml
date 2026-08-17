@@ -53,9 +53,9 @@ levels:
       - [353.841, 1385.176, 0.0, "대기5", {is_holding_point: [4, true]}]
       - [350.048, 1698.029, 0.0, "픽업2", {pickup_dispenser: [1, "픽업2"]}]
       - [353.412, 1890.569, 0.0, "설비2", {robosapiens_equipment: [4, true]}]
-      - [1658.966, 947.021, 0.0, "드랍오프2", {dropoff_ingestor: [1, "드랍오프2"]}]
-      - [1025.696, 1677.020, 0.0, "픽업3", {pickup_dispenser: [1, "픽업3"]}]
-      - [1000.673, 1947.240, 0.0, "설비3", {robosapiens_equipment: [4, true]}]
+      - [1658.966, 947.021, 0.0, "드랍오프2", {dropoff_ingestor: [1, "드랍오프2"], robosapiens_dock_heading: [3, 178.500]}]
+      - [1025.696, 1677.020, 0.0, "픽업3", {pickup_dispenser: [1, "픽업3"], robosapiens_dock_heading: [3, 90.300]}]
+      - [1004.101, 2135.080, 0.0, "설비3", {robosapiens_equipment: [4, true]}]
     walls:
       - [4, 13, {alpha: [3, 1], texture_height: [3, 0.300], texture_name: [1, default], texture_scale: [3, 1], texture_width: [3, 1]}]
       - [4, 6, {alpha: [3, 1], texture_height: [3, 0.300], texture_name: [1, default], texture_scale: [3, 1], texture_width: [3, 1]}]

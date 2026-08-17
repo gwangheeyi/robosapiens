@@ -30,6 +30,9 @@ Future<RmfRunResult> startProject(
 Future<RmfRunResult> stopProject([String? mapName]) async =>
     const RmfRunResult(success: false, message: '웹 빌드에서는 중지할 것이 없습니다.');
 
+Future<String> diagnoseProjectBackendFailure(String mapName) async =>
+    '웹 빌드에서는 로컬 백엔드 로그를 읽을 수 없습니다.';
+
 class OrphanedProject {
   const OrphanedProject({required this.mapName, required this.pgid});
   final String mapName;

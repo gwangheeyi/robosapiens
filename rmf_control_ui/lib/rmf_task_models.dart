@@ -79,8 +79,21 @@ class RmfTaskProgress {
 
   final String robotId;
 
-  /// `navigate_start` · `navigate_done` · `action_start` · `action_done`.
+  /// 어댑터가 내는 여섯 가지.
+  ///
+  ///     navigate_start   navigate_done   navigate_failed
+  ///     action_start     action_done     action_failed
+  ///
+  /// **끝나는 소식은 셋이 아니라 넷이다.** `*_failed` 를 안 받으면 어댑터가
+  /// 작업을 접은 뒤에도 화면은 계속 `진행중` 이라고 적어 둔다 — 2026-08-17 에
+  /// 실제로 그랬다.
   final String event;
+
+  /// 끝났다는 소식인가. 잘 끝났든 못 끝났든.
+  bool get isFinish => isArrival || isFailure;
+
+  /// 못 끝났다는 소식인가.
+  bool get isFailure => event == 'navigate_failed' || event == 'action_failed';
 
   /// 이동 소식이면 RMF 월드 좌표의 목적지.
   final double? x;

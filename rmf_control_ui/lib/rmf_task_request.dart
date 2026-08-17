@@ -13,6 +13,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:math' as math;
 
 /// 매니퓰레이터 적재 단계를 RMF 에 알리는 이름.
 ///
@@ -32,7 +33,32 @@ class RmfTaskActivity {
   ///
   /// [place] 는 nav graph 의 Waypoint 이름이다. 좌표가 아니다 — 좌표를 주면
   /// RMF 가 그 자리를 그래프에서 못 찾는다.
+  ///
+  /// 자세는 RMF 가 알아서 정한다 — 보통 들어온 길 방향이다.
   const RmfTaskActivity.goToPlace(String place) : this._('go_to_place', place);
+
+  /// Waypoint 로 가되 **그 자세로 서야** 도착으로 친다.
+  ///
+  /// RMF 의 `place.json` 이 `{"waypoint": …, "orientation": …}` 를 받고,
+  /// `FleetUpdateHandle.cpp` 가 그 값을 경로계획의 목표 자세로 넣는다. 거기서
+  /// 어댑터의 `navigate` 로, 다시 Nav2 `NavigateToPose` 의 목표 자세로
+  /// 내려간다. Nav2 는 `yaw_goal_tolerance` 안에 들어올 때까지 성공을 안
+  /// 내므로, 로봇이 다 돌기 전에는 다음 단계가 시작되지 않는다.
+  ///
+  /// 핑키는 수납함을 뒤에 달고 다닌다. 픽업 자리에서 이것이 없으면 수납함이
+  /// 팔에서 가장 먼 자리에 온다.
+  ///
+  /// [orientationRadians] 는 **라디안**이다. 도를 그대로 넣으면 로봇이 몇
+  /// 바퀴를 돈다.
+  ///
+  /// 각도를 안 정한 자리에 이 생성자를 쓰면 안 된다. `orientation: null` 은
+  /// RMF 스키마가 안 받으므로, 단계 하나가 아니라 **작업 전체**가 거절된다.
+  /// 그래서 각도 없는 쪽은 [RmfTaskActivity.goToPlace] 로 따로 둔다.
+  RmfTaskActivity.goToPlaceFacing(String place, double orientationRadians)
+    : this._('go_to_place', {
+        'waypoint': place,
+        'orientation': orientationRadians,
+      });
 
   /// 플릿이 따로 맡은 동작. 어댑터의 `execute_action` 이 받는다.
   ///
@@ -165,7 +191,7 @@ class RmfTaskStepInput {
   final String? placeName;
   final double durationSeconds;
 
-  /// 워크셀이 실행할 물품별 가상 정책. DispenserRequest item type으로 전달된다.
+  /// 워크셀이 실행할 물품별 가상 Policy. DispenserRequest item type으로 전달된다.
   final String policyId;
 }
 
@@ -181,14 +207,34 @@ class RmfTaskConversion {
   bool get isEmpty => activities.isEmpty;
 }
 
+/// 도를 라디안으로. RMF 는 라디안만 쓴다.
+///
+/// `null` 은 그대로 `null` 이다 — 각도를 안 정한 것과 0 도는 다르다.
+double? _radians(double? degrees) =>
+    degrees == null ? null : degrees * math.pi / 180;
+
+/// 자리 하나로 가는 activity. 각도를 정해 뒀으면 그 자세까지 요구한다.
+RmfTaskActivity _goTo(String place, double? Function(String)? headings) {
+  final radians = _radians(headings?.call(place));
+  return radians == null
+      ? RmfTaskActivity.goToPlace(place)
+      : RmfTaskActivity.goToPlaceFacing(place, radians);
+}
+
 /// 앱 단계 목록을 RMF activity 목록으로 옮긴다.
 ///
 /// 이동 단계에 목적지 이름이 없으면 버린다 — 좌표만 있는 단계는 RMF 가 갈
 /// 곳을 정할 수 없다. 버린 것은 [RmfTaskConversion.skipped] 에 남긴다.
+///
+/// [dockHeadingDegrees] 는 자리 이름을 받아 그 자리에서 로봇이 볼 방향을
+/// 돌려준다. **자리 이름이 다 정해진 뒤에** 부른다 — 홈 복귀 단계는 목적지가
+/// 비어 있으면 [homePlaceName] 으로 채워지므로, 그 전에 찾으면 홈의 각도를
+/// 놓친다.
 RmfTaskConversion convertTaskSteps(
   List<RmfTaskStepInput> steps, {
   String? homePlaceName,
   String armLoadCategory = rmfArmLoadAction,
+  double? Function(String place)? dockHeadingDegrees,
 }) {
   final activities = <RmfTaskActivity>[];
   final skipped = <String>[];
@@ -203,7 +249,7 @@ RmfTaskConversion convertTaskSteps(
           skipped.add('$number번째 이동 — 목적지 Waypoint 이름이 없습니다');
           continue;
         }
-        activities.add(RmfTaskActivity.goToPlace(place));
+        activities.add(_goTo(place, dockHeadingDegrees));
         lastPlace = place;
       case 'returnHome':
         final place = (step.placeName?.trim().isNotEmpty ?? false)
@@ -213,7 +259,7 @@ RmfTaskConversion convertTaskSteps(
           skipped.add('$number번째 홈 복귀 — 돌아갈 자리가 정해지지 않았습니다');
           continue;
         }
-        activities.add(RmfTaskActivity.goToPlace(place));
+        activities.add(_goTo(place, dockHeadingDegrees));
         lastPlace = place;
       case 'armLoad':
         if (lastPlace == null) {

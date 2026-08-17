@@ -192,6 +192,60 @@ void main() {
       expect(fixed.spawnY, closeTo(-0.6375845964639578, 1e-9));
     });
 
+    // 설비 로봇은 그 Waypoint 에 붙박여 있다. "따로 고른 시작 자리" 가 없으므로
+    // 이동 로봇에 주는 예외를 그대로 주면, 설비 Waypoint 를 옮겨도 등록이 옛
+    // 자리에 남는다 — 팔은 옛 자리에 서고 핑키만 새 자리로 가서 다시 겹친다.
+    const omx = RmfProjectRobot(
+      robotId: 'omx_01',
+      displayName: 'OMX-01',
+      model: 'omx_f',
+      gzName: 'omx_01',
+      zones: [],
+      kind: RmfRobotKind.workcell,
+      chargerWaypoint: '설비3',
+      // 옛 설비3 자리. 부호도 자릿수도 멀쩡해서 예전에는 그대로 통과했다.
+      spawnX: 1.1699252329465406,
+      spawnY: -2.322449350034983,
+    );
+
+    test('설비 Waypoint 를 옮기면 등록 좌표도 따라온다', () {
+      // project1-ver2 에서 실제로 겪은 일: 설비3 을 5.7cm 옮겨 저장했는데
+      // omx_01 등록은 옛 자리에 남아, 부딪힘 경고가 한 자도 안 바뀌었다.
+      // 새 설비3 픽셀은 (1004.101, 2056.585), 축척은 2.1100m / 1823.895px.
+      const scale = 2.1100 / 1823.895;
+      final fixed = robotsWithMapSpawnPoints(
+        [omx],
+        (_) => (dx: 1004.100557623466, dy: 2056.5849434376137),
+        scale,
+      ).single;
+      expect(fixed.spawnX, closeTo(1.161608632396883, 1e-9));
+      expect(fixed.spawnY, closeTo(-2.3791908145224174, 1e-9));
+      // 픽업3 (1025.696, 1677.020) 까지의 거리가 0.383m 에서 0.440m 로 벌어진다.
+      const pickup = (x: 1.1865916474087188, y: -1.9400854325179644);
+      final gap = math.sqrt(
+        math.pow(fixed.spawnX! - pickup.x, 2) +
+            math.pow(fixed.spawnY! - pickup.y, 2),
+      );
+      expect(gap, closeTo(.4398, 1e-4));
+    });
+
+    test('설비 로봇도 이미 맞으면 목록을 그대로 돌려준다', () {
+      final good = [omx.withSpawn(spawnX: 1.78, spawnY: -0.64)];
+      expect(
+        identical(
+          robotsWithMapSpawnPoints(good, (_) => (dx: 1538.4, dy: 553.0), 0.001),
+          good,
+        ),
+        isFalse,
+      );
+      final settled = robotsWithMapSpawnPoints(
+        good,
+        (_) => (dx: 1780, dy: 640),
+        0.001,
+      );
+      expect(identical(settled, good), isTrue);
+    });
+
     test('축척을 모르면 아무것도 바꾸지 않는다', () {
       final robots = [pinky];
       expect(

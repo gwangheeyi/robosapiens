@@ -23,6 +23,67 @@ RMF_WS="${RMF_WS:-$APP_ROOT/rmf_ws}"
 PINKY_WS="${PINKY_WS:-$APP_ROOT/robot_model/pinky_pro}"
 OMX_WS="${OMX_WS:-$APP_ROOT/robot_model/open_manipulator}"
 
+# 상용 배포 구조는 하나로 고정한다. 환경 변수로 예전 경로를 넘겨 조용히
+# 실행하면 개발 PC에서는 되지만 고객 패키지에서는 빠지는 파일이 생긴다.
+EXPECTED_RMF_WS="$APP_ROOT/rmf_ws"
+EXPECTED_PINKY_WS="$APP_ROOT/robot_model/pinky_pro"
+EXPECTED_OMX_WS="$APP_ROOT/robot_model/open_manipulator"
+WORKSPACE_ENTRIES=(
+  "RMF_WS|$RMF_WS|$EXPECTED_RMF_WS"
+  "PINKY_WS|$PINKY_WS|$EXPECTED_PINKY_WS"
+  "OMX_WS|$OMX_WS|$EXPECTED_OMX_WS"
+)
+for entry in "${WORKSPACE_ENTRIES[@]}"; do
+  IFS='|' read -r label actual expected <<< "$entry"
+  if [[ "$actual" != "$expected" || -L "$actual" || ! -d "$actual" ]]; then
+    echo "잘못된 RoboSapiens 파일 구조: $label=$actual" >&2
+    echo "실제 디렉터리를 다음 위치에 두세요: $expected" >&2
+    echo "심볼릭 링크와 외부 workspace는 지원하지 않습니다." >&2
+    exit 1
+  fi
+done
+if [[ ! -f "$RMF_WS/install/setup.bash" ]]; then
+  echo "Open-RMF가 빌드되지 않았습니다: $RMF_WS/install/setup.bash" >&2
+  exit 1
+fi
+
+# ── 지난 실행이 남긴 DDS 공유메모리 정리 ──────────────────────────────────
+#
+# Fast DDS 는 참가자마다 `/dev/shm/fastrtps_*` 를 만든다. 곱게 끝나면 스스로
+# 지우지만, `kill -9` 로 끊기거나 매달린 채 남으면 그대로 쌓인다. 쌓이면
+# **탐색이 무너진다** — 노드는 살아 있는데 서비스가 안 보이고, 옆 노드는
+# 영영 기다린다.
+#
+# 실측(2026-08-17) —
+#
+#     /dev/shm 의 fastrtps_* 484개 (48MB), 그중 200개가 지난 실행 잔재
+#     [lifecycle_manager_map]: Waiting for service map_server/get_state...
+#     → map_server 는 살아 있는데 서비스가 안 보여 지도가 영영 안 켜졌다
+#
+# **도는 것이 있으면 손대지 않는다.** 살아 있는 참가자의 조각을 지우면 그
+# 노드가 통째로 먹통이 된다. 그래서 이 맵의 ROS 프로세스가 하나도 없을 때만
+# 치운다.
+sweep_stale_dds_segments() {
+  local alive
+  alive="$(pgrep -u "$(id -u)" -c -f 'gz sim|ros2 launch|nav2_|rmf_' \
+    2>/dev/null || true)"
+  if [[ "${alive:-0}" != 0 ]]; then
+    echo "ROS 프로세스가 도는 중이라 DDS 공유메모리는 건드리지 않습니다." >&2
+    return 0
+  fi
+  local segments
+  segments="$(find /dev/shm -maxdepth 1 -user "$(id -u)" \
+    \( -name 'fastrtps_*' -o -name 'fastdds_*' \) 2>/dev/null | wc -l)"
+  if ((segments == 0)); then
+    return 0
+  fi
+  find /dev/shm -maxdepth 1 -user "$(id -u)" \
+    \( -name 'fastrtps_*' -o -name 'fastdds_*' \) -delete 2>/dev/null || true
+  echo "지난 실행이 남긴 DDS 공유메모리 $segments 개를 정리했습니다." >&2
+  # 탐색 캐시를 들고 있는 데몬도 함께 내린다. 다음 물음에서 새로 뜬다.
+  ros2 daemon stop >/dev/null 2>&1 || true
+}
+
 # 이 프로젝트의 로봇이 실제로 쓰는 패키지. 등록된 로봇에서 뽑았다.
 REQUIRED_PACKAGES="rmf_demos rmf_demos_fleet_adapter rmf_building_map_tools ros_gz_sim pinky_description robot_state_publisher joint_state_publisher open_manipulator_description"
 
@@ -52,7 +113,17 @@ else
   GUI_DEFAULT=true
 fi
 GAZEBO_GUI="${GAZEBO_GUI:-$GUI_DEFAULT}"
+SIMULATOR_GUI="${SIMULATOR_GUI:-$GAZEBO_GUI}"
+SIM_BACKEND="${SIM_BACKEND:-gazebo}"
 RVIZ="${RVIZ:-$GUI_DEFAULT}"
+
+case "$SIM_BACKEND" in
+  gazebo|isaac_sim|none) ;;
+  *)
+    echo "지원하지 않는 SIM_BACKEND: $SIM_BACKEND (gazebo|isaac_sim|none)" >&2
+    exit 1
+    ;;
+esac
 
 # launch 인자는 반대말(headless)이다. 여기서 한 번만 뒤집는다.
 if is_true "$GAZEBO_GUI"; then GAZEBO_HEADLESS=false; else GAZEBO_HEADLESS=true; fi
@@ -148,12 +219,41 @@ echo "=== $(date '+%Y-%m-%d %H:%M:%S') project1-ver2 실행 ==="
 # 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
 # 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
 echo "Gazebo 창: $GAZEBO_GUI · RViz: $RVIZ · ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
+echo "시뮬레이션 백엔드: $SIM_BACKEND · 시뮬레이터 창: $SIMULATOR_GUI"
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
 # 앱이 detached 로 띄우면 이 셸의 PID 는 그룹 리더가 아니므로, PID 가 아니라
 # 실제 PGID 를 적어야 한다.
 PGID_FILE="$MAP_DIR/.project1-ver2.pgid"
 ps -o pgid= -p $$ | tr -d ' ' > "$PGID_FILE"
+
+# 배포가 남긴 Building Map Server 를 먼저 내린다.
+#
+# `deploy_map.sh` 는 배포를 마치고 `building_map_server` 하나를 **일부러 띄운
+# 채로** 끝난다(배포한 지도를 바로 볼 수 있게). 그런데 아래 launch 도 같은
+# 파일로 제 것을 띄운다. 그대로 두면 `/building_map_server` 라는 **같은 이름의
+# 노드가 둘**이 되고, `/get_building_map` 을 두 곳이 답한다. 누가 답할지는
+# 그때그때 다르다.
+#
+# 게다가 앱은 맵 디렉터리를 물고 있는 프로세스를 세어 백엔드가 도는지 본다.
+# 배포만 하고 아무것도 안 띄웠는데 그 서버 하나 때문에 `백엔드 실행 중` 이
+# 되어, 정작 띄우려 하면 이미 돈다고 한다.
+#
+# 배포한 지도는 이미 파일로 깔려 있고 아래에서 다시 읽는다. 여기서 내려도
+# 잃는 것이 없다.
+DEPLOY_MAP_SERVER_PID="$APP_ROOT/openrmf/.runtime/building_map_server.pid"
+if [[ -f "$DEPLOY_MAP_SERVER_PID" ]]; then
+  stale="$(cat "$DEPLOY_MAP_SERVER_PID" 2>/dev/null || true)"
+  if [[ -n "$stale" ]] && kill -0 "$stale" 2>/dev/null; then
+    echo "배포가 띄워 둔 Building Map Server($stale)를 내립니다 — 이 launch 가"
+    echo "같은 이름으로 제 것을 띄웁니다."
+    kill "$stale" 2>/dev/null || true
+  fi
+  rm -f "$DEPLOY_MAP_SERVER_PID"
+fi
+# pid 파일이 없어도 남아 있을 수 있다(앱이 아닌 곳에서 띄웠거나 파일을 지웠거나).
+pkill -u "$(id -u)" -f \
+  "/rmf_building_map_tools/building_map_server $MAP_DIR/" 2>/dev/null || true
 
 cleanup() {
   echo "정리 중..."
@@ -170,6 +270,9 @@ trap cleanup EXIT INT TERM
 # 로봇까지 안 뜨는데, 화면에는 찾아본 경로 목록만 잔뜩 나와 원인을 알기 어렵다.
 missing=()
 for pkg in $REQUIRED_PACKAGES; do
+  if [[ "$SIM_BACKEND" != gazebo && "$pkg" == ros_gz_sim ]]; then
+    continue
+  fi
   ros2 pkg prefix "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
 done
 if ((${#missing[@]} > 0)); then
@@ -318,6 +421,7 @@ ensure_world_collision_detector "$MAP_DIR/project1-ver2.world"
 # 떠 있는 것과 물리가 도는 것은 다르다. use_sim_time 을 쓰는 RMF 노드는 /clock
 # 이 없으면 시간이 멈춘 줄 알고 그대로 멈춰 있는다.
 GAZEBO_WAIT="${GAZEBO_WAIT:-90}"
+ISAAC_WAIT="${ISAAC_WAIT:-300}"
 wait_for_gazebo() {
   local world="$1"
   local deadline=$((SECONDS + GAZEBO_WAIT))
@@ -331,12 +435,107 @@ wait_for_gazebo() {
   return 1
 }
 
-echo "[1/3] Gazebo bringup"
-ros2 launch "$MAP_DIR/project1-ver2_bringup.launch.xml" headless:="$GAZEBO_HEADLESS" &
-if ! wait_for_gazebo "$MAP_DIR/project1-ver2.world"; then
+# 선택한 물리 백엔드를 시작한다. 양쪽 모두 같은 ROS 토픽(/clock, odom, scan,
+# joint_states, tf, cmd_vel)을 제공해야 이후 Nav2와 RMF를 그대로 쓸 수 있다.
+start_simulator() {
+  case "$SIM_BACKEND" in
+    gazebo)
+      echo "[1/3] Gazebo bringup"
+      ros2 launch "$MAP_DIR/project1-ver2_bringup.launch.xml" headless:="$GAZEBO_HEADLESS" &
+      if ! wait_for_gazebo "$MAP_DIR/project1-ver2.world"; then
+        echo "Gazebo 가 $GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
+        return 1
+      fi
+      ;;
+    isaac_sim)
+      local launcher="${ISAAC_SIM_PYTHON:-}"
+      if [[ -z "$launcher" ]]; then
+        local candidate
+        local candidates=(
+          "${ISAAC_SIM_ROOT:+$ISAAC_SIM_ROOT/python.sh}"
+          "$HOME/isaacsim/python.sh"
+          "$HOME/isaac/isaacsim/_build/linux-x86_64/release/python.sh"
+          "$HOME/isaac/env_isaaclab/bin/python"
+        )
+        for candidate in "${candidates[@]}"; do
+          if [[ -n "$candidate" && -x "$candidate" ]]; then
+            launcher="$candidate"
+            break
+          fi
+        done
+      fi
+      local script="${ISAAC_PROJECT_SCRIPT:-$MAP_DIR/isaac/start_project1-ver2.py}"
+      local converter="${ISAAC_PROJECT_CONVERTER:-$MAP_DIR/isaac/convert_project1-ver2.py}"
+      local stage="${ISAAC_STAGE:-$MAP_DIR/isaac/project1-ver2.usd}"
+      if [[ ! -x "$launcher" ]]; then
+        echo "Isaac Sim Python 실행기를 찾지 못했습니다." >&2
+        echo "확인한 기본 위치: $HOME/isaacsim, $HOME/isaac/isaacsim, $HOME/isaac/env_isaaclab" >&2
+        echo "다른 위치라면 ISAAC_SIM_ROOT 또는 ISAAC_SIM_PYTHON을 지정하세요." >&2
+        return 1
+      fi
+      echo "Isaac Sim Python: $launcher"
+      if [[ ! -f "$script" || ! -f "$converter" ]]; then
+        echo "Isaac Sim 프로젝트 산출물이 없습니다." >&2
+        echo "필요한 파일: $script" >&2
+        echo "필요한 파일: $converter" >&2
+        return 1
+      fi
+      local rebuild=false
+      [[ ! -f "$stage" || "$MAP_DIR/project1-ver2.world" -nt "$stage" ]] && rebuild=true
+      local generator
+      for generator in "$MAP_DIR"/robots/*/robot_description.sh; do
+        [[ -e "$generator" ]] || continue
+        [[ "$generator" -nt "$stage" ]] && rebuild=true
+      done
+      if is_true "$rebuild"; then
+        echo "Gazebo 맵·로봇을 Isaac USD로 자동 변환합니다."
+        mkdir -p "$MAP_DIR/isaac/robots"
+        for generator in "$MAP_DIR"/robots/*/robot_description.sh; do
+          [[ -e "$generator" ]] || continue
+          local robot_id
+          robot_id="$(basename "$(dirname "$generator")")"
+          bash "$generator" > "$MAP_DIR/isaac/robots/$robot_id.urdf"
+        done
+        if ! "$launcher" "$converter" --map-dir "$MAP_DIR" --stage "$stage"; then
+          echo "Gazebo → Isaac USD 자동 변환에 실패했습니다." >&2
+          return 1
+        fi
+      fi
+      if [[ ! -f "$stage" ]]; then
+        echo "Isaac USD가 생성되지 않았습니다: $stage" >&2
+        return 1
+      fi
+      local gui_arg="--headless"
+      is_true "$SIMULATOR_GUI" && gui_arg="--gui"
+      echo "Isaac Sim bringup: $stage"
+      "$launcher" "$script" --stage "$stage" "$gui_arg" &
+      local isaac_pid=$!
+      local deadline=$((SECONDS + ISAAC_WAIT))
+      while ((SECONDS < deadline)); do
+        timeout 5 ros2 topic echo /clock --once >/dev/null 2>&1 && return 0
+        if ! kill -0 "$isaac_pid" 2>/dev/null; then
+          wait "$isaac_pid" || true
+          echo "Isaac Sim 프로세스가 /clock 발행 전에 종료됐습니다." >&2
+          return 1
+        fi
+        sleep 2
+      done
+      echo "Isaac Sim이 $ISAAC_WAIT 초 안에 /clock을 발행하지 않았습니다." >&2
+      return 1
+      ;;
+    none)
+      echo "물리 시뮬레이터 없이 RMF/RViz만 시작합니다."
+      ;;
+  esac
+}
+
+# 띄우기 전에 지난 실행의 잔재부터 치운다. 쌓인 조각은 탐색을 무너뜨린다.
+sweep_stale_dds_segments
+echo "[1/3] 시뮬레이션 백엔드"
+if ! start_simulator; then
   echo "" >&2
-  echo "Gazebo 가 $GAZEBO_WAIT 초 안에 뜨지 않았습니다." >&2
-  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 월드가 없으면 그 둘은" >&2
+  echo "시뮬레이션 백엔드가 준비되지 않았습니다." >&2
+  echo "RMF 와 Nav2 는 띄우지 않고 여기서 멈춥니다 — 물리가 없으면 그 둘은" >&2
   echo "토픽 이름만 만들어 놓고 값은 하나도 못 받습니다." >&2
   echo "" >&2
   echo "무엇이 있었는지: $LOG_FILE" >&2
@@ -364,7 +563,115 @@ ADAPTER_RESPAWN_WAIT="${ADAPTER_RESPAWN_WAIT:-30}"
 ADAPTER_HEALTH_GRACE="${ADAPTER_HEALTH_GRACE:-120}"
 ADAPTER_HEALTH_INTERVAL="${ADAPTER_HEALTH_INTERVAL:-30}"
 ADAPTER_HEALTH_FAILURES="${ADAPTER_HEALTH_FAILURES:-3}"
-EXPECTED_FLEET_ROBOTS="pinky_01 pinky_02"
+EXPECTED_FLEET_ROBOTS="pinky_01"
+
+# ── 지도 서버가 정말 켜졌는지 ──────────────────────────────────────────────
+#
+# `map_server` 는 생명주기 노드다. `nav2_lifecycle_manager` 가 configure 로
+# 지도를 읽히고 activate 로 넘겨야 비로소 지도를 낸다.
+#
+# **그 사이가 끊어진다.** 관리자가 부르는 `change_state` 의 응답 시한이 5초로
+# **코드에 박혀 있다** — 파라미터가 없어 늘릴 수 없다(`ros2 param list
+# /lifecycle_manager_map` 에 `service_timeout` 이 없다). 기계가 바쁘면 지도를
+# 읽는 데 5초가 넘고, map_server 는 제대로 configure 를 마쳤는데 응답만 늦게
+# 간다. 관리자는 그것을 실패로 보고 **거기서 멈춘다. 다시 시도하지 않는다.**
+#
+#     [map_server.rclcpp]: failed to send response to /map_server/change_state
+#                          (timeout): client will not receive response
+#
+# 그러면 map_server 가 inactive 로 남고, 증상은 세 단계 떨어진 곳에 뜬다 —
+#
+#     amcl:            Waiting for map....
+#     global_costmap:  Invalid frame ID "map" ... frame does not exist
+#     어댑터:          TF 를 못 읽어 로봇을 등록 못 함
+#     화면:            "rmf-nav2 연결 실패"
+#
+# 어댑터를 아무리 다시 띄워도 소용없다. 지도가 없는 한 등록할 수 없다.
+# 그래서 어댑터를 탓하기 전에 여기부터 본다. 그리고 멈춰 있으면 **직접
+# 넘긴다** — 관리자가 안 하는 일을 대신 하는 것이라 안전하다.
+#
+# 생명주기 전이 번호: 1=configure 2=cleanup 3=activate 4=deactivate
+MAP_SERVER_WAIT="${MAP_SERVER_WAIT:-90}"
+
+# ── 지난 실행이 남긴 지도 서버 문의 정리 ─────────────────────────────────
+#
+# `ros2 service call` 은 상대가 없으면 **영원히 기다린다.** 지금은 `timeout` 을
+# 씌우지만, 그것이 없던 판으로 띄운 것이 남아 있으면 계속 매달린 채로 같은
+# 도메인을 쓴다 — 실측(2026-08-17) 세 개가 30분 넘게 남아 있었다.
+#
+# **`ros2 service call` 을 통째로 죽이지 않는다.** 사람이 터미널에서 다른
+# 서비스를 부르고 있을 수 있다. 우리가 부르는 그 서비스 이름만 고르고, 지금 이
+# 스크립트의 프로세스 그룹은 건드리지 않는다(우리 것은 timeout 이 거둔다).
+sweep_stale_map_server_calls() {
+  local mine killed=0 pid pgid
+  mine="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  for pid in $(pgrep -u "$(id -u)" -f \
+      'ros2 service call /map_server/' 2>/dev/null || true); do
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    if [[ -z "$pgid" || "$pgid" == "$mine" ]]; then
+      continue
+    fi
+    if kill "$pid" 2>/dev/null; then
+      killed=$((killed + 1))
+    fi
+  done
+  if ((killed > 0)); then
+    echo "지난 실행이 남긴 지도 서버 문의 $killed 개를 정리했습니다." >&2
+  fi
+  return 0
+}
+
+map_server_state() {
+  timeout 15 ros2 service call /map_server/get_state \
+      lifecycle_msgs/srv/GetState 2>/dev/null \
+    | grep -o "label='[a-z]*'" | tail -1 | cut -d"'" -f2
+}
+map_server_transition() {
+  timeout 25 ros2 service call /map_server/change_state \
+    lifecycle_msgs/srv/ChangeState "{transition: {id: $1}}" >/dev/null 2>&1
+}
+# 켜져 있으면 0. 켰으면 0. 아직 못 켜면 1.
+ensure_map_server_active() {
+  local state
+  state="$(map_server_state)"
+  case "$state" in
+    active) return 0 ;;
+    '') return 1 ;;
+    unconfigured|finalized)
+      echo "지도 서버가 [$state] 입니다. 지도를 읽힙니다." >&2
+      map_server_transition 1
+      sleep 2
+      state="$(map_server_state)"
+      ;;
+  esac
+  [ "$state" = inactive ] || return 1
+  echo "지도 서버가 [inactive] 에 멈춰 있습니다. 직접 켭니다." >&2
+  echo "(생명주기 관리자의 5초 시한을 넘겨 activate 가 오지 않았습니다.)" >&2
+  map_server_transition 3
+  sleep 2
+  if [ "$(map_server_state)" = active ]; then
+    echo "지도 서버를 켰습니다. AMCL 이 지도를 받습니다." >&2
+    return 0
+  fi
+  return 1
+}
+watch_map_server() {
+  # 묻기 전에 지난 실행이 남긴 문의부터 거둔다.
+  sweep_stale_map_server_calls
+  local deadline=$((SECONDS + MAP_SERVER_WAIT))
+  while ((SECONDS < deadline)); do
+    ensure_map_server_active && return 0
+    sleep 3
+  done
+  echo "" >&2
+  echo "지도 서버를 $MAP_SERVER_WAIT 초 안에 켜지 못했습니다." >&2
+  echo "지도가 없으면 AMCL 이 map → <로봇>/odom 을 못 내고, 어댑터는 로봇의" >&2
+  echo "위치를 몰라 플릿에 등록하지 못합니다. 화면에는 연결 실패로만 보입니다." >&2
+  echo "지도 파일을 확인하세요: $MAP_DIR/nav2_map/project1-ver2.yaml" >&2
+  echo "오류만 모은 것: $ERR_FILE" >&2
+  return 1
+}
+
 watch_fleet_adapter() {
   local pattern="$MAP_DIR/project1-ver2_nav2_adapter.py"
   local deadline=$((SECONDS + ADAPTER_WAIT))
@@ -403,6 +710,16 @@ watch_fleet_adapter() {
           fi
         done
         if ((missing)); then
+          # 어댑터를 탓하기 전에 지도부터 본다. 지도 서버가 꺼져 있으면 AMCL 이
+          # map TF 를 못 내고, 어댑터는 로봇 위치를 몰라 **영원히** 등록하지
+          # 못한다. 그 상태에서 어댑터만 다시 띄우면 30초마다 되풀이될 뿐이다.
+          if ! ensure_map_server_active; then
+            echo "지도 서버가 아직 안 켜져 있습니다. 어댑터는 그대로 둡니다 —" >&2
+            echo "지도가 없으면 몇 번을 다시 띄워도 등록할 수 없습니다." >&2
+            failed_health=0
+            sleep 5
+            continue
+          fi
           failed_health=$((failed_health + 1))
           if ((failed_health >= ADAPTER_HEALTH_FAILURES)); then
             echo "fleet 등록 확인이 $failed_health 회 연속 실패했습니다. 어댑터를 재기동합니다." >&2
@@ -455,5 +772,8 @@ watch_fleet_adapter() {
 #
 # RMF core 다음이라야 한다. 어댑터는 뜨자마자 schedule node 를 찾는다.
 echo "[3/3] Nav2 와 RMF 어댑터"
+# 지도 서버를 먼저 지킨다. 어댑터 감시자보다 앞이라야 한다 — 어댑터가 등록에
+# 실패하는 첫 이유가 지도가 없어서이기 때문이다.
+watch_map_server &
 watch_fleet_adapter &
 ros2 launch "$MAP_DIR/project1-ver2_nav2.launch.xml"

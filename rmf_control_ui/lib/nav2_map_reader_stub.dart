@@ -5,5 +5,7 @@ import 'nav2_map_alignment.dart';
 
 MapExtentMeters? readNav2MapExtent(String yamlPath) => null;
 
+String fileStamp(String path) => '';
+
 Map<String, ({double x, double y})> readNavGraphWaypoints(String path) =>
     const {};

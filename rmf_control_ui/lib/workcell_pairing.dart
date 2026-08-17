@@ -28,10 +28,10 @@ import 'rmf_project_config.dart';
 /// 않을 팔을 RMF 가 기다린다.
 const double workcellReachMeters = .8;
 
-/// Gazebo 설비에 자동으로 붙이는 기본 물품 정책.
+/// Gazebo 설비에 자동으로 붙이는 기본 물품 Policy.
 ///
 /// 생성되는 workcell 노드의 `POLICY_MOTIONS`와 같은 이름이어야 한다. 사용자가
-/// 설비를 Gazebo 방식으로 등록하면 별도 설정 없이 이 정책들이 작업 편집기에
+/// 설비를 Gazebo 방식으로 등록하면 별도 설정 없이 이 Policy 들이 작업 편집기에
 /// 나타난다.
 const List<String> gazeboWorkcellPolicies = [
   'policy_1',
@@ -52,6 +52,18 @@ List<String> workcellPoliciesFor(List<RmfProjectRobot> robots) {
   );
   return hasGazeboWorkcell ? gazeboWorkcellPolicies : const <String>[];
 }
+
+/// 자리 이름 → 그 자리를 맡는 설비 로봇 ID.
+///
+/// 픽업 단계의 `target_guid` 는 자리 이름이고, 그 요청에 답하는 것은 이 표가
+/// 가리키는 설비 하나다. 그래서 작업에서 고를 수 있는 policy 도 이 설비에 붙은
+/// 것이라야 한다 — 팔마다 학습해 둔 것이 다르기 때문이다.
+Map<String, String> workcellsByStation(WorkcellPairingResult pairing) => {
+  for (final item in pairing.pairings) ...{
+    for (final station in item.dispensers) station: item.robot.robotId,
+    for (final station in item.ingestors) station: item.robot.robotId,
+  },
+};
 
 /// 짝지어진 설비 하나.
 class WorkcellPairing {

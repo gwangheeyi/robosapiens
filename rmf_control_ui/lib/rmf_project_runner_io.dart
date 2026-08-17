@@ -23,6 +23,224 @@ class RmfRunResult {
   final String message;
 }
 
+/// 이 컨트롤러를 **못 올린** 자국이 로그에 있는가.
+///
+/// 이름이 보이는 것과 못 올린 것은 다르다. controller_manager 는 정상으로 올릴
+/// 때도 `Loading controller : 'x' of type '...'` 을 찍고, 낡은 형식이면 성공한
+/// 뒤에도 `[Deprecated]` 를 한 줄 남긴다. 그것을 실패로 읽으면 멀쩡한 백엔드를
+/// 두고 엉뚱한 패키지를 깔라고 시키게 된다.
+bool _controllerFailed(String text, String controller) {
+  final marks = [
+    "Loader for controller '$controller'",
+    "Could not load controller '$controller'",
+    "Failed to load controller '$controller'",
+    "Controller '$controller' with type",
+  ];
+  for (final mark in marks) {
+    if (!text.contains(mark)) continue;
+    // 같은 줄에 실패라고 적혀 있어야 한다.
+    for (final line in text.split('\n')) {
+      if (!line.contains(mark)) continue;
+      final lower = line.toLowerCase();
+      if (lower.contains('error') ||
+          lower.contains('failed') ||
+          lower.contains('could not') ||
+          lower.contains('does not exist') ||
+          lower.contains('not available')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/// `/dev/shm` 에 남아 있는 DDS 조각 수. 못 세면 null.
+///
+/// 숫자를 함께 보여 줘야 "탐색이 무너졌다" 는 말이 손에 잡힌다. 수백 개면
+/// 그것이 원인이고, 열 개 남짓이면 다른 곳을 봐야 한다.
+int? _staleDdsSegments() {
+  try {
+    final directory = Directory('/dev/shm');
+    if (!directory.existsSync()) return null;
+    return directory.listSync().where((entry) {
+      final name = entry.uri.pathSegments.last;
+      return name.startsWith('fastrtps_') || name.startsWith('fastdds_');
+    }).length;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 백엔드가 내려간 뒤 사용자에게 보여 줄 진단 보고서를 만든다.
+///
+/// 실행 스크립트는 detached 이므로 [startProject] 가 성공한 뒤에도 Gazebo 나
+/// ros2_control 이 몇 초 뒤 실패할 수 있다. 그때 단순히 "안 됨" 이라고 하지
+/// 않고 오류 로그, 알려진 원인, 그대로 붙여 넣을 명령을 함께 돌려준다.
+///
+/// **아는 것만 말한다.** 짐작으로 원인을 붙이면 사람이 엉뚱한 곳을 뒤진다.
+Future<String> diagnoseProjectBackendFailure(String mapName) async {
+  final directory = _mapDirectory(mapName);
+  if (directory == null) {
+    return '원인: rmf_maps 디렉터리를 찾을 수 없습니다.\n'
+        '조치: RMF_ROOT를 RoboSapiens 프로젝트 루트로 지정하세요.';
+  }
+  final errorFile = File('$directory/$mapName.err.log');
+  final runFile = File('$directory/$mapName.log');
+  var text = '';
+  for (final file in [errorFile, runFile]) {
+    if (!file.existsSync()) continue;
+    try {
+      final contents = await file.readAsString();
+      // 로그 전체가 수백 MB여도 진단에는 마지막 부분이면 충분하다.
+      final start = contents.length > 24000 ? contents.length - 24000 : 0;
+      text += '\n${contents.substring(start)}';
+    } on FileSystemException {
+      // 한 파일을 못 읽어도 다른 파일과 일반 안내로 진단을 계속한다.
+    }
+  }
+
+  final reasons = <String>[];
+  final commands = <String>[];
+  // 컨트롤러는 **실패한 자국**으로만 판정한다.
+  //
+  // 예전에는 로그에 컨트롤러 **형식 이름**이 보이기만 하면 문제라고 했다.
+  // 그런데 그 이름은 정상으로 뜰 때도 찍힌다 —
+  //
+  //     Loading controller : 'gripper_controller' of type
+  //       'position_controllers/GripperActionController'      ← 성공 경로
+  //     [Deprecated]: the `position_controllers/...` controllers are
+  //       replaced by 'parallel_gripper_controllers/...'      ← 그냥 안내
+  //
+  // 실제로 셋 다 `active` 인데도 "플러그인을 못 찾았다", "형식이 잘못됐다" 가
+  // 떴고, 이미 깔린 패키지를 `apt install` 하라고 시켰다(2026-08-17). 사람이
+  // 엉뚱한 곳을 30분 뒤지게 만드는 것이 조용히 넘기는 것보다 나쁘다.
+  if (_controllerFailed(text, 'arm_controller')) {
+    if (File(
+      '/opt/ros/jazzy/lib/libjoint_trajectory_controller.so',
+    ).existsSync()) {
+      reasons.add(
+        'arm_controller 플러그인은 설치되어 있는데 실행 중인 ROS 환경이 '
+        '찾지 못했습니다. 백엔드를 완전히 중지한 뒤 다시 실행하세요.',
+      );
+    } else {
+      reasons.add('OpenManipulator arm_controller 플러그인이 설치되지 않았습니다.');
+      commands.add('sudo apt install ros-jazzy-joint-trajectory-controller');
+    }
+  }
+  if (_controllerFailed(text, 'gripper_controller')) {
+    // `gripper_controllers` 패키지가 내보내는 이름은 `position_controllers/
+    // GripperActionController` 다(패키지 이름과 클래스 이름이 다르다). 라이브러리
+    // 파일 이름도 `libgripper_action_controller.so` 다 — 예전에는 없는 이름으로
+    // 찾아서 늘 "설치하세요" 가 됐다.
+    if (File(
+      '/opt/ros/jazzy/lib/libgripper_action_controller.so',
+    ).existsSync()) {
+      reasons.add(
+        'gripper_controller 를 못 올렸습니다. 플러그인은 설치되어 있으니 '
+        '백엔드를 완전히 중지한 뒤 다시 실행하세요. '
+        '그래도 안 되면 형식을 Jazzy 의 새 이름 '
+        'parallel_gripper_controllers/GripperActionController 로 바꿔 보세요.',
+      );
+    } else {
+      reasons.add('gripper_controller 플러그인이 설치되지 않았습니다.');
+      commands.add('sudo apt install ros-jazzy-gripper-controllers');
+    }
+  }
+  if (text.contains("invalid choice: 'control'") ||
+      text.contains('ros2controlcli')) {
+    reasons.add('ros2 control 명령 패키지가 설치되지 않았습니다.');
+    commands.add('sudo apt install ros-jazzy-ros2controlcli');
+  }
+  final missingMatch = RegExp(r'없는 ROS 패키지:\s*([^\n\r]+)').firstMatch(text);
+  if (missingMatch != null) {
+    reasons.add('필수 ROS 패키지가 없습니다: ${missingMatch.group(1)!.trim()}');
+  }
+  if (text.contains('Gazebo 가') && text.contains('안에 뜨지 않았습니다')) {
+    reasons.add('Gazebo가 제한 시간 안에 /clock을 발행하지 못했습니다.');
+  }
+  // 실행 스크립트가 스스로 남긴 자국. 여기서 막히면 그 뒤(어댑터·플릿 등록)는
+  // 전부 따라 무너지므로, 뒤쪽 증상보다 이것을 먼저 말해야 한다.
+  if (text.contains('지도 서버를') && text.contains('초 안에 켜지 못했습니다')) {
+    reasons.add(
+      '지도 서버(map_server)가 제한 시간 안에 active 가 되지 못했습니다. '
+      'Nav2 노드는 시뮬 시각으로 도는데 시뮬이 느리면 그 시간이 벽시계로 몇 배가 '
+      '됩니다 — Gazebo 창을 끄고, 카메라 같은 무거운 센서를 뺀 뒤 다시 띄워 '
+      '보세요. 그래도 걸리면 MAP_SERVER_WAIT 를 늘려 실행하세요.',
+    );
+    commands.add('MAP_SERVER_WAIT=300 GAZEBO_GUI=false ./run_$mapName.sh');
+  }
+  // 노드는 살아 있는데 **서비스가 안 보이는** 상태. DDS 탐색이 무너진 것이다.
+  //
+  // 실측(2026-08-17) — `/dev/shm` 에 `fastrtps_*` 484개(48MB)가 쌓여 있었고,
+  // 그중 200개가 지난 실행 잔재였다. 그 상태에서 map_server 프로세스는 멀쩡히
+  // 살아 있었지만 `ros2 node list` 에도 안 나오고 서비스도 안 잡혔다.
+  if (text.contains('Waiting for service map_server/get_state')) {
+    final segments = _staleDdsSegments();
+    reasons.add(
+      'lifecycle manager 가 map_server 의 서비스를 못 찾고 있습니다. '
+      '프로세스는 살아 있는데 서로를 못 보는 것이라 DDS 탐색이 무너진 것입니다'
+      '${segments == null ? '' : ' (/dev/shm 에 DDS 조각 $segments 개)'}. '
+      '백엔드를 완전히 중지하고, 남은 ROS 프로세스가 없는 상태에서 공유메모리를 '
+      '치운 뒤 다시 띄우세요. 실행 스크립트는 띄우기 전에 스스로 치웁니다 — '
+      '옛 스크립트라면 다시 배포하세요.',
+    );
+    commands.add('pkill -f "ros2 service call /map_server/"');
+    commands.add(
+      'ros2 daemon stop; rm -f /dev/shm/fastrtps_* /dev/shm/fastdds_*',
+    );
+  }
+  if (text.contains('RMF fleet state에') && text.contains('등록이 없습니다')) {
+    reasons.add(
+      'fleet adapter 가 로봇을 플릿에 등록하지 못했습니다. 위의 지도 서버 '
+      '문제가 있으면 그것부터 풀어야 합니다 — 지도가 없으면 AMCL 이 위치를 '
+      '못 내고, 위치가 없으면 등록도 없습니다.',
+    );
+  }
+  if (text.contains('Isaac Sim 프로세스가 /clock 발행 전에 종료됐습니다')) {
+    reasons.add('Isaac Sim 프로세스가 /clock 발행 전에 종료됐습니다.');
+  }
+  if (text.contains('세그멘테이션 오류') || text.contains('Segmentation fault')) {
+    reasons.add('시뮬레이터 프로세스가 세그멘테이션 오류로 종료됐습니다.');
+  }
+  if (text.contains('No database selected')) {
+    reasons.add('MySQL 마이그레이션에 사용할 데이터베이스가 선택되지 않았습니다.');
+  }
+
+  final interesting = text.split('\n').where((line) {
+    final lower = line.toLowerCase();
+    return lower.contains('error') ||
+        lower.contains('failed') ||
+        lower.contains('not found') ||
+        lower.contains('실패') ||
+        lower.contains('없습니다') ||
+        lower.contains('종료됐습니다');
+  }).toList();
+  final tail = interesting.length > 12
+      ? interesting.sublist(interesting.length - 12)
+      : interesting;
+
+  final report = StringBuffer('백엔드가 실행 상태에 도달하지 못했습니다.\n');
+  if (reasons.isEmpty) {
+    report.writeln('\n원인: 로그에서 알려진 원인을 자동으로 특정하지 못했습니다.');
+  } else {
+    report.writeln('\n원인');
+    for (final reason in reasons.toSet()) {
+      report.writeln('- $reason');
+    }
+  }
+  if (commands.isNotEmpty) {
+    report.writeln('\n필요한 명령 — 아래 내용을 복사해서 터미널에서 실행하세요.');
+    report.writeln(commands.toSet().join('\n'));
+    report.writeln('\n설치 후 백엔드를 중지하고 다시 실행하세요.');
+  }
+  if (tail.isNotEmpty) {
+    report.writeln('\n최근 오류 로그');
+    report.writeln(tail.join('\n'));
+  }
+  report.writeln('\n전체 로그: $directory/$mapName.err.log');
+  return report.toString().trimRight();
+}
+
 /// 앱이 띄운 프로젝트. 종료할 때 이것만 정리한다.
 ///
 /// **기억일 뿐 사실이 아니다.** 앱 밖에서 `stop_<맵>.sh` 를 돌리면 프로세스는
@@ -194,6 +412,47 @@ Future<RmfRunResult> startProject(
           '설정 파일 메뉴에서 `디스크로 내보내기`를 한 번 눌러 다시 만든 뒤 '
           '실행하세요.',
     );
+  }
+  if (backend == SimulationBackend.isaacSim) {
+    final isaacScript = File('$directory/isaac/start_$mapName.py');
+    final isaacConverter = File('$directory/isaac/convert_$mapName.py');
+    final home = Platform.environment['HOME'] ?? '';
+    final configuredPython = Platform.environment['ISAAC_SIM_PYTHON'];
+    final configuredRoot = Platform.environment['ISAAC_SIM_ROOT'];
+    final candidates = <String>[
+      if (configuredPython != null && configuredPython.isNotEmpty)
+        configuredPython,
+      if (configuredRoot != null && configuredRoot.isNotEmpty)
+        '$configuredRoot/python.sh',
+      if (home.isNotEmpty) '$home/isaacsim/python.sh',
+      if (home.isNotEmpty)
+        '$home/isaac/isaacsim/_build/linux-x86_64/release/python.sh',
+      if (home.isNotEmpty) '$home/isaac/env_isaaclab/bin/python',
+    ];
+    final launcher = candidates
+        .where((path) => File(path).existsSync())
+        .firstOrNull;
+    if (launcher == null) {
+      return const RmfRunResult(
+        success: false,
+        message:
+            'Isaac Sim Python 실행기를 찾지 못했습니다.\n'
+            'ISAAC_SIM_PYTHON 또는 ISAAC_SIM_ROOT를 지정하세요.',
+      );
+    }
+    final missing = <String>[
+      if (!isaacScript.existsSync()) isaacScript.path,
+      if (!isaacConverter.existsSync()) isaacConverter.path,
+    ];
+    if (missing.isNotEmpty) {
+      return RmfRunResult(
+        success: false,
+        message:
+            'Isaac Sim 프로젝트 산출물이 없습니다.\n'
+            '필요한 파일:\n${missing.join('\n')}\n\n'
+            '프로젝트를 다시 저장하여 변환기를 생성한 뒤 실행하세요.',
+      );
+    }
   }
   try {
     // detached 로 띄우면 Dart 가 새 세션을 만들어 주므로 앱이 죽어도 함께

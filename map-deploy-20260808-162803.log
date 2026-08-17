@@ -1,0 +1,46 @@
+배포 로그: /home/gyi/robosapiens/map-deploy-20260808-162803.log
+배포 시작: 2026-08-08 16:28:03 KST
+맵 이름: gwanghee
+[1/7] 오류 검증 완료
+[2/7] building.yaml 및 이미지 준비
+[3/7] nav graph 및 world 생성
+building name: gwanghee
+coordinate system: reference_image
+parsing level L1
+calculating levels relative to L1
+level L1 scale: 0.0011451757166303395
+generating nav data
+writing /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/nav_graphs/0.yaml
+generating /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/gwanghee.world from /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/gwanghee.building.yaml
+building name: gwanghee
+coordinate system: reference_image
+parsing level L1
+calculating levels relative to L1
+level L1 scale: 0.0011451757166303395
+generating model of level L1 in /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/model.config
+generating floor polygon 1 on floor gwanghee_L1
+hole vertices: []
+lift vertices: {}
+[[1, 0, 3], [1, 3, 2], [5, 4, 0], [5, 0, 6], [0, 4, 3]]
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/floor_1.obj
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/blue_linoleum.png
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/floor_1.mtl
+Walls Generation, wall params list: [{'alpha': <building_map.param_value.ParamValue object at 0x787632b97980>, 'texture_height': <building_map.param_value.ParamValue object at 0x787632b979e0>, 'texture_name': <building_map.param_value.ParamValue object at 0x787632b97a10>, 'texture_scale': <building_map.param_value.ParamValue object at 0x787632b97590>, 'texture_width': <building_map.param_value.ParamValue object at 0x787632b97050>}]
+generating wall: 1 on floor: gwanghee_L1
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/default.png
+generate_wall_visual_mesh(gwanghee_L1, /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1)
+  generating /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/wall_1.obj
+  generating /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/meshes/wall_1.mtl
+  wrote /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/generated_models/gwanghee_L1/model.sdf
+11282 bytes written to /home/gyi/robosapiens/rmf_maps/.gwanghee.deploy.oQFxFw/gwanghee.world
+[4/7] RMF 맵 디렉터리에 설치
+[5/7] Building Map Server 재시작
+[6/7] Fleet Adapter 재시작
+[7/7] 새 지도 수신 확인
+DEPLOYED_MAP_DIR=/home/gyi/robosapiens/rmf_maps/gwanghee
+BUILDING_MAP_SERVER_LOG=/home/gyi/robosapiens/openrmf/.runtime/building_map_server.log
+FLEET_ADAPTER_LOG=/home/gyi/robosapiens/openrmf/.runtime/fleet_adapter.log
+DEPLOY_LOG=/home/gyi/robosapiens/map-deploy-20260808-162803.log
+배포가 완료되었습니다: gwanghee
+배포 종료: 2026-08-08 16:28:07 KST (exit=0)

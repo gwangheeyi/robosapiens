@@ -148,6 +148,44 @@ const double nav2CostmapResolution = 0.05;
 /// 벤더가 준 도착 반경 [m]. 사람 다니는 복도를 전제한 값이다.
 const double vendorGoalTolerance = 0.25;
 
+/// 출발 전 제자리 회전에 들어가는 문턱 [rad]. 약 45도.
+///
+/// 벤더 값은 0.35rad(20도)라, 경로가 조금만 꺾여도 멈춰 서서 다 돌고 출발한다.
+/// 이 맵들은 Waypoint 간격이 0.3~0.8m 로 촘촘해 길이 자주 꺾이므로 그 문턱에
+/// 늘 걸린다.
+///
+/// 45도를 넘겨야 제자리 회전을 쓴다. 그 아래는 돌면서 전진해 곡선으로
+/// 빠져나간다.
+const double rotateToHeadingMinAngle = 0.785;
+
+/// 도착으로 치는 각도 오차 [rad]. 약 5도.
+///
+/// 벤더 값은 0.25rad(약 14도)다. 사람 다니는 복도에서 "대충 그쪽을 봤다" 면
+/// 충분한 값이라 여태 문제가 없었다.
+///
+/// 픽업 자리는 다르다. 핑키는 수납함을 뒤에 달고 다니고, 팔이 그 수납함을
+/// 집어야 한다. 수납함이 로봇 중심에서 30cm 쯤 뒤에 있으니 —
+///
+///     14도 어긋남 → 수납함이 옆으로 7.3cm
+///      5도 어긋남 → 수납함이 옆으로 2.6cm
+///
+/// 7cm 는 팔이 헛집는 거리다.
+///
+/// 이 값은 **모든 목적지**에 걸린다. 목적지마다 다른 판정기를 쓰려면
+/// 행동나무(BT) XML 을 따로 만들어야 하는데 그만한 이득이 없다 — 조여서
+/// 손해 보는 것은 목적지마다 회전에 조금 더 쓰는 것뿐이다.
+///
+/// **아직 안 잰 것.** 이것은 "여기 들어오면 도착으로 친다" 는 판정 문턱이지,
+/// 로봇이 실제로 **멎는** 자세가 아니다. 제자리 회전은
+/// `rotate_to_heading_angular_vel: 1.0` rad/s 로 돌다가 판정이 나는 순간
+/// 멈추므로, 멎는 자세는 문턱보다 조금 더 간다. 얼마나 더 가는지는 로봇을
+/// 실제로 돌려 재 봐야 안다.
+///
+/// 그래서 워크셀의 관문(`DOCK_YAW_TOLERANCE`, 약 10도)은 여기에 묶지 않고
+/// 일부러 헐겁게 두었다. 같은 값으로 묶으면 Nav2 가 도착이라고 놓아준 로봇을
+/// 워크셀이 매번 거절해 멀쩡한 작업이 전부 실패한다.
+const double dockYawTolerance = 0.087;
+
 /// 이 맵에서 더 조일 수 없는 도착 반경 [m].
 ///
 /// 코스트맵 한 칸이 0.05m 다. 그보다 촘촘히 요구하면 로봇이 영영 도착하지
@@ -282,6 +320,57 @@ Nav2ParamsRewrite rewriteNav2Params({
         changes.add(
           'xy_goal_tolerance: ${parts.value.trim()} → $after '
           '(맵 축척에 맞춤)',
+        );
+      }
+      continue;
+    }
+
+    // ③-1 출발 전 제자리 회전에 들어가는 문턱.
+    //
+    // 벤더 값은 0.35rad(20도)다. 경로 방향과 로봇이 보는 쪽이 20도만 어긋나도
+    // **멈춰 서서 다 돌고 나서** 출발한다. `allow_reversing` 이 꺼져 있어
+    // 후진으로 때울 수도 없다.
+    //
+    // 이 맵들은 Waypoint 간격이 0.3~0.8m 로 촘촘해서 길이 자주 꺾인다. 20도
+    // 문턱이면 출발할 때마다 제자리 회전이 붙어 "왜 한 바퀴 돌고 가느냐" 가
+    // 된다. 45도로 두면 어지간한 각도는 돌면서 전진해 곡선으로 빠져나가고,
+    // 정말 뒤로 가야 할 때만 제자리 회전이 남는다.
+    //
+    // 로봇을 세워 두는 방향(`spawn_heading`)을 나가는 길에 맞추는 것이 먼저고,
+    // 이것은 그 다음 방어선이다.
+    if (key == 'rotate_to_heading_min_angle') {
+      final before = double.tryParse(parts.value.trim());
+      final after = rotateToHeadingMinAngle.toStringAsFixed(3);
+      out.add(
+        '$indent$key: $after'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before == null || (before - rotateToHeadingMinAngle).abs() > 1e-9) {
+        changes.add(
+          'rotate_to_heading_min_angle: ${parts.value.trim()} → $after '
+          '(약 45도. 출발할 때 제자리 회전을 줄인다)',
+        );
+      }
+      continue;
+    }
+
+    // ③-1-1 도착으로 치는 각도 오차.
+    //
+    // 작업의 `go_to_place` 에 `orientation` 을 실으면 RMF 가 그 자세를 경로의
+    // 마지막 목표로 넣고, 어댑터가 그대로 `NavigateToPose` 목표 자세에 담는다.
+    // 그 자세에 들어왔는지 판정하는 것이 이 값이다 — 여기가 헐거우면 위에서
+    // 아무리 정확한 각도를 보내도 그만큼 어긋난 채로 "도착" 이 된다.
+    if (key == 'yaw_goal_tolerance') {
+      final before = double.tryParse(parts.value.trim());
+      final after = dockYawTolerance.toStringAsFixed(3);
+      out.add(
+        '$indent$key: $after'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before == null || (before - dockYawTolerance).abs() > 1e-9) {
+        changes.add(
+          'yaw_goal_tolerance: ${parts.value.trim()} → $after '
+          '(약 5도. 픽업 자리에서 수납함을 팔에 대야 한다)',
         );
       }
       continue;

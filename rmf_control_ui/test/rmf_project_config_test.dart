@@ -1199,6 +1199,30 @@ void main() {
   });
 
   group('프로젝트 launch', () {
+    test('Isaac Sim 실행기를 현재 설치 구조에서도 자동으로 찾는다', () {
+      final script = buildProjectRunScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/maps/gwanghee',
+      );
+
+      expect(
+        script,
+        contains(r'$HOME/isaac/isaacsim/_build/linux-x86_64/release/python.sh'),
+      );
+      expect(script, contains(r'$HOME/isaac/env_isaaclab/bin/python'));
+      expect(script, contains('Isaac Sim Python:'));
+      expect(script, contains('Gazebo 맵·로봇을 Isaac USD로 자동 변환합니다.'));
+      expect(script, contains('robot_description.sh'));
+      expect(script, contains('convert_gwanghee.py'));
+      expect(script, contains(r'ISAAC_WAIT="${ISAAC_WAIT:-300}"'));
+      expect(script, contains('Isaac Sim 프로세스가 /clock 발행 전에 종료됐습니다.'));
+
+      final converter = buildIsaacConversionScript(mapName: 'gwanghee');
+      expect(converter, contains("('floor_1.obj', 'wall_1.obj')"));
+      expect(converter, contains('URDFImporter(config).import_urdf()'));
+      expect(converter, contains("'/World/Robots/'"));
+    });
+
     test('경로가 전부 이 프로젝트 것으로 박힌다', () {
       final xml = buildProjectLaunchXml(
         mapName: 'gwanghee',

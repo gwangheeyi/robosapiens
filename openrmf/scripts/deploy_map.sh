@@ -15,7 +15,9 @@ DEPLOY_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 # 패키지 디렉터리가 안 보인다. 한 곳에 모은다.
 LOG_DIR="$ROOT_DIR/log"
 DEPLOY_LOG="$LOG_DIR/map-deploy-${DEPLOY_TIMESTAMP}.log"
-RMF_WS_DIR="${RMF_WS:-$ROOT_DIR/rmf_ws}"
+source "$ROOT_DIR/openrmf/scripts/validate_layout.sh"
+validate_robosapiens_layout "$ROOT_DIR"
+RMF_WS_DIR="$RMF_WS"
 TARGET_DIR="$ROOT_DIR/rmf_maps/$MAP_NAME"
 STAGING_DIR="$(mktemp -d "$ROOT_DIR/rmf_maps/.${MAP_NAME}.deploy.XXXXXX")"
 RUNTIME_DIR="$ROOT_DIR/openrmf/.runtime"
@@ -57,8 +59,52 @@ echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}"
 # 새 로그를 만든 뒤에 지운다 — 방금 만든 이것이 `최근 3개`의 첫 자리다.
 prune_deploy_logs
 
+# 배포가 띄운 Building Map Server 를 내린다.
+#
+# 지도를 제대로 읽혔는지 확인하려면(6단계) 서버가 떠 있어야 한다. 그래서
+# 띄우기는 하는데, **확인이 끝나면 우리 일은 끝난 것이다.** 예전에는 띄운 채로
+# 나갔고, 그것이 두 가지를 망가뜨렸다 —
+#
+#   ① 앱은 맵 디렉터리를 물고 있는 프로세스를 세어 백엔드가 도는지 본다.
+#      이 서버의 명령줄에 `<맵 디렉터리>/<맵>.building.yaml` 이 들어 있어서,
+#      배포만 하고 아무것도 안 띄웠는데 `백엔드 실행 중` 이 되었다. 그 상태로는
+#      확인표가 뒤 단계를 `막힘` 으로 매기고, 백엔드를 띄우려 해도 거절한다.
+#
+#   ② 백엔드 launch 가 같은 파일로 제 것을 하나 더 띄운다.
+#      `/building_map_server` 라는 **같은 이름의 노드가 둘**이 되고
+#      `/get_building_map` 을 두 곳이 답한다.
+#
+# 배포한 지도는 파일로 깔려 있고, 앱은 그 파일을 직접 읽는다. 내려도 잃는 것이
+# 없다.
+#
+# **자식을 먼저 죽인다.** `ros2 run` 은 껍데기이고 실제 노드는 그 자식이다.
+# 껍데기만 죽이면 노드가 고아로 살아남는다 — 실측으로 확인했다.
+#
+# 우리가 띄운 그 pid 만 건드린다. 이름으로 훑으면 백엔드가 돌고 있을 때 그쪽
+# 서버까지 죽인다(배포 중에 백엔드가 떠 있을 수 있고, 6단계가 그 경우를 따로
+# 알려 준다).
+stop_deploy_map_server() {
+  local pid_file="$RUNTIME_DIR/building_map_server.pid"
+  [[ -f "$pid_file" ]] || return 0
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    # 실제로 내려갔는지 본다. 안 죽으면 남은 채로 나가는 것과 같다.
+    local waited=0
+    while ((waited < 30)) && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
 cleanup() {
   local status=$?
+  stop_deploy_map_server
   rm -rf "$STAGING_DIR" || true
   echo "배포 종료: $(date '+%Y-%m-%d %H:%M:%S %Z') (exit=$status)"
   return "$status"
@@ -230,13 +276,20 @@ log_step 6 "새 지도 수신 확인"
 # 시계로 자른다. 예전에는 `30번 × sleep 0.5` 로 15초를 기다린다고 여겼는데,
 # 노드가 수백 개인 그래프에서는 `ros2 service list` 한 번이 3~5초라 실제로는
 # 100초가 넘게 걸렸다. "배포가 오래 걸린다" 가 그것이었다.
-WAIT_SECS="${MAP_READY_WAIT:-25}"
+#
+# 한 번에 3초를 쓰므로(아래 `--spin-time`) 25초로는 서너 번밖에 못 돈다.
+WAIT_SECS="${MAP_READY_WAIT:-40}"
 DEADLINE=$((SECONDS + WAIT_SECS))
 while ((SECONDS < DEADLINE)); do
   # 앱에서 ROS_DOMAIN_ID를 바꿔도 기존 ros2 daemon은 먼저 시작된 도메인의
   # 그래프를 계속 들고 있을 수 있다. 방금 같은 셸에서 띄운 서버를 확인하는
   # 단계이므로 daemon 캐시를 우회하고 현재 도메인을 직접 탐색한다.
-  if ros2 service list --no-daemon --spin-time 1 2>/dev/null | grep -qx '/get_building_map'; then
+  #
+  # 탐색에 3초를 준다. `--no-daemon` 은 캐시가 없어 그때그때 DDS 를 훑는데,
+  # 1초로는 **멀쩡히 떠 있는 서버를 절반쯤 놓친다** — 실측(2026-08-15, 서버가
+  # `ready to serve map` 을 찍은 뒤): spin-time 1 → 5번 중 2번, 3 → 5번 중
+  # 5번, 5 → 5번 중 5번. 그래서 지도는 다 올라갔는데 배포만 실패로 끝났다.
+  if ros2 service list --no-daemon --spin-time 3 2>/dev/null | grep -qx '/get_building_map'; then
     MAP_SERVER_PID="$(cat "$RUNTIME_DIR/building_map_server.pid")"
     kill -0 "$MAP_SERVER_PID" 2>/dev/null || fail "Building Map Server가 종료되었습니다."
     echo "DEPLOYED_MAP_DIR=$TARGET_DIR"
@@ -250,6 +303,12 @@ while ((SECONDS < DEADLINE)); do
       echo "stop_$MAP_NAME.sh 로 내리고 run_$MAP_NAME.sh 로 다시 띄우세요."
       echo "지금 도는 것은 뜰 때 읽은 nav graph 를 그대로 씁니다."
     fi
+    # 확인이 끝났으니 우리가 띄운 지도 서버는 내린다. 나가면서 trap 이
+    # 부르지만, 왜 없어졌는지는 여기서 밝혀 둔다 — 배포 직후에 그 서버를
+    # 찾다가 "왜 없지" 하지 않도록.
+    echo ""
+    echo "배포용 Building Map Server 를 내립니다. 지도는 파일로 깔려 있고,"
+    echo "백엔드를 띄우면 run_$MAP_NAME.sh 가 제 것을 다시 띄웁니다."
     echo "배포가 완료되었습니다: $MAP_NAME"
     exit 0
   fi
@@ -263,7 +322,9 @@ done
 # 돌려 ~/.bashrc 의 export 를 못 읽었고, 터미널의 시스템이 22번에 있는 동안
 # 이 스크립트만 0번에서 혼자 돌았다. 방금 우리가 띄운 노드조차 안 보이면
 # 그 경우다.
-if ! ros2 node list --no-daemon --spin-time 1 2>/dev/null | grep -q .; then
+# 여기도 3초를 준다. 1초로 훑고 "노드가 없다" 고 하면, 멀쩡한 도메인을 두고
+# 도메인이 어긋났다고 엉뚱한 곳을 짚게 된다.
+if ! ros2 node list --no-daemon --spin-time 3 2>/dev/null | grep -q .; then
   echo "" >&2
   echo "ROS 도메인 ${ROS_DOMAIN_ID:-0} 에 노드가 하나도 없습니다." >&2
   echo "방금 띄운 building_map_server 조차 안 보인다면 도메인이 어긋난 것입니다." >&2

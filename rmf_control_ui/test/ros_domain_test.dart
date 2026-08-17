@@ -136,8 +136,17 @@ void main() {
     });
 
     test('도메인을 바꾼 뒤 이전 ros2 daemon 캐시를 쓰지 않는다', () {
-      expect(script, contains('ros2 service list --no-daemon --spin-time 1'));
-      expect(script, contains('ros2 node list --no-daemon --spin-time 1'));
+      expect(script, contains('ros2 service list --no-daemon'));
+      expect(script, contains('ros2 node list --no-daemon'));
+    });
+
+    test('탐색에 1초만 주지 않는다', () {
+      // `--no-daemon` 은 캐시가 없어 그때그때 DDS 를 훑는다. 1초로는 멀쩡히
+      // 떠 있는 서버를 절반쯤 놓쳐서(실측 5번 중 2번), 지도는 다 올라갔는데
+      // 배포만 실패로 끝난다.
+      expect(script, isNot(contains('--no-daemon --spin-time 1')));
+      expect(script, contains('ros2 service list --no-daemon --spin-time 3'));
+      expect(script, contains('ros2 node list --no-daemon --spin-time 3'));
     });
 
     test('맵을 다시 배포해도 등록한 WorkCell policy를 보존한다', () {
@@ -146,6 +155,86 @@ void main() {
       expect(script, contains(r'cp -a "$BACKUP_PATH/policy_bindings.json"'));
       expect(script, contains('WorkCell policy 연결 보존'));
     });
+  });
+
+  group('죽은 노드를 살아 있다고 읽지 않는다', () {
+    // ros2 데몬은 CLI 가 빠르라고 두는 캐시라 죽은 노드를 한참 들고 있다.
+    // 실측 — 백엔드를 전부 내려 프로세스가 하나도 없는데 데몬은 12개가 넘게
+    // 살아 있다고 했고, 같은 순간 `--no-daemon` 은 하나도 없다고 답했다.
+    test('노드 목록을 데몬 캐시로 읽지 않는다', () {
+      final source = File('lib/rmf_runtime_service_io.dart').readAsStringSync();
+      expect(source, contains('ros2 node list --no-daemon --spin-time 3'));
+      expect(source, isNot(contains("'ros2 node list'")));
+    });
+
+    test('떠 있는지는 프로세스로 판정한다', () {
+      // 노드 목록은 아무리 정확히 읽어도 실제보다 늦다. 강제 종료된 노드는
+      // DDS 에 떠난다고 알리지 못해 십수 초 더 남는다. 그래서 목록만 보고
+      // 판정하면 멀쩡히 내려간 백엔드가 떠 있다고 읽힌다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final refresh = source.indexOf('Future<void> _refreshRmfStatus(');
+      final probe = source.indexOf('probeRmfRuntime(', refresh);
+      final processes = source.indexOf('runningBackendProjects()', refresh);
+      final ghost = source.indexOf('_ghostNodes = processesGone', refresh);
+
+      expect(refresh, greaterThanOrEqualTo(0));
+      // 프로세스를 **먼저** 본다. 노드부터 읽고 나중에 맞추면 그 사이에 화면이
+      // 한 번 잘못된 상태로 그려진다.
+      expect(processes, greaterThan(refresh));
+      expect(processes, lessThan(probe));
+      expect(ghost, greaterThan(processes));
+    });
+  });
+
+  group('앱이 셸로 부르는 ros2', () {
+    // 도메인을 안 넘기면 0번에서 돌고, 22번의 백엔드와 **아무 오류 없이**
+    // 서로를 못 본다. 이 실수가 세 번 났다 —
+    //
+    //   텔레메트리 브리지  → 로봇 위치가 안 와서 `어댑터가 죽었습니다`
+    //   probeRmfRuntime    → `떠 있는 백엔드가 없습니다`
+    //   작업 다리          → 작업을 넣어도 로봇이 안 움직임
+    //
+    // 셋 다 증상이 원인에서 멀어서 엉뚱한 곳을 뒤지게 했다. 새로 넣는 곳도
+    // 빠뜨리지 않도록 파일에서 직접 센다.
+    final launchers = {
+      'lib/rmf_runtime_service_io.dart',
+      'lib/robot_telemetry_bridge_io.dart',
+      'lib/rmf_task_bridge_io.dart',
+    };
+
+    for (final path in launchers) {
+      test('$path 는 ros2 를 부르기 전에 도메인을 내보낸다', () {
+        final source = File(path).readAsStringSync();
+        // 앱이 셸로 내보내는 것은 전부 `_withRosEnvironment(...)` 를 지난다.
+        // 그 괄호 안을 통째로 본다 — Dart 는 붙여 쓴 문자열을 이어 붙이므로
+        // 한 줄씩 보면 `export` 와 `ros2` 가 따로 잡힌다.
+        final calls = <String>[];
+        for (final match in RegExp(
+          r'_withRosEnvironment\(',
+        ).allMatches(source)) {
+          // 정의(`String _withRosEnvironment(String command)`)는 부르는 곳이
+          // 아니다.
+          if (source.substring(0, match.start).endsWith('String ')) continue;
+          var depth = 1;
+          var i = match.end;
+          while (i < source.length && depth > 0) {
+            if (source[i] == '(') depth++;
+            if (source[i] == ')') depth--;
+            i++;
+          }
+          calls.add(source.substring(match.end, i - 1));
+        }
+
+        expect(calls, isNotEmpty, reason: '$path 에서 부르는 자리를 못 찾았다');
+        for (final call in calls) {
+          expect(
+            call,
+            contains('ROS_DOMAIN_ID'),
+            reason: '$path 의 다음 호출이 도메인을 안 넘긴다:\n$call',
+          );
+        }
+      });
+    }
   });
 
   group('맵 관리 화면', () {

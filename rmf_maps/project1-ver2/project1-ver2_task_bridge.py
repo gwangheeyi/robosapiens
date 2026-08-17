@@ -21,7 +21,7 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 
 from rmf_task_msgs.msg import ApiRequest, ApiResponse
 
-FLEET_NAME = 'project1_pinky'
+FLEET_NAME = 'pinky'
 
 # RMF 의 task API 는 transient_local 이다. 늦게 붙는 쪽도 마지막 것을 받는다.
 API_QOS = QoSProfile(
@@ -42,7 +42,7 @@ def main(argv=sys.argv):
         payload = json.load(handle)
 
     rclpy.init(args=None)
-    node = rclpy.node.Node('project1_pinky' + '_task_bridge')
+    node = rclpy.node.Node('pinky' + '_task_bridge')
     publisher = node.create_publisher(ApiRequest, 'task_api_requests', API_QOS)
 
     request = ApiRequest()

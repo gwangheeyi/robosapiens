@@ -10,7 +10,7 @@ MAP_DIR="${MAP_DIR:-/home/gyi/robosapiens/rmf_maps/project1-ver2}"
 
 # 이 프로젝트가 쓰는 로봇 네임스페이스. 인자에 맵 경로가 없는 노드는 이 이름으로
 # 찾는다 — robot_state_publisher 같은 것은 URDF 만 들고 있어 경로가 없다.
-ROBOT_NAMESPACES="pinky_01 pinky_02 omx_03 omx_04"
+ROBOT_NAMESPACES="pinky_01 omx_01"
 APP_ROOT="${ROBOSAPIENS_ROOT:-$(cd "$MAP_DIR/../.." && pwd)}"
 RMF_WS="${RMF_WS:-$APP_ROOT/rmf_ws}"
 LOCK_FILE="$MAP_DIR/.project1-ver2.run.lock"
@@ -202,6 +202,35 @@ if [[ -n "$remaining_zombies" ]]; then
   echo "오류: project1-ver2 관련 좀비 프로세스가 남았습니다:" >&2
   echo "$remaining_zombies" >&2
   exit 1
+fi
+
+# 배포가 남긴 Building Map Server 도 함께 내린다.
+#
+# 그것은 이 프로젝트의 프로세스 그룹 밖에 있어서 위의 그룹 끊기로는 안 죽는다.
+# 남겨 두면 앱이 맵 디렉터리를 물고 있는 프로세스를 세다가 **백엔드가 아직
+# 돈다** 고 보고, 화면에서 백엔드가 영영 안 내려간 것처럼 보인다.
+DEPLOY_MAP_SERVER_PID="$APP_ROOT/openrmf/.runtime/building_map_server.pid"
+if [[ -f "$DEPLOY_MAP_SERVER_PID" ]]; then
+  stale="$(cat "$DEPLOY_MAP_SERVER_PID" 2>/dev/null || true)"
+  if [[ -n "$stale" ]] && kill -0 "$stale" 2>/dev/null; then
+    kill "$stale" 2>/dev/null || true
+  fi
+  rm -f "$DEPLOY_MAP_SERVER_PID"
+fi
+pkill -u "$(id -u)" -f \
+  "/rmf_building_map_tools/building_map_server $MAP_DIR/" 2>/dev/null || true
+
+# 지도 서버 상태를 묻던 `ros2 service call` 이 남아 있으면 상대가 사라진 뒤에도
+# **영원히 기다린다.** 실측(2026-08-17) 세 개가 30분 넘게 매달려 있었다.
+#
+# 우리가 부르는 그 서비스 이름만 고른다 — `ros2 service call` 을 통째로 죽이면
+# 사람이 터미널에서 부르던 것까지 함께 죽는다.
+stale_calls="$(pgrep -u "$(id -u)" -f 'ros2 service call /map_server/' \
+  2>/dev/null | tr '\n' ' ' || true)"
+if [[ -n "${stale_calls// /}" ]]; then
+  # shellcheck disable=SC2086
+  kill $stale_calls 2>/dev/null || true
+  echo "매달려 있던 지도 서버 문의를 정리했습니다: $stale_calls"
 fi
 
 echo "project1-ver2 프로젝트 프로세스를 정리했습니다."

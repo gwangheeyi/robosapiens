@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RMF_WS="${RMF_WS:-$ROOT_DIR/rmf_ws}"
+source "$ROOT_DIR/openrmf/scripts/validate_layout.sh"
+validate_robosapiens_layout "$ROOT_DIR"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 if [[ -z "${RMW_IMPLEMENTATION:-}" ]]; then
   if [[ -f /opt/ros/jazzy/lib/librmw_fastrtps_cpp.so ]]; then

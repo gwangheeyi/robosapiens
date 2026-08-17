@@ -30,7 +30,7 @@
       <param name="source_list" value="[joint_states]"/>
     </node>
     <node pkg="ros_gz_sim" exec="create" output="screen"
-          args="-name pinky_01 -topic /pinky_01/robot_description -x 1.613 -y -1.088 -z 0.1 -Y 0.000">
+          args="-name pinky_01 -topic /pinky_01/robot_description -x 1.613 -y -1.088 -z 0.1 -Y -3.133">
       <param name="use_sim_time" value="True"/>
     </node>
   </group>

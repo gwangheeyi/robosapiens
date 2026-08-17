@@ -592,7 +592,7 @@ Future<void> saveProjectSimulationSettings(
   });
   await _query('''
 SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
-SET @project_id = (SELECT id FROM map_projects WHERE map_name = @map_name);
+SET @project_id = (SELECT id FROM map_projects WHERE map_name = $_nameParam);
 SET @simulation = CAST(
   CONVERT(FROM_BASE64('${_encode(payload)}') USING utf8mb4) AS JSON
 );
@@ -637,7 +637,7 @@ SET @map_name = CONVERT(FROM_BASE64('${_encode(mapName)}') USING utf8mb4);
 SELECT ${_toBase64(aggregate)}
 FROM map_project_simulation_settings s
 JOIN map_projects p ON p.id = s.project_id
-WHERE p.map_name = @map_name;
+WHERE p.map_name = $_nameParam;
 ''');
   final decoded = _decodeResult(output);
   if (decoded.isEmpty) return const ProjectSimulationSettings();

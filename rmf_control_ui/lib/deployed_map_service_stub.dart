@@ -1,5 +1,7 @@
 import 'deployed_map_models.dart';
 
+bool deployedMapExists(String mapName) => false;
+
 Future<List<DeployedMapSummary>> listDeployedMaps() async => const [];
 
 Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) =>

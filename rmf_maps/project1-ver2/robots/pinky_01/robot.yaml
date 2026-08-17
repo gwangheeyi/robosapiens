@@ -12,4 +12,4 @@ zones: [ambient, chilled, frozen]
 charger_waypoint: 충전2 # 충전 자리
 spawn_x: 1.613
 spawn_y: -1.088
-spawn_heading: 0.000
+spawn_heading: -3.133

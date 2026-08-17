@@ -11,6 +11,22 @@ import 'dart:io';
 
 import 'nav2_map_alignment.dart';
 
+/// [path] 가 바뀌었는지 가릴 값. 파일이 없으면 빈 글자.
+///
+/// 이 파일들은 배포·내보내기 때만 바뀌는데 확인표는 10초마다 돈다. 그때마다
+/// YAML 두 개를 파싱하고 PGM 머리글까지 여는 것은 헛일이라, 부르는 쪽이 이
+/// 값으로 지난 결과를 그대로 쓸지 정한다.
+///
+/// 크기도 함께 본다. 같은 초 안에 다시 쓰이면 수정 시각만으로는 못 가린다.
+String fileStamp(String path) {
+  try {
+    final stat = File(path).statSync();
+    return '${stat.modified.microsecondsSinceEpoch}:${stat.size}';
+  } catch (_) {
+    return '';
+  }
+}
+
 /// `map_server` 가 읽는 yaml 과 그 옆의 pgm 에서 덮는 범위를 낸다.
 ///
 /// 못 읽으면 null 이다. 파일이 아직 없다는 뜻이지 어긋났다는 뜻이 아니라,

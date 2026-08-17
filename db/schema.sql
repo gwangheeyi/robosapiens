@@ -381,6 +381,40 @@ CREATE TABLE IF NOT EXISTS `map_project_robots` (
     REFERENCES `map_projects` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 프로젝트 실행 시 선택할 물리 백엔드와 표시 옵션. RViz 는 시뮬레이터가
+-- 아니므로 backend와 별도 값으로 둔다. JSON에는 백엔드 고유 설정과
+-- RMF/Nav2 좌표를 Isaac stage로 옮기는 변환을 저장한다.
+CREATE TABLE IF NOT EXISTS `map_project_simulation_settings` (
+  `project_id`           BIGINT      NOT NULL,
+  `default_backend`      VARCHAR(16) NOT NULL DEFAULT 'gazebo',
+  `simulator_gui`        TINYINT(1)  NOT NULL DEFAULT 0,
+  `rviz_enabled`         TINYINT(1)  NOT NULL DEFAULT 0,
+  `gazebo_settings`      JSON        NOT NULL,
+  `isaac_settings`       JSON        NOT NULL,
+  `coordinate_transform` JSON        NOT NULL,
+  `updated_at`           DATETIME(6) NOT NULL,
+  PRIMARY KEY (`project_id`),
+  CONSTRAINT `fk_map_simulation_project` FOREIGN KEY (`project_id`)
+    REFERENCES `map_projects` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- USD 자체는 파일/객체 저장소에 두고 MySQL에는 경로와 재현 가능한 import·물리
+-- 설정을 둔다. 로봇 또는 프로젝트 삭제 시 함께 지운다.
+CREATE TABLE IF NOT EXISTS `map_project_robot_simulation` (
+  `project_id` BIGINT       NOT NULL,
+  `robot_id`   VARCHAR(64)  NOT NULL,
+  `backend`    VARCHAR(16)  NOT NULL,
+  `asset_uri`  VARCHAR(512) NOT NULL,
+  `prim_path`  VARCHAR(255) NULL,
+  `settings`   JSON         NOT NULL,
+  `updated_at` DATETIME(6)  NOT NULL,
+  PRIMARY KEY (`project_id`, `robot_id`, `backend`),
+  CONSTRAINT `fk_map_robot_simulation_robot`
+    FOREIGN KEY (`project_id`, `robot_id`)
+    REFERENCES `map_project_robots` (`project_id`, `robot_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 프로젝트에서 만들어진 설정 파일 전부.
 --
 -- building.yaml, nav graph, fleet adapter 설정, Gazebo spawn 목록, launch 를
@@ -495,6 +529,42 @@ CREATE TABLE IF NOT EXISTS `map_project_changes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+-- WorkCell(로봇팔) Policy 목록.
+--
+-- 학습 결과 자체(수백 MB ZIP)는 디스크의 `workcell_policies/<storage_key>/`
+-- 아래에 두고, 여기에는 이름과 소속 같은 기본 정보만 담는다. ZIP 은 git 에
+-- 올리지 않으므로 다른 자리에서 받은 저장소에는 파일이 없을 수 있다. 그때는
+-- `source_repository` 로 Hugging Face 에서 다시 받는다.
+--
+-- 프로젝트는 이름으로만 적고 FK 를 걸지 않는다. Policy 는 프로젝트보다 오래
+-- 남는 자산이라 프로젝트를 지워도 함께 사라지면 안 되고, 나중에 다른
+-- 프로젝트로 옮겨 붙일 수 있어야 한다.
+CREATE TABLE IF NOT EXISTS `workcell_policies` (
+  `id`                 BIGINT       NOT NULL AUTO_INCREMENT,
+  -- `이름@버전`. 작업의 픽업 단계가 이 값으로 policy 를 가리킨다.
+  `policy_id`          VARCHAR(191) NOT NULL,
+  `name`               VARCHAR(128) NOT NULL,
+  `version`            VARCHAR(64)  NOT NULL,
+  -- 소속 프로젝트 이름. NULL 이면 어느 프로젝트에도 매이지 않은 공용이다.
+  `project_name`       VARCHAR(255) NULL,
+  `object_type`        VARCHAR(128) NOT NULL DEFAULT '',
+  `robot_model`        VARCHAR(128) NOT NULL DEFAULT '',
+  `archive_name`       VARCHAR(255) NOT NULL DEFAULT 'policy.zip',
+  `archive_bytes`      BIGINT       NOT NULL DEFAULT 0,
+  -- ZIP 이 놓인 폴더. 이름을 바꿔도 그대로 두어 수백 MB 를 옮기지 않는다.
+  `storage_key`        VARCHAR(255) NOT NULL,
+  -- 이 policy 를 붙여 둔 설비 로봇 ID 목록.
+  `deployed_workcells` JSON         NOT NULL,
+  `source_repository`  VARCHAR(255) NULL,
+  `source_revision`    VARCHAR(128) NULL,
+  `created_at`         DATETIME(6)  NOT NULL,
+  `updated_at`         DATETIME(6)  NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_workcell_policies_policy_id` (`policy_id`),
+  KEY `idx_workcell_policies_project` (`project_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 -- v3: 맵 프로젝트 테이블(map_projects / map_project_waypoints /
 --     map_project_lanes) 추가. 여러 창고 맵을 지도 이름으로 구분해 담는다.
 -- v4: rmf_ui_tasks / rmf_ui_task_history 를 맵 프로젝트에 귀속.
@@ -513,6 +583,12 @@ CREATE TABLE IF NOT EXISTS `map_project_changes` (
 --      여기서 갈린다. v9 는 db/migrate_v9_to_v10.sql 을 적용한다.
 -- v11: robot_id를 Gazebo 모델명/ROS namespace와 같은 system ID로 통일한다.
 --      v10 은 db/migrate_v10_to_v11.sql 을 적용한다.
+-- v12: 프로젝트별 Gazebo/Isaac Sim/없음 백엔드 선택, 표시 옵션, 좌표 변환과
+--      로봇별 시뮬레이터 asset 설정을 저장한다.
+--      v11 은 db/migrate_v11_to_v12.sql 을 적용한다.
+-- v13: WorkCell Policy 목록(workcell_policies)을 DB 로 옮긴다. 이름과 소속
+--      프로젝트를 고칠 수 있고, ZIP 이 없는 자리에서는 Hugging Face 에서 다시
+--      받는다. v12 는 db/migrate_v12_to_v13.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 11, NOW(6))
+VALUES (1, 13, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

@@ -16,7 +16,7 @@ Open-RMF office
 
 - Ubuntu 24.04
 - ROS 2 Jazzy
-- 빌드된 Open-RMF workspace: 기본값 `$HOME/rmf_ws`
+- 빌드된 Open-RMF workspace: `$HOME/robosapiens/rmf_ws`
 - Docker
 - Flutter Linux desktop
 
@@ -24,7 +24,7 @@ Open-RMF office
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source "$HOME/rmf_ws/install/setup.bash"
+source "$HOME/robosapiens/rmf_ws/install/setup.bash"
 
 ros2 pkg prefix rmf_demos_gz
 ros2 pkg prefix rmf_demos_fleet_adapter
@@ -57,7 +57,7 @@ cd /home/gyi/robosapiens
 
 스크립트는 다음 작업을 순서대로 수행합니다.
 
-1. `$HOME/rmf_ws/install/setup.bash` 존재 여부 확인
+1. `$HOME/robosapiens/rmf_ws/install/setup.bash` 존재 여부 확인
 2. `rmf-web` API가 이미 실행 중인지 확인
 3. API가 없으면 공식 `api-server:jazzy` Docker 컨테이너 실행
 4. API의 `/time` 응답 대기
@@ -117,11 +117,11 @@ cd ~/robosapiens
 ```
 
 필수 조건은 Ubuntu 24.04, ROS 2 Jazzy, 빌드된 Open-RMF workspace와 Docker
-접근 권한입니다. Open-RMF workspace가 `~/rmf_ws`가 아닌 곳에 있다면 실행할
+접근 권한입니다. Open-RMF workspace는 `~/robosapiens/rmf_ws`에 있어야 하며 실행할
 때 위치를 전달합니다.
 
 ```bash
-RMF_WS=/home/myuser/custom_rmf_ws \
+RMF_WS=$HOME/robosapiens/rmf_ws \
   ./openrmf/scripts/run_office_web.sh
 ```
 
@@ -273,7 +273,7 @@ http://127.0.0.1:8000/docs
 cd /home/gyi/robosapiens
 
 source /opt/ros/jazzy/setup.bash
-source "$HOME/rmf_ws/install/setup.bash"
+source "$HOME/robosapiens/rmf_ws/install/setup.bash"
 
 ros2 launch openrmf/launch/office_web.launch.xml \
   server_uri:=ws://127.0.0.1:8000/_internal
@@ -343,7 +343,7 @@ flutter run -d linux \
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source "$HOME/rmf_ws/install/setup.bash"
+source "$HOME/robosapiens/rmf_ws/install/setup.bash"
 
 ros2 run rmf_demos_tasks dispatch_patrol \
   -p coe lounge \
@@ -462,7 +462,7 @@ Flutter 앱을 먼저 실행했다면 office launch가 완전히 올라온 뒤 �
 자동 실행 전에 `RMF_WS`를 지정합니다.
 
 ```bash
-RMF_WS=/path/to/rmf_ws ./openrmf/scripts/run_office_flutter.sh
+RMF_WS=$HOME/robosapiens/rmf_ws ./openrmf/scripts/run_office_flutter.sh
 ```
 
 ### API 또는 ROS가 다른 장비에서 실행됨

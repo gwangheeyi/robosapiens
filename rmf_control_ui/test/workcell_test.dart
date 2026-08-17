@@ -11,7 +11,7 @@
 ///
 ///   [OMX_02] 픽업2 요청 받음 (test-1)
 ///   /dispenser_results  status 0 (ACKNOWLEDGED) → 1 (SUCCESS)
-///   /omx_02/arm_controller/joint_trajectory 로 궤적 2건
+///   /omx_02/arm_controller/follow_joint_trajectory 액션으로 궤적 2건
 library;
 
 import 'package:flutter_test/flutter_test.dart';
@@ -191,7 +191,10 @@ void main() {
       expect(code, contains('self.completed_requests = set()'));
       expect(code, contains('msg.request_guid in cell.completed_requests'));
       expect(code, contains('cell.active_request == msg.request_guid'));
-      expect(code, contains('cell.completed_requests.add(msg.request_guid)'));
+      expect(
+        code,
+        contains('cell.completed_requests.add(job.msg.request_guid)'),
+      );
     });
 
     test('느게 뜨어도 이미 보낸 픽업 요청을 받는다', () {
@@ -206,24 +209,23 @@ void main() {
     });
 
     test('팔에 궤적을 보낸다', () {
+      // 토픽 publish 가 아니라 액션이다. 예전에는 던지고 4초 뒤 성공이라
+      // 답했는데, 팔이 받았는지조차 물을 수 없어서 핑키가 빈 채로 떠났다.
+      // 언제 끝나는지는 `workcell_handshake_test.dart` 가 지킨다.
       final code = script();
-      expect(code, contains('arm_controller/joint_trajectory'));
+      expect(code, contains('arm_controller/follow_joint_trajectory'));
       expect(code, contains("'policy_1':"));
       expect(code, contains("'policy_5':"));
       expect(code, contains('msg.items[0].type_guid'));
-      expect(code, contains('cell.run_policy(policy_id, ACTION_SECONDS)'));
-      expect(code, contains('ARM_SETTLE_SECONDS = 3.0'));
       expect(
         code,
-        contains(
-          'self.create_timer(execution_seconds + ARM_SETTLE_SECONDS, finish)',
-        ),
+        contains('cell.policy_trajectory(policy_id, ACTION_SECONDS)'),
       );
       expect(code, contains('DispenserResult.FAILED'));
       expect(code, contains("policy_id == 'armLoad'"));
     });
 
-    test('omx_f에 배포한 policy는 6축 controller 시험 동작으로 잇는다', () {
+    test('omx_f에 붙인 policy는 학습 episode 재생으로 잇는다', () {
       final code = buildWorkcellScript(
         mapName: 'project1',
         pairing: pairWorkcells(
@@ -250,11 +252,13 @@ void main() {
           "['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']",
         ),
       );
-      expect(code, contains('cell.run_deployed_policy_test(policy_id'));
-      expect(code, contains('ACT 추론 전 controller 시험 동작'));
+      // 추론기를 못 쓰는 자리에서는 시험 동작이 받아 준다. 무엇이 없어서
+      // 그랬는지는 로그에 남는다.
+      expect(code, contains('cell.test_trajectory('));
+      expect(code, contains('[TEST]'));
       expect(code, contains('SANDWICH_REPLAY_DEG'));
       expect(code, contains('math.radians(value)'));
-      expect(code, contains('cell.run_sandwich_replay(policy_id)'));
+      expect(code, contains('cell.sandwich_replay_trajectory(policy_id)'));
       expect(code, contains("replay_name in ('sandwich', 'sandwitch')"));
       expect(code, contains('학습 episode 0 샌드위치 동작 재생'));
     });

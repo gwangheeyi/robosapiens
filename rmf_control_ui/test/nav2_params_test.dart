@@ -260,8 +260,11 @@ some_server:
         goalTolerance: 0.1,
       );
       expect(result.yaml, contains('xy_goal_tolerance: 0.100'));
-      // 각도는 건드리지 않는다. 물어본 것만 고친다.
-      expect(result.yaml, contains('yaw_goal_tolerance: 0.25'));
+      // 각도는 맵 축척과 무관하다. `goalTolerance` 로 따라 움직이지 않고
+      // 언제나 [dockYawTolerance] 로 간다 — 픽업 자리에서 수납함을 팔에
+      // 대려면 벤더의 14도로는 7cm 가 어긋난다.
+      expect(result.yaml, contains('yaw_goal_tolerance: 0.087'));
+      expect(result.yaml, isNot(contains('yaw_goal_tolerance: 0.100')));
       expect(
         result.changes.any(
           (c) => c.contains('xy_goal_tolerance: 0.25 → 0.100'),
@@ -279,6 +282,55 @@ some_server:
 ''';
       final result = rewriteNav2Params(source: source, namespace: 'pinky_01');
       expect(result.yaml, contains('xy_goal_tolerance: 0.25'));
+    });
+  });
+
+  group('출발 전 제자리 회전', () {
+    // 벤더 값 0.35rad(20도)면 경로가 조금만 꺾여도 멈춰 서서 다 돌고 출발한다.
+    // 이 맵들은 Waypoint 간격이 0.3~0.8m 라 길이 자주 꺾여서 늘 걸린다.
+    const source = '''
+controller_server:
+  ros__parameters:
+    FollowPath:
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.35      # [rad] 약 20도
+''';
+
+    test('45도로 맞춘다', () {
+      final result = rewriteNav2Params(source: source, namespace: 'pinky_01');
+      expect(result.yaml, contains('rotate_to_heading_min_angle: 0.785'));
+      expect(result.yaml, isNot(contains('rotate_to_heading_min_angle: 0.35')));
+      expect(rotateToHeadingMinAngle, 0.785);
+    });
+
+    test('무엇을 왜 바꿨는지 남긴다', () {
+      final result = rewriteNav2Params(source: source, namespace: 'pinky_01');
+      expect(
+        result.changes.where((c) => c.contains('rotate_to_heading_min_angle')),
+        isNotEmpty,
+      );
+      expect(result.changes.join('\n'), contains('45도'));
+    });
+
+    test('옆의 주석은 그대로 둔다', () {
+      // 벤더 파일의 설명을 지우면 다음 사람이 이 값이 무엇인지 다시 찾는다.
+      final result = rewriteNav2Params(source: source, namespace: 'pinky_01');
+      expect(result.yaml, contains('# [rad] 약 20도'));
+    });
+
+    test('이미 45도면 바꿨다고 적지 않는다', () {
+      const already = '''
+controller_server:
+  ros__parameters:
+    FollowPath:
+      rotate_to_heading_min_angle: 0.785
+''';
+      final result = rewriteNav2Params(source: already, namespace: 'pinky_01');
+      expect(result.yaml, contains('rotate_to_heading_min_angle: 0.785'));
+      expect(
+        result.changes.where((c) => c.contains('rotate_to_heading_min_angle')),
+        isEmpty,
+      );
     });
   });
 

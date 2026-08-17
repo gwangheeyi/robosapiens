@@ -12,10 +12,12 @@ import 'package:flutter/services.dart';
 
 import 'deployment_service.dart';
 import 'database_migration.dart';
+import 'deploy_preflight.dart';
 import 'deployed_map_service.dart';
 import 'gazebo_robot_reset.dart';
 import 'map_ai_service.dart';
 import 'map_geometry.dart';
+import 'map_distance_scale.dart';
 import 'map_project_store.dart';
 import 'movable_dialog.dart';
 import 'nav2_map_alignment.dart';
@@ -47,6 +49,7 @@ import 'ros2_inspect_page.dart';
 import 'slam_map.dart';
 import 'slam_map_store.dart';
 import 'rmf_project_runner.dart';
+import 'rmf_progress_match.dart';
 import 'rmf_task_bridge.dart';
 import 'rmf_task_request.dart';
 import 'rmf_runtime_service.dart';
@@ -56,7 +59,9 @@ import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
 import 'task_store.dart';
 import 'wall_height.dart';
+import 'waypoint_table.dart';
 import 'workcell_pairing.dart';
+import 'workcell_reach_check.dart';
 import 'workcell_policy_page.dart';
 import 'workcell_policy_store.dart';
 import 'workspace_layout.dart';
@@ -161,6 +166,7 @@ class _EditorSnapshot {
     required this.laneWaypoints,
     required this.waypointTypes,
     required this.waypointNames,
+    required this.waypointDockHeadings,
     required this.activeLaneEndpoint,
   });
 
@@ -187,6 +193,7 @@ class _EditorSnapshot {
   final List<Offset> laneWaypoints;
   final Map<Offset, String> waypointTypes;
   final Map<Offset, String> waypointNames;
+  final Map<Offset, double> waypointDockHeadings;
   final Offset? activeLaneEndpoint;
 }
 
@@ -667,10 +674,27 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final List<Offset> _laneWaypoints = [];
   final Map<Offset, String> _waypointTypes = {};
   final Map<Offset, String> _waypointNames = {};
+
+  /// 그 자리에 로봇이 볼 방향 [도, RMF 기준 · 0도가 도면 오른쪽 · 반시계 양수].
+  ///
+  /// 핑키는 수납함을 뒤에 달고 다닌다. 픽업 자리에 들어온 그대로 서면 수납함이
+  /// 팔에서 가장 먼 자리에 온다. 여기 각도를 넣어 두면 그 자리로 가는 작업의
+  /// `go_to_place` 에 `orientation` 으로 실려, Nav2 가 각도까지 맞을 때까지
+  /// 도착으로 치지 않는다.
+  ///
+  /// 비어 있으면 각도를 요구하지 않는다 — 지금까지처럼 RMF 가 들어온 길
+  /// 방향대로 세운다.
+  final Map<Offset, double> _waypointDockHeadings = {};
   Offset? _activeLaneEndpoint;
   bool _isWaypointMode = false;
   int _vertexLabelRevision = 0;
   bool _showVertexLabels = true;
+
+  /// 도면 아래 Waypoint 좌표표를 펼쳐 두었는가.
+  ///
+  /// 기본은 접어 둔다. Waypoint 가 수십 개인 맵에서 늘 펼쳐 두면 도면이 화면
+  /// 위로 밀려 올라가 정작 고칠 자리가 안 보인다.
+  bool _showWaypointTable = false;
   final List<_EditorSnapshot> _undoHistory = [];
   String? _processingWarning;
 
@@ -708,10 +732,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
   List<RmfProjectRobot> _fleetRobots = const [];
   List<WorkcellPolicy> _workcellPolicyModels = const [];
 
-  List<String> get _availableWorkcellPolicies {
-    final deployed = deployedPolicyIds(_workcellPolicyModels);
-    return deployed.isNotEmpty ? deployed : workcellPoliciesFor(_fleetRobots);
-  }
+  /// 이 자리에서 고를 수 있는 policy.
+  ///
+  /// 설비마다 붙여 둔 policy 가 다르다. 픽업 요청은 자리 이름으로 나가고 그
+  /// 자리를 맡는 설비 하나가 답하므로, 고를 수 있는 것도 그 설비에 붙은 것이라야
+  /// 한다. 자리를 아직 모르면(앞에 이동 단계가 없으면) 프로젝트에 붙어 있는 것을
+  /// 모두 보여 준다.
+  WorkcellPolicyChoices _policyChoicesForStation(String? station) =>
+      policyChoicesForStation(
+        station: station,
+        workcellsByStation: workcellsByStation(
+          _workcellPairing(_mapName, _fleetRobots),
+        ),
+        policies: _workcellPolicyModels,
+        fallbackPolicyIds: workcellPoliciesFor(_fleetRobots),
+      );
 
   /// Gazebo 에서 실제로 받아온 위치.
   ///
@@ -733,6 +768,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
   final Map<Offset, String> _homeReservations = {};
   Future<void> _taskSaveChain = Future<void>.value();
   Timer? _mockRobotTimer;
+
+  /// 로봇이 움직일 때마다 올라가는 값.
+  ///
+  /// 로봇을 그리는 페이지만 이것을 듣는다. `_MockRobot` 은 제자리에서 고쳐
+  /// 쓰는 물건이라 목록이 바뀌지 않으므로, 다시 그리라는 신호가 따로 필요하다.
+  final ValueNotifier<int> _mockTick = ValueNotifier<int>(0);
   Timer? _orderDispatchTimer;
   bool _isPollingOrders = false;
   bool _databaseReady = false;
@@ -2847,13 +2888,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (addDraftPath(start, end, routeDirection, waypointSpacing: spacing)) {
         continue;
       }
+      // 실패한 자리를 RMF 좌표로 적는다. 사람이 그 자리를 찾아가려면 nav
+      // graph·로그와 같은 숫자여야 한다.
+      final scale = _metersPerPixel;
+      final clearance = scale == null || scale <= 0
+          ? '${draftClearancePixels.toStringAsFixed(1)}px'
+          : '${(draftClearancePixels * scale).toStringAsFixed(2)}m';
       _showProcessingWarning(
         '시나리오 맵 자동 완성',
         '벽과 로봇 안전거리를 지키는 연속 경로를 만들 수 없어 초안을 적용하지 않았습니다.\n'
             '실패 지점: '
-            '(${start.dx.toStringAsFixed(1)}, ${start.dy.toStringAsFixed(1)}) → '
-            '(${end.dx.toStringAsFixed(1)}, ${end.dy.toStringAsFixed(1)}) · '
-            '필요 ${draftClearancePixels.toStringAsFixed(1)}px',
+            '(${_pointText(start, decimals: 2)}) → '
+            '(${_pointText(end, decimals: 2)}) · '
+            '필요 여유 $clearance',
       );
       return empty;
     }
@@ -2872,9 +2919,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final unlinked = <String>[];
     String label(Offset point) {
       final name = (_waypointNames[point] ?? '').trim();
-      return name.isEmpty
-          ? '(${point.dx.toStringAsFixed(0)}, ${point.dy.toStringAsFixed(0)})'
-          : name;
+      return name.isEmpty ? '(${_pointText(point, decimals: 2)})' : name;
     }
 
     Offset nearestRoutePoint(Offset point) => baseRoutePoints.reduce(
@@ -3469,7 +3514,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         leading: const Icon(Icons.place_outlined, size: 19),
                         title: Text(assignment.name),
                         subtitle: Text(
-                          '${assignment.category} · X ${assignment.point.dx.toStringAsFixed(1)}, Y ${assignment.point.dy.toStringAsFixed(1)}',
+                          '${assignment.category} · '
+                          '${_pointText(assignment.point, decimals: 2)}',
                         ),
                       ),
                   ],
@@ -3614,10 +3660,35 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final name = (_waypointNames[point] ?? '').trim();
     if (name.isNotEmpty) return name;
     final index = _laneWaypoints.indexOf(point);
-    final floor = _floorCoordinate(point);
-    final position =
-        '${floor.dx.toStringAsFixed(0)}, ${floor.dy.toStringAsFixed(0)}';
+    final position = _pointText(point, decimals: 2);
     return index < 0 ? '이름없음($position)' : '이름없는 ${index + 1}번($position)';
+  }
+
+  /// 지도 위 한 점을 사람에게 보여 줄 글자로.
+  ///
+  /// **RMF 월드 좌표(m)로 적는다.** 이 값이 `nav_graphs/0.yaml`, `robot.yaml` 의
+  /// `spawn_x/spawn_y`, Gazebo `create -x -y`, AMCL `initial_pose`, RViz, 로그에
+  /// 나오는 그 값이다. 화면만 다른 좌표로 보여 주면, 어긋났을 때 두 숫자가 같은
+  /// 자리를 가리키는지부터 사람이 손으로 맞춰 봐야 한다.
+  ///
+  /// 예전에는 바닥 왼쪽 아래를 원점으로 한 **픽셀**을 보여 줬다. 읽기는 좋지만
+  /// 세 가지가 나빴다 —
+  ///
+  ///   * 미터가 아니라 픽셀이라 거리로 못 읽는다. `1338.2` 는 몇 m 인가?
+  ///   * 원점이 **바닥 폴리곤의 경계**라, 바닥을 조금만 고쳐도 같은 자리의
+  ///     숫자가 통째로 달라진다.
+  ///   * 다른 어디에도 그 숫자가 안 나온다.
+  ///
+  /// 축척이 없으면 옮길 수가 없다. 그때는 픽셀이라고 밝히고 픽셀을 보여 준다 —
+  /// 미터인 척하는 값보다 낫다.
+  String _pointText(Offset point, {int decimals = 3}) {
+    final world = _rmfMetersFromPixel(point);
+    if (world == null) {
+      return '${point.dx.toStringAsFixed(0)}, ${point.dy.toStringAsFixed(0)} px'
+          ' · 축척 없음';
+    }
+    return '${world.dx.toStringAsFixed(decimals)}, '
+        '${world.dy.toStringAsFixed(decimals)} m';
   }
 
   bool _hasLane(Offset start, Offset end) => _recommendedLanes.any(
@@ -3988,6 +4059,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     laneWaypoints: [..._laneWaypoints],
     waypointTypes: {..._waypointTypes},
     waypointNames: {..._waypointNames},
+    waypointDockHeadings: {..._waypointDockHeadings},
     activeLaneEndpoint: _activeLaneEndpoint,
   );
 
@@ -4046,6 +4118,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _waypointNames
         ..clear()
         ..addAll(snapshot.waypointNames);
+      _waypointDockHeadings
+        ..clear()
+        ..addAll(snapshot.waypointDockHeadings);
       _activeLaneEndpoint = snapshot.activeLaneEndpoint;
       _isWaypointMode = false;
       _isMeasurementMode = false;
@@ -4125,6 +4200,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _laneWaypoints.clear();
         _waypointTypes.clear();
         _waypointNames.clear();
+        _waypointDockHeadings.clear();
         _activeLaneEndpoint = null;
         _isWaypointMode = false;
       });
@@ -4207,6 +4283,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _laneWaypoints.clear();
       _waypointTypes.clear();
       _waypointNames.clear();
+      _waypointDockHeadings.clear();
       _activeLaneEndpoint = null;
       _isWaypointMode = false;
     });
@@ -4413,6 +4490,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _laneWaypoints.removeWhere((point) => (point - waypoint).distance <= .01);
       _waypointTypes.remove(waypoint);
       _waypointNames.remove(waypoint);
+      _waypointDockHeadings.remove(waypoint);
       if (_activeLaneEndpoint != null &&
           (_activeLaneEndpoint! - waypoint).distance <= .01) {
         _activeLaneEndpoint = null;
@@ -4454,23 +4532,43 @@ class _ControlDashboardState extends State<ControlDashboard> {
           '원래 위치를 유지합니다.',
   };
 
-  void _moveWaypoint(Offset original, Offset rawUpdated) {
+  /// Waypoint 를 [rawUpdated] 로 옮긴다. 못 옮기면 그 이유를 돌려준다.
+  ///
+  /// [snapToLane] 은 끌어다 놓을 때만 참이다. 표에서 숫자를 쳐 넣을 때 스냅이
+  /// 걸리면 방금 친 값이 조용히 다른 값으로 바뀐다 — 미세하게 맞추려고 숫자를
+  /// 치는 것인데 그러면 뜻이 없다.
+  ///
+  /// [announce] 가 거짓이면 스낵바를 띄우지 않는다. 표는 그 줄 자리에서 바로
+  /// 알려 주므로, 화면 아래에서 또 한 번 말할 필요가 없다.
+  WaypointMoveIssue? _moveWaypoint(
+    Offset original,
+    Offset rawUpdated, {
+    bool snapToLane = true,
+    bool announce = true,
+  }) {
     final index = _laneWaypoints.indexWhere(
       (point) => (point - original).distance <= .01,
     );
-    if (index < 0) return;
+    if (index < 0) return null;
     // 끌어다 놓은 자리가 레인 근처면 그 선 위로 맞춘다. 자기에게 붙어 있는
     // 레인은 함께 움직이므로 스냅 대상에서 뺀다.
-    final updated =
-        _snapToLane(rawUpdated, _waypointLaneSnapTolerance, ignore: original) ??
-        rawUpdated;
-    if ((original - updated).distance <= .01) return;
+    final updated = snapToLane
+        ? (_snapToLane(
+                rawUpdated,
+                _waypointLaneSnapTolerance,
+                ignore: original,
+              ) ??
+              rawUpdated)
+        : rawUpdated;
+    if ((original - updated).distance <= .01) return null;
     final issue = _waypointDropIssue(original, updated);
     if (issue != null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(_waypointDropMessage(issue))));
-      return;
+      if (announce) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_waypointDropMessage(issue))));
+      }
+      return issue;
     }
     final movedLanes = <(Offset, Offset)>[
       for (final lane in _recommendedLanes)
@@ -4487,13 +4585,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final oldMutexGroups = {..._laneMutexGroups};
     final type = _waypointTypes[original];
     final name = _waypointNames[original];
+    final dockHeading = _waypointDockHeadings[original];
     var spliced = 0;
     setState(() {
       _laneWaypoints[index] = updated;
       _waypointTypes.remove(original);
       _waypointNames.remove(original);
+      _waypointDockHeadings.remove(original);
       if (type != null) _waypointTypes[updated] = type;
       if (name != null) _waypointNames[updated] = name;
+      // 자리를 옮겨도 팔을 향해 서는 방향은 그대로다. 안 옮기면 Waypoint 를
+      // 조금 끌었을 뿐인데 적재 방향이 조용히 사라진다.
+      if (dockHeading != null) _waypointDockHeadings[updated] = dockHeading;
       _recommendedLanes = movedLanes;
       _laneDirections.clear();
       _laneSpeedLimits.clear();
@@ -4525,15 +4628,159 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _isDeployed = false;
       _vertexLabelRevision++;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          spliced > 0
-              ? 'Waypoint를 레인 위에 놓아 레인 $spliced개를 나눠 이었습니다.'
-              : 'Waypoint와 연결된 Lane을 함께 이동했습니다.',
+    if (announce) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            spliced > 0
+                ? 'Waypoint를 레인 위에 놓아 레인 $spliced개를 나눠 이었습니다.'
+                : 'Waypoint와 연결된 Lane을 함께 이동했습니다.',
+          ),
         ),
-      ),
+      );
+    }
+    return null;
+  }
+
+  /// 도면 아래 표에 뿌릴 줄.
+  List<WaypointRow> _waypointRows() => sortWaypointRows(
+    buildWaypointRows(
+      waypoints: _laneWaypoints,
+      categories: _waypointTypes,
+      names: _waypointNames,
+      dockHeadings: _waypointDockHeadings,
+      lanes: _recommendedLanes,
+      metersPerPixel: _metersPerPixel,
+      robotsAt: (name) => [
+        for (final robot in _fleetRobots)
+          if ((robot.chargerWaypoint ?? '').trim() == name)
+            WaypointRobotBinding(
+              robotId: robot.robotId,
+              displayName: robot.displayName,
+              isMobile: robot.isMobile,
+              spawnX: robot.spawnX,
+              spawnY: robot.spawnY,
+            ),
+      ],
+    ),
+  );
+
+  /// 표에서 이름을 고친다.
+  ///
+  /// 비우면 이름을 **지운다**. 대기 지점만 이름 없이 둘 수 있고, 나머지는
+  /// 이름이 곧 RMF 의 `target_guid` 라 비면 그 자리로 보내는 작업이 멈춘다 —
+  /// 그래서 표가 그 줄을 붉게 남긴다.
+  void _setWaypointName(Offset point, String name) {
+    final trimmed = name.trim();
+    if ((_waypointNames[point] ?? '').trim() == trimmed) return;
+    _recordUndo();
+    setState(() {
+      if (trimmed.isEmpty) {
+        _waypointNames.remove(point);
+      } else {
+        _waypointNames[point] = trimmed;
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+  }
+
+  /// 표에서 카테고리를 고친다.
+  void _setWaypointCategory(Offset point, String category) {
+    if (_waypointTypes[point] == category) return;
+    _recordUndo();
+    setState(() {
+      _waypointTypes[point] = category;
+      // 물건을 주고받는 자리가 아니게 되면 적재 방향도 뜻을 잃는다. 남겨 두면
+      // 나중에 다시 픽업으로 바꿨을 때 예전 각도가 되살아난다
+      // (`_editWaypoint` 와 같은 규칙이다).
+      if (!waypointUsesDockHeading(category)) {
+        _waypointDockHeadings.remove(point);
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+  }
+
+  /// 표에서 적재 방향을 고친다. null 이면 각도를 요구하지 않는다.
+  void _setWaypointDockHeading(Offset point, double? degrees) {
+    final wrapped = degrees == null ? null : _wrapDegrees(degrees);
+    if (_waypointDockHeadings[point] == wrapped) return;
+    _recordUndo();
+    setState(() {
+      if (wrapped == null) {
+        _waypointDockHeadings.remove(point);
+      } else {
+        _waypointDockHeadings[point] = wrapped;
+      }
+      _isDeployed = false;
+    });
+  }
+
+  /// 표에서 이 자리에 설 로봇을 정한다. [robotId] 가 null 이면 아무도 안 선다.
+  ///
+  /// 등록은 자리를 **이름으로** 가리키므로 여기서 바꾸는 것도 이름이다. 좌표는
+  /// 비우고 지도에서 다시 넣는다([_withMapSpawnPoints]) — 자리를 옮겼는데
+  /// 좌표만 옛 자리에 남는 것이 팔과 핑키를 겹치게 한 그 일이다.
+  Future<void> _setWaypointRobot(Offset point, String? robotId) async {
+    final name = (_waypointNames[point] ?? '').trim();
+    if (name.isEmpty) return;
+    final updated = <RmfProjectRobot>[];
+    final released = <String>[];
+    String? taken;
+    for (final robot in _fleetRobots) {
+      final holdsThis = (robot.chargerWaypoint ?? '').trim() == name;
+      final shouldHold = robot.robotId == robotId;
+      if (holdsThis == shouldHold) {
+        updated.add(robot);
+        continue;
+      }
+      if (shouldHold) {
+        taken = robot.robotId;
+      } else {
+        released.add(robot.robotId);
+      }
+      updated.add(robot.withStation(shouldHold ? name : null));
+    }
+    if (taken == null && released.isEmpty) return;
+    setState(() {
+      _fleetRobots = _withMapSpawnPoints(updated);
+      _isDeployed = false;
+    });
+    await _syncTelemetry();
+    await _saveSettingToOpenProject(
+      label: '로봇 자리',
+      detail: taken != null
+          ? '$taken 를 $name 자리에 세웠습니다.'
+          : '${released.join(', ')} 를 $name 자리에서 뗐습니다.',
     );
+  }
+
+  /// 표에서 도면 픽셀 좌표를 숫자로 고친다. 못 옮기면 그 이유를 돌려준다.
+  ///
+  /// 스냅을 끈다. 미세하게 맞추려고 숫자를 치는 것인데 레인에 붙어 버리면
+  /// 방금 친 값이 조용히 다른 값으로 바뀐다.
+  WaypointMoveIssue? _setWaypointPixel(
+    Offset point, {
+    double? dx,
+    double? dy,
+  }) => _moveWaypoint(
+    point,
+    Offset(dx ?? point.dx, dy ?? point.dy),
+    snapToLane: false,
+    announce: false,
+  );
+
+  /// 표에서 RMF 월드 좌표(m)를 숫자로 고친다.
+  ///
+  /// 사람이 실제로 재는 것은 미터다 — 팔이 닿는 거리도 핑키 몸 크기도 미터로
+  /// 적혀 있다. 픽셀은 그 값을 도면에 옮겨 적은 것뿐이다.
+  WaypointMoveIssue? _setWaypointMeters(Offset point, {double? x, double? y}) {
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return null;
+    final here = rmfWorldFromPixel(point.dx, point.dy, scale);
+    final pixel = pixelFromRmfWorld(x ?? here.x, y ?? here.y, scale);
+    return _setWaypointPixel(point, dx: pixel.dx, dy: pixel.dy);
   }
 
   /// Waypoint 를 끌어 놓을 때 레인에 붙는 거리.
@@ -4615,6 +4862,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
     var selectedType = _waypointTypes[waypoint] == '드롭오프'
         ? '드랍오프'
         : _waypointTypes[waypoint] ?? '대기';
+    final headingController = TextEditingController(
+      text: _waypointDockHeadings[waypoint] == null
+          ? ''
+          : _degreesText(_waypointDockHeadings[waypoint]!),
+    );
+    final suggestions = _dockHeadingSuggestions(waypoint);
     final action = await showMovableDialog<String>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -4641,7 +4894,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['대기', '주차', '홈', '충전', '픽업', '드랍오프', '설비']
+                  items: waypointCategories
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -4664,6 +4917,67 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     ),
                   ),
                 ),
+                // 적재 방향은 로봇이 그 자리에 **서는 자세**다. 지나가기만 하는
+                // 자리에는 뜻이 없으므로 물건을 주고받는 자리에만 보여 준다.
+                if (selectedType == '픽업' || selectedType == '드랍오프') ...[
+                  const Divider(height: 26),
+                  TextField(
+                    controller: headingController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: '적재 방향 (도)',
+                      hintText: '비우면 각도를 요구하지 않습니다',
+                      helperText: '0도가 도면 오른쪽 · 반시계가 +. 로봇의 코가 향할 쪽입니다.',
+                      helperMaxLines: 2,
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  if (suggestions.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final option in suggestions)
+                            OutlinedButton(
+                              onPressed: () => setDialogState(
+                                () => headingController.text = _degreesText(
+                                  option.degrees,
+                                ),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
+                                textStyle: const TextStyle(fontSize: 12),
+                              ),
+                              child: Text(
+                                '${option.label} '
+                                '(${_degreesText(option.degrees)}도)',
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _dockHeadingHint(headingController.text),
+                      style: const TextStyle(
+                        color: Color(0xFF64748B),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -4682,7 +4996,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ),
             FilledButton(
               onPressed:
-                  selectedType != '대기' && nameController.text.trim().isEmpty
+                  (selectedType != '대기' &&
+                          nameController.text.trim().isEmpty) ||
+                      // 못 읽는 각도를 저장하면 조용히 버려진다. 그 자리에서 막는다.
+                      _parseDockHeading(headingController.text) == null
                   ? null
                   : () => Navigator.pop(dialogContext, 'save'),
               child: const Text('저장'),
@@ -4695,8 +5012,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // Waypoint를 후보로 쓴다). 다만 입력한 이름이 있으면 그대로 살린다.
     final enteredName = nameController.text.trim();
     final name = enteredName.isEmpty ? ' ' : enteredName;
+    final dockHeading = _parseDockHeading(headingController.text)?.degrees;
     await Future<void>.delayed(const Duration(milliseconds: 350));
     nameController.dispose();
+    headingController.dispose();
     if (!mounted) return;
     if (action == 'delete') {
       await _confirmDeleteWaypoint(waypoint);
@@ -4707,6 +5026,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
     setState(() {
       _waypointNames[waypoint] = name;
       _waypointTypes[waypoint] = selectedType;
+      // 물건을 주고받는 자리가 아니게 되면 적재 방향도 뜻을 잃는다. 남겨 두면
+      // 나중에 다시 픽업으로 바꿨을 때 예전 각도가 되살아난다.
+      if (dockHeading == null ||
+          (selectedType != '픽업' && selectedType != '드랍오프')) {
+        _waypointDockHeadings.remove(waypoint);
+      } else {
+        _waypointDockHeadings[waypoint] = dockHeading;
+      }
       _isDeployed = false;
     });
     ScaffoldMessenger.of(
@@ -4985,7 +5312,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final laneSnap = _snapToLane(point, snapTolerance);
     final snappedToLane = laneSnap != null;
     if (laneSnap != null) point = laneSnap;
-    final floorPoint = _floorCoordinate(point);
+    final pointText = _pointText(point);
     final activeEndpoint = _activeLaneEndpoint;
     final crossedWaypoint = activeEndpoint == null
         ? null
@@ -5006,7 +5333,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '좌표  X ${floorPoint.dx.toStringAsFixed(1)}  ·  Y ${floorPoint.dy.toStringAsFixed(1)}'
+                  '좌표  $pointText'
                   '${snappedToLane ? '  ·  레인 위에 스냅 (레인을 이 지점에서 나눠 잇습니다)' : ''}',
                   style: const TextStyle(
                     color: Color(0xFF475569),
@@ -5040,7 +5367,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     labelText: 'Waypoint 카테고리',
                     border: OutlineInputBorder(),
                   ),
-                  items: const ['대기', '주차', '홈', '충전', '픽업', '드랍오프', '설비']
+                  items: waypointCategories
                       .map(
                         (type) =>
                             DropdownMenuItem(value: type, child: Text(type)),
@@ -5143,9 +5470,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// `(px × 축척, −py × 축척)` 으로 옮긴다. 원점은 **그림의 왼쪽 위**이고 y 는
   /// 위로 갈수록 커진다. 그래서 Gazebo 월드도 nav graph 도 이 좌표를 쓴다.
   ///
-  /// 사람에게 보여 주는 [_floorCoordinate] 와는 다르다. 그쪽은 바닥 왼쪽
-  /// **아래**가 원점이라 읽기 좋지만, 그 값을 그대로 spawn 좌표로 쓰면 로봇이
-  /// 바닥 밖에 놓인다 — y 부호가 반대라서 건물 바깥 허공에 떨어진다.
+  /// **화면에 좌표를 적을 때도 이 값을 쓴다.** 예전에는 바닥 왼쪽 아래를
+  /// 원점으로 한 픽셀을 따로 만들어 보여 줬는데, 읽기는 좋아도 실행에 쓰는
+  /// 값과 원점도 단위도 달라서 어긋났을 때 손으로 맞춰 봐야 했다. 그리고 그
+  /// 값을 그대로 spawn 좌표로 넣은 사고가 실제로 났다 — y 부호가 반대라 로봇이
+  /// 건물 바깥 허공에서 끝없이 떨어졌다.
   Offset? _rmfMetersFromPixel(Offset point) {
     final scale = _metersPerPixel;
     if (scale == null || scale <= 0) return null;
@@ -5952,11 +6281,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
       if (mapName.trim().isNotEmpty) {
         await RmfTaskBridge.instance.watch(
           _fleetSettingsFor(mapName).fleetName,
+          rosDomainId: _rosDomainId,
         );
       }
     }
     try {
-      await RobotTelemetryBridge.instance.sync(_fleetRobots);
+      await RobotTelemetryBridge.instance.sync(
+        _fleetRobots,
+        rosDomainId: _rosDomainId,
+      );
     } catch (_) {
       // 토픽을 못 붙어도 앱은 계속 돌아야 한다. 못 받으면 앱 계산으로 돈다.
     }
@@ -5969,15 +6302,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 줬다.
     try {
       final running = await gazeboRunningProjects();
-      if (mounted) setState(() => _backendRunning = running.isNotEmpty);
+      if (mounted) setState(() => _markBackendRunning(running.isNotEmpty));
     } catch (_) {}
-  }
-
-  Offset _floorCoordinate(Offset point) {
-    final floorPoints = _floorMask?.points;
-    if (floorPoints == null || floorPoints.isEmpty) return point;
-    final bounds = _pointsBounds(floorPoints);
-    return Offset(point.dx - bounds.left, bounds.bottom - point.dy);
   }
 
   List<Offset> _outgoingWaypoints(Offset point) {
@@ -6090,23 +6416,55 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
   }
 
-  void _failRobotTask(_MockRobot robot, _MockTask task, String reason) {
+  /// 작업 하나를 실패로 끝내고 로봇을 풀어 준다.
+  ///
+  /// [keepRmfDriven] 은 **RMF 가 이 로봇을 계속 몰고 있을 때** 켠다. 여기서
+  /// `rmfDriven` 을 내리면 앱이 좌표를 직접 옮기기 시작해, 토픽으로 오는 진짜
+  /// 위치와 싸운다 — 화면의 로봇이 두 자리를 오간다.
+  ///
+  /// 어댑터가 작업을 취소한 경우가 그렇다. RMF 는 그 로봇을 대기 자리로
+  /// 보내는 중이고, 그 이동도 여전히 RMF 가 몬다.
+  void _failRobotTask(
+    _MockRobot robot,
+    _MockTask task,
+    String reason, {
+    bool keepRmfDriven = false,
+  }) {
     final step = task.currentStep;
     if (step != null) {
       step.status = _TaskStepStatus.failed;
       step.failureReason = reason;
     }
+    // 못 끝낸 나머지 단계도 남겨 둔다. 대기로 두면 이력에서 이 작업이 어디까지
+    // 갔었는지 알 수 없다.
+    for (final other in task.steps.where(
+      (item) =>
+          item != step &&
+          (item.status == _TaskStepStatus.pending ||
+              item.status == _TaskStepStatus.active),
+    )) {
+      other
+        ..status = _TaskStepStatus.cancelled
+        ..remainingSeconds = 0;
+    }
     task.status = _MockTaskStatus.failed;
     task.completedAt = DateTime.now();
     robot
       ..activeTaskId = null
-      ..moving = false
       ..targetWaypoint = null
-      ..rmfDriven = false
       ..rmfTaskId = null
       ..rmfGoalX = null
       ..rmfGoalY = null
       ..assignedRoute.clear();
+    if (keepRmfDriven) {
+      // RMF 가 대기 자리로 보내는 중일 수 있다. 멈춘 것으로 그려 두면 화면과
+      // 실제가 어긋난다 — 진짜 위치는 토픽이 알려 준다.
+      robot.moving = true;
+    } else {
+      robot
+        ..moving = false
+        ..rmfDriven = false;
+    }
     _homeReservations.removeWhere((_, robotId) => robotId == robot.id);
     unawaited(_saveMockTasks());
   }
@@ -6190,9 +6548,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 주기적으로 읽어 둔 값을 쓴다.
   bool _backendRunning = false;
 
+  /// 백엔드가 떠 있는 것을 **처음 본** 시각. 안 떠 있으면 null.
+  ///
+  /// 확인표가 어댑터의 침묵을 `아직`으로 볼지 `죽었다`로 볼지 이것으로 가른다.
+  /// 앱이 켜진 시각이 아니라 백엔드가 뜬 시각이라야 한다 — 앱을 한 시간 띄워
+  /// 두고 백엔드를 그제야 시작하면, 앱 기준으로는 첫 30초가 이미 한참 전이다.
+  DateTime? _backendUpAt;
+
+  /// [_backendRunning] 을 바꾸면서 뜬 시각을 함께 남긴다. `setState` 안에서 부른다.
+  void _markBackendRunning(bool running) {
+    _backendRunning = running;
+    // 떠 있는 동안에는 처음 본 시각을 그대로 둔다. 볼 때마다 새로 찍으면
+    // 기다려 주는 시간이 영영 안 끝나 죽은 어댑터도 `아직` 으로 남는다.
+    _backendUpAt = running ? (_backendUpAt ?? DateTime.now()) : null;
+  }
+
   Future<void> _startBackendFromDetail() async {
     final name = _robotDeployedMap?.summary.name ?? _mapName;
     if (name.trim().isEmpty) return;
+    // 저장과 내보내기를 여기서도 한다.
+    //
+    // 예전에는 이 길만 그것을 건너뛰고 곧바로 띄웠다. 그런데 바로 다음에 뜨는
+    // 실행 팝업은 `설정 저장과 디스크 내보내기는 완료되었습니다` 라고 적혀
+    // 있어서, 아무것도 안 한 채로 됐다고 말하고 있었다.
+    if (!await _prepareProjectForBackend(name)) return;
+    if (!mounted) return;
     // 여기서도 어떤 창을 볼지 묻는다. 설정 파일 메뉴에서 띄울 때와 다르게
     // 굴면, 같은 일을 어디서 시작했느냐에 따라 결과가 달라진다.
     final windows = await _askRunWindows(name);
@@ -6205,7 +6585,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
     final running = await gazeboRunningProjects();
     if (!mounted) return;
-    setState(() => _backendRunning = running.isNotEmpty);
+    setState(() => _markBackendRunning(running.isNotEmpty));
   }
 
   /// `/fleet_states` 를 마지막으로 읽은 결과. 아직 안 읽었으면 null.
@@ -6216,6 +6596,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   /// `/clock` 을 내는 곳의 수. 아직 안 셌으면 null.
   int? _clockPublishers;
+
+  /// Nav2 `map_server` 의 생명주기 상태. 아직 못 물었으면 null.
+  ///
+  /// 프로세스로는 알 수 없다 — 꺼져 있어도 프로세스는 멀쩡히 살아 있다.
+  String? _mapServerState;
 
   /// 작업 화면에 늘 띄우는 준비 확인표.
   ///
@@ -6239,26 +6624,48 @@ class _ControlDashboardState extends State<ControlDashboard> {
       attachedRobots: snapshot?.robots ?? const {},
       alignment: _mapAlignment,
       clockPublishers: _clockPublishers,
+      mapServerState: _mapServerState,
+      backendUptime: _backendUpAt == null
+          ? null
+          : DateTime.now().difference(_backendUpAt!),
     );
   }
+
+  /// 마지막으로 읽은 정합 결과와 그때 파일들이 어떤 상태였는지.
+  ///
+  /// 이 파일들은 배포·내보내기 때만 바뀌는데 확인표는 10초마다 돈다. 그때마다
+  /// 다시 읽으면 UI 스레드에서 YAML 두 개를 파싱하고 PGM 머리글까지 여는 일이
+  /// 하루 종일 되풀이된다 — 값은 늘 같다.
+  String? _alignmentKey;
+  Nav2MapAlignment? _alignmentCache;
 
   /// 배포된 위치추정 지도와 주행 그래프가 같은 자리에 있는지 본다.
   ///
   /// 앱이 들고 있는 값이 아니라 **디스크의 파일**을 읽는다. 어긋난 채로 도는
   /// 것은 디스크 쪽이고, 내보내기를 안 했으면 둘이 다르다.
+  ///
+  /// 파일이 그대로면 지난 값을 그대로 쓴다. 바뀐 것을 놓치지 않도록 **경로와
+  /// 수정 시각**을 열쇠로 삼는다 — 내용을 안 읽고도 바뀐 것을 알 수 있고,
+  /// 배포는 파일을 통째로 새로 쓰므로 시각이 반드시 달라진다.
   Nav2MapAlignment? _readMapAlignment(String mapName) {
     if (mapName.trim().isEmpty) return null;
     final dir = _mapDirectoryFor(mapName);
-    final graph = readNavGraphWaypoints('$dir/nav_graphs/0.yaml');
-    if (graph.isEmpty) return null;
+    final graphPath = '$dir/nav_graphs/0.yaml';
     // 실행에 실제로 들어가는 지도를 본다. SLAM 을 쓰기로 했으면 그것이다 —
     // 도면에서 구운 격자만 보면 늘 맞다고 나온다.
     final yaml = _useSlamMap
         ? '$dir/nav2_map/${mapName}_slam.yaml'
         : '$dir/nav2_map/$mapName.yaml';
-    final map = readNav2MapExtent(yaml);
-    if (map == null) return null;
-    return checkNav2MapAlignment(map: map, waypoints: graph);
+    final key = '$graphPath|${fileStamp(graphPath)}|$yaml|${fileStamp(yaml)}';
+    if (key == _alignmentKey) return _alignmentCache;
+
+    final graph = readNavGraphWaypoints(graphPath);
+    final map = graph.isEmpty ? null : readNav2MapExtent(yaml);
+    _alignmentKey = key;
+    _alignmentCache = map == null
+        ? null
+        : checkNav2MapAlignment(map: map, waypoints: graph);
+    return _alignmentCache;
   }
 
   /// 확인표의 재료를 다시 모은다. 작업 화면이 10초마다 부른다.
@@ -6271,26 +6678,53 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // RobotTelemetryBridge가 이미 /fleet_states를 계속 읽고 있다. 준비 확인마다
     // 별도 `ros2 topic echo --once`를 띄우면 같은 DDS 데이터를 중복 구독하며
     // 순간적으로 CPU 한 코어를 대부분 사용한다.
-    final attached = RobotTelemetryBridge.instance.attachedRobotIds;
+    final bridge = RobotTelemetryBridge.instance;
+    final attached = bridge.attachedRobotIds;
+    // **로봇 목록이 아니라 마지막으로 받은 시각으로 판단한다.**
+    //
+    // 로봇 목록이 비었다는 것만 보면 두 가지가 뭉뚱그려진다 — 어댑터가 아직
+    // 안 붙어서 아무것도 못 받은 것과, 어댑터가 죽은 것. 반대쪽도 틀린다.
+    // 어댑터가 죽어도 `ros2 topic echo` 는 그대로 기다리고 있어서 마지막
+    // 목록이 남고, 그러면 끊긴 뒤에도 계속 초록이다.
+    //
+    // /fleet_states 는 10Hz 로 온다(실측). 10초는 100번을 놓쳤다는 뜻이라
+    // 잠깐 밀린 것과 헷갈릴 일이 없다.
+    final receivedAt = bridge.fleetStatesAt;
+    final fresh =
+        receivedAt != null &&
+        DateTime.now().difference(receivedAt) < const Duration(seconds: 10);
     final snapshot = backendRunning
         ? RmfFleetSnapshot(
-            reachable: attached.isNotEmpty,
-            robots: attached,
-            message: attached.isEmpty ? '/fleet_states를 아직 받지 못했습니다.' : null,
+            reachable: fresh,
+            robots: fresh ? attached : const {},
+            message: fresh ? null : '/fleet_states를 아직 받지 못했습니다.',
           )
         : null;
+    // 시계는 매번 본다.
+    //
+    // 예전에는 이 확인 하나가 3~4초 사는 `ros2` 프로세스를 띄웠고, 그 값이
+    // 비싸서 여섯 번에 한 번만 물었다. 지금은 `pgrep` 한 번이라 그럴 이유가
+    // 없다 — 늦게 갱신되면 남은 다리를 알아채는 것도 그만큼 늦는다.
     final clocks = backendRunning
         ? await probeClockPublishers(rosDomainId: _rosDomainId)
+        : null;
+    // 지도 서버도 매번 본다. 여기가 꺼져 있으면 그 아래가 전부 무너지는데,
+    // 예전에는 맨 끝만 보고 `어댑터가 죽었습니다` 라고 했다.
+    final mapServer = backendRunning
+        ? await probeMapServerState(rosDomainId: _rosDomainId)
         : null;
     final alignment = _readMapAlignment(
       _robotDeployedMap?.summary.name ?? _mapName,
     );
     if (!mounted) return;
     setState(() {
-      _backendRunning = backendRunning;
+      _markBackendRunning(backendRunning);
       _fleetSnapshot = snapshot;
       _mapAlignment = alignment;
-      _clockPublishers = clocks;
+      // 백엔드가 내려갔으면 지난 값을 들고 있지 않는다. 없는 시계를 세어 둔
+      // 값이 남으면 다음에 띄울 때까지 거짓말을 한다.
+      _clockPublishers = backendRunning ? clocks : null;
+      _mapServerState = backendRunning ? mapServer : null;
     });
   }
 
@@ -6343,6 +6777,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       mapDirectory: _mapDirectoryFor(mapName),
       mapName: mapName,
       requestJson: request.json,
+      rosDomainId: _rosDomainId,
     );
     if (!mounted) return;
     await showWaypointErrorDialog(
@@ -6383,7 +6818,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ],
       telemetry: () => _telemetry,
       sensorsOf: () => RobotSensorFeed.instance.sensorsOf(robotId),
-      toFloor: _floorCoordinate,
       metersPerPixel: _metersPerPixel,
       waypointLabel: _waypointLabel,
       mapDirectory: _deployedMapDirectory,
@@ -6391,8 +6825,75 @@ class _ControlDashboardState extends State<ControlDashboard> {
       backendRunning: () => _backendRunning,
       onStartBackend: _startBackendFromDetail,
       onResubscribe: _resubscribeRobots,
+      // 설비 로봇이면 이 로봇이 할 수 있는 일(policy)을 함께 본다.
+      policiesOf: () => policiesForWorkcell(_workcellPolicyModels, robotId),
+      onManagePolicies: () async {
+        final robot = _fleetRobots
+            .where((item) => item.robotId == robotId)
+            .firstOrNull;
+        if (robot != null) await _showWorkcellPolicies(robot);
+      },
     ),
   );
+
+  /// 이 프로젝트가 가진 policy 와 공용 policy 를 합친 목록. 화면 상태도 맞춘다.
+  ///
+  /// 설비에 붙이는 자리에서는 아직 소속이 없는 공용 policy 도 골라야 한다. 다른
+  /// 프로젝트가 가진 것은 내밀지 않는다 — policy 는 프로젝트별로 관리하는 것이고,
+  /// 옮기려면 Policy 관리에서 소속을 바꾸는 것이 옳은 길이다.
+  Future<List<WorkcellPolicy>> _mergedWorkcellPolicies(String project) async {
+    final policies = await loadWorkcellPolicies(project);
+    if (mounted) setState(() => _workcellPolicyModels = policies);
+    final shared = await loadUnassignedWorkcellPolicies();
+    return [
+      ...policies,
+      for (final policy in shared)
+        if (!policies.any((item) => item.id == policy.id)) policy,
+    ];
+  }
+
+  /// 이 WorkCell 이 쓸 policy 를 붙이고 뗀다.
+  ///
+  /// 로봇 관리에서 설비 로봇을 고르면 여기로 온다. 붙인 것은 프로젝트의
+  /// MySQL 의 `workcell_policies` 에 남고, 작업의 픽업 단계에서 그 policy 를 고를
+  /// 수 있다. 공용 policy 를 붙이면 그 policy 는 이 프로젝트 것이 된다.
+  Future<void> _showWorkcellPolicies(RmfProjectRobot robot) async {
+    final project = _openProjectName;
+    if (project == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: 'Policy 를 붙일 수 없습니다',
+        message: '열린 프로젝트가 없습니다. 맵 프로젝트를 먼저 열어 주세요.',
+      );
+      return;
+    }
+    List<WorkcellPolicy> merged;
+    try {
+      merged = await _mergedWorkcellPolicies(project);
+    } catch (error) {
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: 'Policy 목록을 읽지 못했습니다',
+        message: '${robot.robotId} · ${robot.displayName}\n$error',
+      );
+      return;
+    }
+    if (!mounted) return;
+    await showMovableDialog<void>(
+      context: context,
+      builder: (_) => WorkcellPolicyAttachDialog(
+        robotId: robot.robotId,
+        robotName: robot.displayName,
+        robotModel: robot.model,
+        policies: merged,
+        onSave: (policy) async {
+          await bindWorkcellPolicy(project, policy);
+          return _mergedWorkcellPolicies(project);
+        },
+      ),
+    );
+  }
 
   Future<void> _showTaskDetail(_MockTask task) {
     final registered = _fleetRobots
@@ -6404,7 +6905,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
         task: task,
         robotOf: (id) =>
             _mockRobots.where((robot) => robot.id == id).firstOrNull,
-        toFloor: _floorCoordinate,
         metersPerPixel: _metersPerPixel,
         waypointLabel: _waypointLabel,
         // 출처는 로봇마다 다르다. 등록에 적힌 것을 그대로 쓴다.
@@ -6577,6 +7077,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
             mapDirectory: _mapDirectoryFor(mapName),
             mapName: mapName,
             requestJson: buildCancelTaskRequest(rmfTaskId),
+            rosDomainId: _rosDomainId,
           ),
         );
       }
@@ -6608,6 +7109,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         mapDirectory: directory,
         mapName: mapName,
         requestJson: buildCancelTaskRequest(rmfTaskId),
+        rosDomainId: _rosDomainId,
       );
       if (!result.accepted) problems.add('RMF 취소 실패: ${result.message}');
     }
@@ -6636,6 +7138,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapDirectory: directory,
           mapName: mapName,
           requestJson: request.json,
+          rosDomainId: _rosDomainId,
         );
         sentHomeByRmf = result.accepted;
         if (!result.accepted) {
@@ -6816,6 +7319,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapDirectory: _mapDirectoryFor(mapName),
           mapName: mapName,
           requestJson: buildCancelTaskRequest(taskId),
+          rosDomainId: _rosDomainId,
         ),
       );
     }
@@ -6954,15 +7458,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final registered = _fleetRobots
         .where((item) => item.robotId == robot.id)
         .firstOrNull;
-    final converted = convertTaskSteps([
-      for (final step in task.steps)
-        RmfTaskStepInput(
-          kind: step.type.name,
-          placeName: step.destinationName,
-          durationSeconds: step.durationSeconds,
-          policyId: step.policyId,
-        ),
-    ], homePlaceName: registered?.chargerWaypoint);
+    final converted = convertTaskSteps(
+      [
+        for (final step in task.steps)
+          RmfTaskStepInput(
+            kind: step.type.name,
+            placeName: step.destinationName,
+            durationSeconds: step.durationSeconds,
+            policyId: step.policyId,
+          ),
+      ],
+      homePlaceName: registered?.chargerWaypoint,
+      dockHeadingDegrees: _dockHeadingDegreesFor,
+    );
     if (converted.isEmpty) {
       return RmfTaskSubmission(
         accepted: false,
@@ -6979,6 +7487,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       mapDirectory: _mapDirectoryFor(mapName),
       mapName: mapName,
       requestJson: request.json,
+      rosDomainId: _rosDomainId,
     );
     if (result.accepted && converted.skipped.isNotEmpty) {
       // 넘긴 것과 화면에 보이는 것이 다르면 밝혀야 한다.
@@ -7021,25 +7530,85 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return;
     }
     if (event.event == 'action_done') {
-      if (step.type != _TaskStepType.armLoad) return;
-      setState(() => _completeCurrentTaskStep(robot, task));
+      // 지금 단계가 적재가 아니어도 버리지 않는다. 앞의 도착 소식을 놓쳐 단계가
+      // 뒤에 남아 있을 수 있고, 그때 이것마저 버리면 로봇이 짐을 싣고 돌아온
+      // 뒤에도 화면은 `적재 안 됨` 으로 남는다.
+      final matched = matchedProgressStep(
+        steps: _progressStepsOf(task),
+        currentIndex: task.currentStepIndex,
+        isArmLoad: true,
+      );
+      if (matched == null) return;
+      setState(() => _completeTaskStepsThrough(robot, task, matched));
+      return;
+    }
+    // 실패 소식. **반드시 받아야 한다.**
+    //
+    // 예전에는 이 둘이 아래 `navigate_done` 검사에 걸려 조용히 버려졌다.
+    // 그러면 어댑터가 작업을 접고 RMF 가 로봇을 대기 자리로 보낸 뒤에도 앱은
+    // 계속 `진행중` 이라고 적어 두었다. 2026-08-17 에 실제로 그랬다 —
+    // 워크셀 요청이 세 번 실패해 어댑터가 작업을 취소했고, RMF 는 로봇을
+    // 대기3 으로 보냈는데(`task_id: ''`), 화면만 진행중이었다.
+    if (event.event == 'action_failed' || event.event == 'navigate_failed') {
+      final what = event.event == 'action_failed'
+          ? '${step.label} 을(를) 설비가 끝내지 못했습니다'
+          : '${step.label} 목적지로 가지 못했습니다';
+      setState(
+        () => _failRobotTask(
+          robot,
+          task,
+          '$what. 자세한 것은 <맵>.err.log 를 보세요.',
+          // RMF 가 이 로봇을 계속 몬다 — 취소한 뒤 대기 자리로 보내는 중이다.
+          keepRmfDriven: true,
+        ),
+      );
+      _showProcessingWarning('작업 ${task.name}', what);
       return;
     }
     if (event.event != 'navigate_done') return;
-    if (!step.type.isMovement) return;
-    final goalX = robot.rmfGoalX;
-    final goalY = robot.rmfGoalY;
-    final destination = step.destination;
-    if (goalX == null || goalY == null || destination == null) return;
-    final expected = _rmfMetersFromPixel(destination);
-    if (expected == null) return;
     // RMF 가 준 좌표는 nav graph 의 Waypoint 값 그대로다. 우리가 도면에서
-    // 계산한 값과 소수점 아래까지 같아야 정상이다.
-    final gap = math.sqrt(
-      math.pow(goalX - expected.dx, 2) + math.pow(goalY - expected.dy, 2),
+    // 계산한 값과 소수점 아래까지 같아야 정상이다. 지금 단계에 안 맞으면 그
+    // 뒤 단계까지 본다 — 다만 적재 단계는 넘지 않는다.
+    final matched = matchedProgressStep(
+      steps: _progressStepsOf(task),
+      currentIndex: task.currentStepIndex,
+      isArmLoad: false,
+      goalX: robot.rmfGoalX,
+      goalY: robot.rmfGoalY,
     );
-    if (gap > 0.02) return;
-    setState(() => _completeCurrentTaskStep(robot, task));
+    if (matched == null) return;
+    setState(() => _completeTaskStepsThrough(robot, task, matched));
+  }
+
+  /// 이 작업의 단계를 진행 소식과 맞춰 볼 수 있는 꼴로 옮긴다.
+  ///
+  /// 목적지는 도면 픽셀로 들고 있으므로 여기서 RMF 미터로 옮긴다 — 어댑터가
+  /// 주는 것이 그 자다. 아직 자리를 안 정한 단계(복귀처럼 시작할 때 정하는
+  /// 것)는 좌표 없이 넘긴다.
+  List<ProgressStep> _progressStepsOf(_MockTask task) {
+    final steps = <ProgressStep>[];
+    for (final step in task.steps) {
+      if (step.type == _TaskStepType.armLoad) {
+        steps.add(const ProgressStep(kind: ProgressStepKind.armLoad));
+        continue;
+      }
+      if (!step.type.isMovement) {
+        steps.add(const ProgressStep(kind: ProgressStepKind.other));
+        continue;
+      }
+      final destination = step.destination;
+      final meters = destination == null
+          ? null
+          : _rmfMetersFromPixel(destination);
+      steps.add(
+        ProgressStep(
+          kind: ProgressStepKind.movement,
+          x: meters?.dx,
+          y: meters?.dy,
+        ),
+      );
+    }
+    return steps;
   }
 
   void _startTaskStep(_MockRobot robot, _MockTask task) {
@@ -7100,9 +7669,24 @@ class _ControlDashboardState extends State<ControlDashboard> {
       ..moving = true;
   }
 
-  void _completeCurrentTaskStep(_MockRobot robot, _MockTask task) {
-    task.currentStep?.status = _TaskStepStatus.completed;
-    task.currentStepIndex++;
+  void _completeCurrentTaskStep(_MockRobot robot, _MockTask task) =>
+      _completeTaskStepsThrough(robot, task, task.currentStepIndex);
+
+  /// [index] 단계까지 끝난 것으로 적고 그 다음으로 넘어간다.
+  ///
+  /// 지금 단계보다 뒤를 짚으면 사이의 단계도 함께 끝난 것이 된다. RMF 는 단계를
+  /// 건너뛰지 않으므로 뒤 단계에 닿았다는 것은 앞 단계를 이미 지났다는 뜻이다
+  /// ([matchedProgressStep] 이 무엇을 뛰어넘어도 되는지 가린다).
+  void _completeTaskStepsThrough(
+    _MockRobot robot,
+    _MockTask task,
+    int index,
+  ) {
+    for (var i = task.currentStepIndex; i <= index; i++) {
+      if (i < 0 || i >= task.steps.length) continue;
+      task.steps[i].status = _TaskStepStatus.completed;
+    }
+    task.currentStepIndex = index + 1;
     if (task.currentStep == null) {
       _finishRobotTask(robot);
     } else {
@@ -7214,7 +7798,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
         robot.battery = math.max(0, robot.battery - .003);
         changed = true;
       }
-      if (changed) setState(() {});
+      // `setState` 를 안 쓴다.
+      //
+      // 이 State 의 `build` 는 화면 전체를 만든다 — 왼쪽 메뉴, 상단 제목,
+      // 그 아래 페이지까지. 로봇이 1픽셀 움직일 때마다 그것을 통째로 다시
+      // 만들면 초당 열 번이 된다. 확인표 계산(`_readiness`)처럼 build 안에서
+      // 도는 것들도 함께 열 번 돈다.
+      //
+      // 대신 신호만 올린다. 로봇을 그리는 페이지만 이것을 듣는다.
+      if (changed) _mockTick.value++;
     });
   }
 
@@ -7739,7 +8331,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _robotDeployedMap != null &&
         !_robotDeployedMap!.summary.yamlPath.endsWith('.rmfproject') &&
         _robotDeployedMap!.summary.name == _openProjectName;
-    if (!_isDeployed && !loadedOperationalMap) {
+    // 디스크도 본다.
+    //
+    // `_isDeployed` 는 **이 세션에서 방금 배포에 성공했다**는 기억이지 배포
+    // 여부가 아니다. 앱을 다시 켜면 사라지고, 맵을 건드리는 자리 서른 곳에서
+    // 꺼진다. 실제로 지도가 다 깔렸는데 마지막 확인만 실패해 exit 1 로 끝난
+    // 배포에서도 안 켜졌고, 그 뒤로 멀쩡한 맵을 두고 `먼저 맵을 배포하세요` 가
+    // 계속 떴다.
+    final deployedOnDisk = deployedMapExists(_openProjectName!);
+    if (!_isDeployed && !loadedOperationalMap && !deployedOnDisk) {
       final action = await showMovableDialog<String>(
         context: context,
         builder: (dialogContext) => AlertDialog(
@@ -7825,7 +8425,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       builder: (_) => _SequentialTaskEditorDialog(
         initialName: '연속 작업 ${_mockTasks.length + 1}',
         robots: taskRobots,
-        workcellPolicies: _availableWorkcellPolicies,
+        policyChoices: _policyChoicesForStation,
         drawing: _robotRuntimeDrawing,
         lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
         waypoints: waypoints,
@@ -7925,7 +8525,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
         initialTrigger: task.trigger,
         editing: true,
         robots: taskRobots,
-        workcellPolicies: _availableWorkcellPolicies,
+        policyChoices: _policyChoicesForStation,
         drawing: _robotRuntimeDrawing,
         lanes: _robotDeployedMap?.lanes ?? _recommendedLanes,
         waypoints: waypoints,
@@ -8052,6 +8652,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 팔이 뻗는 자리와 핑키 본체가 부딪히는지 먼저 본다. 부딪힌 뒤에는 무를 수
+    // 없으므로, 기본은 **멈추는 것**이다.
+    final reachWarning = workcellReachWarning(_reachChecksFor(task));
+    if (reachWarning != null) {
+      final danger = _reachChecksFor(task).any((check) => check.isDanger);
+      final go = await confirmWarningDialog(
+        context,
+        title: danger ? '핑키와 로봇팔이 부딪힐 위험이 있습니다' : '픽업 자리를 확인하세요',
+        message:
+            '${task.name} 을 실행하기 전에 픽업 자리를 살폈습니다.\n\n'
+            '$reachWarning\n\n'
+            '맵 관리에서 Waypoint 를 옮기거나 적재 방향을 고친 뒤 다시 배포하세요.',
+        confirmLabel: danger ? '위험을 알고도 실행' : '그래도 실행',
+      );
+      if (!go || !mounted) return;
+    }
     // 값의 출처가 Gazebo·실물인 로봇은 RMF 가 몬다. 앱이 단계를 세는 것과
     // 로봇이 실제로 가는 것이 따로 놀면 화면이 거짓말을 한다.
     final rmfDriven = _isRmfDriven(robot.id);
@@ -8076,6 +8692,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _startTaskStep(robot, task);
     });
     if (rmfDriven) {
+      // **넘기기 전에 듣기 시작한다.** 진행 소식은 토픽이라 구독이 붙기 전에
+      // 나간 것은 아무 데도 안 남는다. 예전에는 넘긴 **뒤에** 붙었는데,
+      // `ros2 topic echo` 가 뜨고 상대를 찾는 데 1~2초가 걸리는 사이 어댑터는
+      // 이미 첫 `navigate_start` 를 냈다. 그것을 놓치면 목적지를 모르는 채로
+      // 첫 도착을 맞이해 단계가 처음부터 어긋난다.
+      await RmfTaskBridge.instance.watch(
+        _fleetSettingsFor(
+          _robotDeployedMap?.summary.name ?? _mapName,
+        ).fleetName,
+        rosDomainId: _rosDomainId,
+      );
+      if (!mounted) return;
       final result = await _submitTaskToRmf(robot, task);
       if (!mounted) return;
       if (!result.accepted) {
@@ -8092,11 +8720,6 @@ class _ControlDashboardState extends State<ControlDashboard> {
         return;
       }
       setState(() => robot.rmfTaskId = result.taskId);
-      await RmfTaskBridge.instance.watch(
-        _fleetSettingsFor(
-          _robotDeployedMap?.summary.name ?? _mapName,
-        ).fleetName,
-      );
     }
     await _saveMockTasks();
     if (!mounted) return;
@@ -8319,6 +8942,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _exitListener?.dispose();
     unawaited(_interruptSubscription?.cancel());
     _mockRobotTimer?.cancel();
+    _mockTick.dispose();
     _orderDispatchTimer?.cancel();
     // 그리드맵·SLAM 미리보기는 GPU 쪽 자원이라 놔두면 안 돌아온다.
     _gridPreview?.dispose();
@@ -9004,6 +9628,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
             'point': _encodeOffset(point),
             'name': _waypointNames[point] ?? '',
             'category': _waypointTypes[point] ?? '대기',
+            // 정해 둔 자리에만 넣는다. 0 도와 "안 정했다" 는 다르다 —
+            // 0 도는 오른쪽을 보라는 뜻이고, 없으면 각도를 안 따진다.
+            'dockHeading': ?_waypointDockHeadings[point],
           },
       ],
       'activeLaneEndpoint': _activeLaneEndpoint == null
@@ -9309,8 +9936,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     String mapName,
     List<RmfProjectRobot> robots,
   ) {
-    final scale = _metersPerPixel;
-    if (scale == null || scale <= 0) {
+    final stations = _workcellStations();
+    if (stations.isEmpty && _metersPerPixel == null) {
       // 축척이 없으면 자리를 미터로 옮길 수 없다. 짝을 못 짓는 것과 자리가
       // 없는 것은 다르므로 빈 결과를 준다.
       return const WorkcellPairingResult(
@@ -9319,6 +9946,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
         idleWorkcells: [],
       );
     }
+    return pairWorkcells(robots: robots, stations: stations);
+  }
+
+  /// 이 맵의 픽업·드랍오프 자리를 RMF 미터 좌표로 옮긴 목록.
+  ///
+  /// 짝짓기와 부딪힘 검사가 같은 자를 써야 한다. 화면 좌표는 원점도 y 방향도
+  /// RMF 와 다르므로 여기서 한 번만 옮긴다.
+  List<WorkcellStation> _workcellStations() {
+    final scale = _metersPerPixel;
+    if (scale == null || scale <= 0) return const [];
     final types = _waypointTypes.isNotEmpty
         ? _waypointTypes
         : (_robotDeployedMap?.waypointCategories ?? const <Offset, String>{});
@@ -9333,8 +9970,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       final isPickup = category == '픽업';
       final isDropoff = category == '드랍오프';
       if (!isPickup && !isDropoff) continue;
-      // 로봇 spawn 과 같은 자로 재야 한다. 화면 좌표는 원점도 y 방향도 RMF 와
-      // 다르다 — 섞으면 짝이 통째로 어긋난다.
+      // 로봇 spawn 과 같은 자로 재야 한다.
       final world = rmfWorldFromPixel(entry.key.dx, entry.key.dy, scale);
       stations.add(
         WorkcellStation(
@@ -9345,7 +9981,106 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
     }
-    return pairWorkcells(robots: robots, stations: stations);
+    return stations;
+  }
+
+  /// 이 작업의 픽업 단계마다 팔과 핑키 본체가 부딪히는지 본다.
+  ///
+  /// 픽업은 두 로봇이 같은 자리를 나눠 쓰는 순간이다. 팔은 고정이고 핑키가
+  /// 그 앞에 서므로, 자리와 각도만 보고도 실행 **전에** 판정할 수 있다.
+  /// 부딪힌 뒤에는 무를 수 없다.
+  List<WorkcellReachCheck> _reachChecksFor(_MockTask task) {
+    final places = {
+      for (final station in _workcellStations()) station.name: station,
+    };
+    if (places.isEmpty) return const [];
+    final servedBy = workcellsByStation(
+      _workcellPairing(_mapName, _fleetRobots),
+    );
+    final workcells = {
+      for (final robot in _fleetRobots)
+        if (!robot.isMobile) robot.robotId: robot,
+    };
+    final checks = <WorkcellReachCheck>[];
+    final seen = <String>{};
+    String? lastPlace;
+    for (final step in task.steps) {
+      if (step.type == _TaskStepType.navigate) {
+        lastPlace = step.destinationName?.trim();
+        continue;
+      }
+      // 픽업 요청은 바로 앞 이동 단계의 자리 이름으로 나간다.
+      if (step.type != _TaskStepType.armLoad) continue;
+      final station = lastPlace;
+      if (station == null || station.isEmpty || !seen.add(station)) continue;
+      final place = places[station];
+      final arm = workcells[servedBy[station]];
+      if (place == null || arm?.spawnX == null || arm?.spawnY == null) continue;
+      final degrees = _dockHeadingDegreesFor(station);
+      checks.add(
+        checkWorkcellReach(
+          workcellId: arm!.robotId,
+          station: station,
+          armX: arm.spawnX!,
+          armY: arm.spawnY!,
+          stationX: place.x,
+          stationY: place.y,
+          bodyRadius: _fleetSettings.footprintRadius,
+          reach: armReachOf(arm.model),
+          sweep: armSweepOf(arm.model),
+          headingRadians: degrees == null ? null : degrees * math.pi / 180,
+        ),
+      );
+    }
+    return checks;
+  }
+
+  /// 짝지어진 픽업·드랍오프 자리를 **전부** 본다. 배포 직전에 쓴다.
+  ///
+  /// [_reachChecksFor] 는 작업 하나에 들어 있는 자리만 본다. 그래서 작업을 아직
+  /// 안 짠 자리는 아무도 안 본 채로 산출물에 나가고, 부딪히는 것은 그때 처음
+  /// 알게 된다 — 그때는 이미 부딪힌 뒤다.
+  ///
+  /// 배포는 좌표가 파일에 박히는 순간이다(`spawn.launch.xml` 의 `-x -y`,
+  /// nav graph 의 Waypoint). 그러니 여기서 한 번 다 본다.
+  List<WorkcellReachCheck> _reachChecksForDeploy(
+    String mapName,
+    List<RmfProjectRobot> robots,
+  ) {
+    final places = {
+      for (final station in _workcellStations()) station.name: station,
+    };
+    if (places.isEmpty) return const [];
+    final workcells = {
+      for (final robot in robots)
+        if (!robot.isMobile) robot.robotId: robot,
+    };
+    final checks = <WorkcellReachCheck>[];
+    for (final entry in workcellsByStation(
+      _workcellPairing(mapName, robots),
+    ).entries) {
+      final place = places[entry.key];
+      final arm = workcells[entry.value];
+      if (place == null || arm == null) continue;
+      if (arm.spawnX == null || arm.spawnY == null) continue;
+      final degrees = _dockHeadingDegreesFor(entry.key);
+      checks.add(
+        checkWorkcellReach(
+          workcellId: arm.robotId,
+          station: entry.key,
+          armX: arm.spawnX!,
+          armY: arm.spawnY!,
+          stationX: place.x,
+          stationY: place.y,
+          bodyRadius: _fleetSettings.footprintRadius,
+          reach: armReachOf(arm.model),
+          sweep: armSweepOf(arm.model),
+          headingRadians: degrees == null ? null : degrees * math.pi / 180,
+        ),
+      );
+    }
+    checks.sort((a, b) => a.station.compareTo(b.station));
+    return checks;
   }
 
   Future<void> _writeMapProject(String mapName) async {
@@ -9521,7 +10256,27 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapName: mapName,
           pairing: _workcellPairing(mapName, deployRobots),
           policies: _workcellPolicyModels,
+          dockHeadings: _dockHeadingsByStation(),
+          // 붙인 policy 의 학습 결과가 어디 있는지 알려 준다. 이 자리에 파일이
+          // 없으면 노드가 시험 동작으로 대신하고 그렇다고 로그에 남긴다.
+          policyArchives: {
+            for (final policy in _workcellPolicyModels)
+              policy.id: policyArchivePath(policy),
+          },
+          policyRunnerPath: '$mapDirectory/${mapName}_policy_runner.py',
         ),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: '${mapName}_policy_runner.py',
+        kind: 'nav2',
+        description:
+            '붙여 둔 학습 policy 로 로봇팔을 움직인다. 워크셀 노드가 픽업 '
+            '요청을 받으면 이것을 띄우고 종료 코드로만 판단한다 — 추론기가 '
+            '없는 자리에서는 시험 동작으로 대신하므로 작업이 멈추지 않는다. '
+            'Gazebo 와 실물이 같은 러너를 쓴다.',
+        executable: true,
+        content: buildPolicyRunnerScript(mapName: mapName),
         generatedAt: now,
       ),
       MapProjectFile(
@@ -9588,6 +10343,16 @@ class _ControlDashboardState extends State<ControlDashboard> {
             '인터페이스가 구성돼 있어야 한다.',
         executable: true,
         content: buildIsaacProjectScript(mapName: mapName),
+        generatedAt: now,
+      ),
+      MapProjectFile(
+        fileName: 'isaac/convert_$mapName.py',
+        kind: 'isaac',
+        description:
+            'Gazebo 건물 OBJ와 프로젝트 로봇 URDF를 Isaac Sim USD stage로 '
+            '자동 변환한다. 원본이 바뀌면 실행 스크립트가 다시 호출한다.',
+        executable: true,
+        content: buildIsaacConversionScript(mapName: mapName),
         generatedAt: now,
       ),
       // 로봇 하나가 디렉터리 하나다. 한 대를 빼거나 옮길 때 그 디렉터리만
@@ -9853,13 +10618,203 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// 등록 창의 저장 단추도, 실제로 저장되는 값도 이 함수 하나만 본다. 두 곳에서
   /// 따로 풀면 "저장은 되는데 좌표는 없는" 로봇이 다시 생긴다.
-  Offset? _spawnFromStation({
+  /// 각도를 칸에 넣을 글자로. 소수점 뒤 0 은 떼고 −180~180 으로 접는다.
+  ///
+  /// `90.0` 보다 `90` 이 읽기 쉽고, `-179.5` 와 `180.5` 가 같은 방향인데 칸마다
+  /// 다르게 보이면 고친 것이 반영됐는지 알 수 없다.
+  static String _degreesText(double degrees) {
+    final wrapped = _wrapDegrees(degrees);
+    final text = wrapped.toStringAsFixed(1);
+    return text.endsWith('.0') ? text.substring(0, text.length - 2) : text;
+  }
+
+  /// −180 초과 180 이하로 접는다.
+  static double _wrapDegrees(double degrees) {
+    var value = degrees % 360;
+    if (value > 180) value -= 360;
+    if (value <= -180) value += 360;
+    // `-0` 이 나오지 않게 한다.
+    return value == 0 ? 0 : value;
+  }
+
+  /// 자리 이름 → 적재 방향 [도]. 워크셀 노드에 그대로 박아 넣는다.
+  ///
+  /// 워크셀은 nav graph 를 안 읽는다. 그래서 어느 자리가 어느 각도를 요구하는지
+  /// 알 방법이 없어, 배포할 때 생성되는 노드에 적어 준다.
+  ///
+  /// 이 값으로 워크셀은 **로봇이 정말 그 자세로 섰는지** 확인한 뒤에 팔을
+  /// 움직인다. RMF 가 도착이라고 말하는 것과 로봇이 실제로 그렇게 선 것은
+  /// 다른 이야기다 — 로봇이 아직 돌고 있는데 팔이 나가면 안 된다.
+  ///
+  /// 배포하는 것은 편집기의 지금 상태다. 여기서는 [_waypointDockHeadings] 를
+  /// 쓴다([_dockHeadingDegreesFor] 가 배포 맵을 먼저 보는 것과 다르다 —
+  /// 그쪽은 이미 배포된 것에 맞춰 작업을 보내는 자리다).
+  Map<String, double> _dockHeadingsByStation() {
+    final result = <String, double>{};
+    for (final entry in _waypointDockHeadings.entries) {
+      final name = (_waypointNames[entry.key] ?? '').trim();
+      if (name.isEmpty) continue;
+      result[name] = entry.value;
+    }
+    return result;
+  }
+
+  /// 자리 이름으로 적재 방향을 찾는다 [도]. 정해 두지 않았으면 null.
+  ///
+  /// **배포한 맵을 먼저 본다.** 작업을 넘길 때 로봇이 실제로 쓰는 것이 배포
+  /// 산출물이고, 편집기에 열려 있는 프로젝트는 아직 안 배포한 수정본일 수
+  /// 있다. 화면에서 고친 각도로 작업을 보냈는데 로봇이 든 nav graph 에는 그
+  /// 자리가 없으면, 어디가 어긋났는지 찾는 데 시간을 버린다.
+  ///
+  /// 배포 맵을 안 불러왔으면 편집기 값으로 돌아간다.
+  double? _dockHeadingDegreesFor(String place) {
+    final name = place.trim();
+    if (name.isEmpty) return null;
+    final deployed = _robotDeployedMap;
+    if (deployed != null) {
+      for (final entry in deployed.waypointDockHeadings.entries) {
+        if ((deployed.waypointNames[entry.key] ?? '').trim() == name) {
+          return entry.value;
+        }
+      }
+      // 배포 맵을 불러왔는데 그 자리에 각도가 없으면 없는 것이다. 편집기
+      // 값으로 넘어가면 배포 안 한 각도가 몰래 섞인다.
+      return null;
+    }
+    for (final entry in _waypointDockHeadings.entries) {
+      if ((_waypointNames[entry.key] ?? '').trim() == name) return entry.value;
+    }
+    return null;
+  }
+
+  /// 적재 방향 입력칸의 글자를 읽는다.
+  ///
+  /// 비어 있으면 "각도를 안 정했다" 로 읽어 `degrees: null` 을 돌려준다. 이것도
+  /// **정상**이다 — 숫자가 안 읽힌 것(`null` 반환)과 구별해야 저장 단추를 언제
+  /// 막을지 정할 수 있다. 둘을 뭉뚱그리면 빈칸으로도 저장이 안 되거나, 오타를
+  /// 넣어도 조용히 지워진다.
+  static ({double? degrees})? _parseDockHeading(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return (degrees: null);
+    final value = double.tryParse(trimmed);
+    if (value == null || !value.isFinite) return null;
+    return (degrees: _wrapDegrees(value));
+  }
+
+  /// 입력칸 아래에 무슨 일이 일어날지 적는다.
+  String _dockHeadingHint(String text) {
+    final parsed = _parseDockHeading(text);
+    if (parsed == null) return '숫자를 넣어 주세요. 예: 180';
+    final degrees = parsed.degrees;
+    if (degrees == null) {
+      return '각도를 요구하지 않습니다. RMF 가 들어온 길 방향대로 세웁니다.';
+    }
+    // 사람이 각도만 보고는 어느 쪽인지 잘 모른다. 도면 기준으로 풀어 준다.
+    final side = switch (degrees) {
+      > -45 && <= 45 => '도면 오른쪽',
+      > 45 && <= 135 => '도면 위쪽',
+      > -135 && <= -45 => '도면 아래쪽',
+      _ => '도면 왼쪽',
+    };
+    return '로봇의 코가 $side을 봅니다. 수납함은 그 반대쪽에 옵니다.\n'
+        '이 자리로 가는 작업이 각도까지 맞을 때까지 도착으로 치지 않습니다.';
+  }
+
+  /// 이 자리에서 로봇이 볼 만한 방향들. 적재 방향을 고를 때 보여 준다.
+  ///
+  /// 두 갈래를 만든다.
+  ///
+  /// **① 수납함을 설비 쪽으로.** 핑키는 수납함을 뒤에 달고 다니므로, 팔이
+  /// 수납함에 닿으려면 코가 **팔 반대쪽**을 봐야 한다. 그래서 설비까지의
+  /// 방향에 180도를 더한 값이다. 픽업 자리에서 원하는 것은 보통 이것이다.
+  ///
+  /// **② 나가는 길 쪽.** 각도를 안 정하면 RMF 가 대략 이렇게 세운다. 적재가
+  /// 아니라 출발을 빨리 하고 싶을 때 쓴다.
+  ///
+  /// 설비는 [workcellReachMeters] 안에 있는 것만 본다 — 팔이 닿지 않는 설비를
+  /// 기준으로 세우면 아무 의미가 없다. 짝짓기 규칙과 같은 거리를 쓴다.
+  List<({String label, double degrees})> _dockHeadingSuggestions(
+    Offset waypoint,
+  ) {
+    final from = _rmfMetersFromPixel(waypoint);
+    if (from == null) return const [];
+    final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    final types = _robotDeployedMap?.waypointCategories ?? _waypointTypes;
+    final points = _robotDeployedMap?.waypoints ?? _laneWaypoints;
+    final result = <({String label, double degrees})>[];
+    final seen = <int>{};
+
+    void add(String label, double degrees) {
+      final wrapped = _wrapDegrees(degrees);
+      // 같은 각도가 두 번 나오면 단추만 늘고 고를 것은 그대로다.
+      if (!seen.add(wrapped.round())) return;
+      result.add((label: label, degrees: wrapped));
+    }
+
+    for (final equipment in points) {
+      if (types[equipment] != '설비') continue;
+      final to = _rmfMetersFromPixel(equipment);
+      if (to == null) continue;
+      final distance = (to - from).distance;
+      if (distance > workcellReachMeters) continue;
+      final toward =
+          math.atan2(to.dy - from.dy, to.dx - from.dx) * 180 / math.pi;
+      final label = (names[equipment] ?? '').trim();
+      add('수납함을 ${label.isEmpty ? '설비' : label} 쪽으로', toward + 180);
+    }
+    for (final next in _outgoingWaypoints(waypoint)) {
+      final to = _rmfMetersFromPixel(next);
+      if (to == null) continue;
+      final label = (names[next] ?? '').trim();
+      add(
+        '나가는 길 ${label.isEmpty ? '이름 없는 자리' : label} 쪽',
+        math.atan2(to.dy - from.dy, to.dx - from.dx) * 180 / math.pi,
+      );
+    }
+    return result;
+  }
+
+  /// 이 자리에서 나가는 길들의 방향. RMF 월드 기준 도(度), 반시계가 +.
+  ///
+  /// 로봇을 세워 둔 방향이 나가는 길과 어긋나면 **출발하기 전에 제자리에서 그만큼
+  /// 돌고 나서** 간다. Nav2 컨트롤러(`RegulatedPurePursuitController`)의
+  /// `use_rotate_to_heading` 이 그렇게 하도록 되어 있고, `allow_reversing` 이
+  /// 꺼져 있어 후진으로 때울 수도 없다.
+  ///
+  /// 실제로 충전2 에 0도(동쪽)로 세워 둔 핑키는 대기3 으로 갈 때 179.5도를
+  /// 제자리에서 돌았다. 그래서 고를 수 있게 값을 만들어 보여 준다.
+  List<({String name, double degrees})> _stationExitHeadings({
+    required RmfRobotKind kind,
+    required String? station,
+  }) {
+    final pixel = _stationPixel(kind: kind, station: station);
+    if (pixel == null) return const [];
+    final from = _rmfMetersFromPixel(pixel);
+    if (from == null) return const [];
+    final names = _robotDeployedMap?.waypointNames ?? _waypointNames;
+    final seen = <String>{};
+    final result = <({String name, double degrees})>[];
+    for (final next in _outgoingWaypoints(pixel)) {
+      final to = _rmfMetersFromPixel(next);
+      if (to == null) continue;
+      final degrees =
+          math.atan2(to.dy - from.dy, to.dx - from.dx) * 180 / math.pi;
+      final label = (names[next] ?? '').trim();
+      // 같은 자리로 오가는 Lane 이 둘로 잡히면 목록에 두 번 나온다.
+      if (!seen.add('$label|${degrees.round()}')) continue;
+      result.add((name: label.isEmpty ? '이름 없는 자리' : label, degrees: degrees));
+    }
+    return result;
+  }
+
+  /// 자리 이름에 해당하는 Waypoint 의 화면 좌표. 못 찾으면 null.
+  Offset? _stationPixel({
     required RmfRobotKind kind,
     required String? station,
   }) {
     final name = (station ?? '').trim();
     if (name.isEmpty) return null;
-    final source = _waypointTypes.entries
+    return _waypointTypes.entries
         .where(
           (entry) =>
               entry.value == kind.waypointCategory &&
@@ -9867,6 +10822,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
         )
         .map((entry) => entry.key)
         .firstOrNull;
+  }
+
+  Offset? _spawnFromStation({
+    required RmfRobotKind kind,
+    required String? station,
+  }) {
+    final source = _stationPixel(kind: kind, station: station);
     if (source == null) return null;
     return _rmfMetersFromPixel(source);
   }
@@ -9892,6 +10854,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
         // Gazebo 도 nav graph 도 RMF 월드 좌표를 쓴다. 화면에 보여 주는 바닥
         // 좌표를 그대로 넣으면 로봇이 건물 밖 허공에 놓여 끝없이 떨어진다.
         final spawn = _rmfMetersFromPixel(entry.key);
+        // 나가는 길을 보고 세워 둔다.
+        //
+        // 0도로 두면 길이 어디로 나 있든 동쪽을 보고 서 있게 되고, 출발할
+        // 때마다 제자리에서 돌고 나서 간다. 한꺼번에 만드는 길이라 사람이
+        // 대마다 고쳐 줄 수도 없다. 이동 로봇만 그렇게 한다 — 설치 로봇은
+        // 길을 안 따라간다.
+        final exits = kind == RmfRobotKind.mobile
+            ? _stationExitHeadings(kind: kind, station: entry.value)
+            : const <({String name, double degrees})>[];
+        final heading = exits.isEmpty
+            ? 0.0
+            : exits.first.degrees * math.pi / 180;
         robots.add(
           kind == RmfRobotKind.mobile
               ? RmfProjectRobot(
@@ -9903,6 +10877,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   chargerWaypoint: entry.value,
                   spawnX: spawn?.dx,
                   spawnY: spawn?.dy,
+                  spawnHeading: heading,
                 )
               : RmfProjectRobot(
                   robotId: 'omx_$serial',
@@ -9978,6 +10953,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final domainController = TextEditingController(
       text: '${existing?.rosDomainId ?? _rosDomainId}',
     );
+    // 세워 둘 방향. 사람은 도(度)로 생각하고 파일에는 라디안으로 들어간다.
+    final headingController = TextEditingController(
+      text: _degreesText((existing?.spawnHeading ?? 0) * 180 / math.pi),
+    );
+    String? headingError;
     String? domainError;
     var kind = existing?.kind ?? RmfRobotKind.mobile;
     var dataSource = existing?.dataSource ?? RobotDataSource.mock;
@@ -10295,6 +11275,81 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         ),
                       ),
                     const SizedBox(height: 12),
+                    // 세워 둘 방향.
+                    //
+                    // 이 값이 그대로 Gazebo `create -Y` 와 AMCL 의 처음 자세로
+                    // 들어간다. 나가는 길과 어긋나면 출발할 때마다 그만큼
+                    // 제자리에서 돌고 나서 간다.
+                    TextField(
+                      controller: headingController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        signed: true,
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: '세워 둘 방향 (도)',
+                        helperText:
+                            '0도가 오른쪽(+X), 반시계가 +. 비우면 0도입니다.\n'
+                            '나가는 길과 20도 넘게 어긋나면 출발 전에 제자리에서 돌고 갑니다.',
+                        helperMaxLines: 3,
+                        errorText: headingError,
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      onChanged: (_) {
+                        if (headingError != null) {
+                          setDialogState(() => headingError = null);
+                        }
+                      },
+                    ),
+                    // 나가는 길 방향을 바로 넣을 수 있게 한다. 사람이 좌표를
+                    // 보고 각도를 계산하게 두면 아무도 안 고친다.
+                    Builder(
+                      builder: (context) {
+                        final exits = _stationExitHeadings(
+                          kind: kind,
+                          station: charger,
+                        );
+                        if (exits.isEmpty) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              const Text(
+                                '나가는 길 방향:',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF64748B),
+                                ),
+                              ),
+                              for (final exit in exits)
+                                OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                    ),
+                                    minimumSize: const Size(0, 32),
+                                    textStyle: const TextStyle(fontSize: 12),
+                                  ),
+                                  onPressed: () => setDialogState(() {
+                                    headingController.text = _degreesText(
+                                      exit.degrees,
+                                    );
+                                    headingError = null;
+                                  }),
+                                  child: Text(
+                                    '${exit.name} ${_degreesText(exit.degrees)}°',
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
                     if (isMobile)
                       Align(
                         alignment: Alignment.centerLeft,
@@ -10374,6 +11429,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             return;
                           }
                         }
+                        // 세워 둘 방향. 비우면 0도다.
+                        //
+                        // 못 읽는 값을 조용히 0 으로 바꾸지 않는다. 45 라고 치려다
+                        // `4 5` 가 됐는데 0도로 저장되면, 로봇이 왜 엉뚱한 데를
+                        // 보고 서 있는지 알 수 없다.
+                        final rawHeading = headingController.text.trim();
+                        double headingRadians = 0;
+                        if (rawHeading.isNotEmpty) {
+                          final degrees = double.tryParse(
+                            rawHeading.replaceAll(',', '.'),
+                          );
+                          if (degrees == null || !degrees.isFinite) {
+                            setDialogState(
+                              () => headingError = '숫자로 적어 주세요. 예: 90, -179.5',
+                            );
+                            return;
+                          }
+                          headingRadians =
+                              _wrapDegrees(degrees) * math.pi / 180;
+                        }
                         Navigator.pop(
                           dialogContext,
                           RmfProjectRobot(
@@ -10404,7 +11479,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             spawnY: stationChanged
                                 ? spawn?.dy
                                 : existing?.spawnY ?? spawn?.dy,
-                            spawnHeading: existing?.spawnHeading ?? 0,
+                            spawnHeading: headingRadians,
                           ),
                         );
                       },
@@ -10945,13 +12020,176 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return chosen;
   }
 
-  Future<bool> _saveSettingsBeforeBackend(String mapName) async {
-    try {
-      await _writeMapProject(mapName);
-      return true;
-    } catch (error) {
-      if (mounted) _showProcessingWarning('설정 내용 저장', error);
+  /// 백엔드를 띄우기 전에 거치는 단계.
+  static const _backendPrepareSteps = [
+    '프로젝트 저장',
+    'Nav2 지도 내보내기',
+    '설정 파일 읽기',
+    '디스크로 내보내기',
+  ];
+
+  /// 백엔드를 띄우기 전에 저장하고 디스크로 풀어 놓는다.
+  ///
+  /// `ros2 launch` 는 MySQL 을 모르고 **파일만 읽는다.** 이 단계를 건너뛰고
+  /// 띄우면 예전 파일로 돈다 — 오류가 안 나서 방금 고친 것이 왜 안 먹는지 알
+  /// 수 없다. 맵을 다시 배포한 직후에는 아예 파일이 없다. 배포가 맵 디렉터리를
+  /// 통째로 갈아끼우기 때문에 `robots/` 도 실행 스크립트도 함께 사라진다.
+  ///
+  /// **하는 동안 무엇을 하는 중인지 보여 준다.** 조용히 하면 몇 초 멈춘 것이
+  /// 도는 중인지 멈춘 것인지 알 수 없고, 어디까지 됐는지도 안 남는다.
+  ///
+  /// 어느 단계든 실패하면 거기서 멈추고 false 를 돌려준다. 예전 파일로 백엔드를
+  /// 띄우지 않는다 — 반쯤 맞는 설정으로 도는 것이 제일 찾기 어렵다.
+  Future<bool> _prepareProjectForBackend(String mapName) async {
+    final progress = ValueNotifier<int>(0);
+    // 기다리지 않는다. 이 팝업은 아래 단계가 도는 동안 떠 있어야 한다.
+    unawaited(
+      showMovableDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            icon: const Icon(Icons.save_outlined, size: 30),
+            title: const Text('백엔드 띄울 준비'),
+            content: SizedBox(
+              width: 430,
+              child: ValueListenableBuilder<int>(
+                valueListenable: progress,
+                builder: (context, done, _) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '`$mapName` 을 저장하고 디스크로 내보내는 중입니다.',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'ros2 launch 는 파일만 읽습니다. 이것을 해 두어야 방금 '
+                      '바꾼 설정으로 돕니다.',
+                      style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                    ),
+                    const SizedBox(height: 14),
+                    for (var i = 0; i < _backendPrepareSteps.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: i < done
+                                  ? const Icon(
+                                      Icons.check,
+                                      size: 18,
+                                      color: Color(0xFF15803D),
+                                    )
+                                  : i == done
+                                  ? const Padding(
+                                      padding: EdgeInsets.all(3),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              _backendPrepareSteps[i],
+                              style: TextStyle(
+                                // 아직 안 한 단계는 흐리게. 지금 어디인지가
+                                // 한눈에 보여야 한다.
+                                color: i > done
+                                    ? const Color(0xFF94A3B8)
+                                    : null,
+                                fontWeight: i == done
+                                    ? FontWeight.w700
+                                    : FontWeight.w400,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    void closeProgress() {
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+
+    // 실패는 복사할 수 있는 팝업으로 낸다. 그리고 **어느 프로젝트의 어느
+    // 단계**인지 제목에 적는다 — 화면에 프로젝트가 여럿 열려 있을 수 있다.
+    Future<bool> fail(String step, String message) async {
+      closeProgress();
+      if (!mounted) return false;
+      await showWaypointErrorDialog(
+        context,
+        title: '$mapName · $step 실패',
+        message:
+            '$message\n\n백엔드는 띄우지 않았습니다. '
+            '예전 파일로 돌면 무엇이 틀렸는지 찾기 더 어렵습니다.',
+      );
       return false;
+    }
+
+    try {
+      // ① 프로젝트 저장. 원장은 MySQL 이다.
+      try {
+        await _writeMapProject(mapName);
+      } catch (error) {
+        return await fail('프로젝트 저장', '$error');
+      }
+      if (!mounted) return false;
+      progress.value = 1;
+
+      // ② Nav2 지도. 도면에서 파생되므로 도면이 바뀌면 함께 다시 굽는다.
+      //    이것이 낡으면 AMCL 이 없는 벽을 보고 헤맨다.
+      final gridExport = await _exportOccupancyGrid(mapName);
+      if (gridExport != null && !gridExport.success) {
+        return await fail('Nav2 지도 내보내기', gridExport.message);
+      }
+      if (!mounted) return false;
+      progress.value = 2;
+
+      // ③ 무엇을 풀어 놓을지 읽는다.
+      final List<MapProjectFile> files;
+      try {
+        files = await loadMapProjectFiles(mapName);
+      } catch (error) {
+        return await fail('설정 파일 읽기', '설정 파일을 읽지 못했습니다.\n$error');
+      }
+      if (!mounted) return false;
+      if (files.isEmpty) {
+        return await fail(
+          '설정 파일 읽기',
+          '`$mapName` 프로젝트에 만들어진 설정 파일이 없습니다.\n'
+              '맵 관리에서 `프로젝트 저장` 을 한 번 눌러 주세요.',
+        );
+      }
+      progress.value = 3;
+
+      // ④ 디스크로. 여기까지 와야 ros2 launch 가 읽을 것이 생긴다.
+      final exported = await exportProjectConfigFiles(
+        mapName: mapName,
+        files: files,
+      );
+      if (!mounted) return false;
+      if (!exported.success) {
+        return await fail('디스크로 내보내기', exported.message);
+      }
+      progress.value = 4;
+      closeProgress();
+      return true;
+    } finally {
+      progress.dispose();
     }
   }
 
@@ -11041,55 +12279,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     // 버튼 한 번으로 저장 → 생성 → 내보내기까지 끝낸다. 어느 단계든 실패하면
     // 예전 파일로 백엔드를 띄우지 않는다.
-    final saved = await _saveSettingsBeforeBackend(project);
-    if (!saved || !mounted) return;
-    final gridExport = await _exportOccupancyGrid(project);
-    if (gridExport != null && !gridExport.success) {
-      if (!mounted) return;
-      await showWaypointErrorDialog(
-        context,
-        title: 'Nav2 지도 내보내기 실패',
-        message: gridExport.message,
-      );
-      return;
-    }
+    if (!await _prepareProjectForBackend(project)) return;
     if (!mounted) return;
-    List<MapProjectFile> files;
-    try {
-      files = await loadMapProjectFiles(project);
-    } catch (error) {
-      if (!mounted) return;
-      await showWaypointErrorDialog(
-        context,
-        title: 'Open-RMF 백엔드 띄우기',
-        message: '설정 파일을 읽지 못했습니다.\n$error',
-      );
-      return;
-    }
-    if (files.isEmpty) {
-      if (!mounted) return;
-      await showWaypointErrorDialog(
-        context,
-        title: 'Open-RMF 백엔드 띄우기',
-        message:
-            '`$project` 프로젝트에 만들어진 설정 파일이 없습니다.\n\n'
-            '맵 관리에서 `프로젝트 저장` 을 한 번 눌러 주세요.',
-      );
-      return;
-    }
-    final exported = await exportProjectConfigFiles(
-      mapName: project,
-      files: files,
-    );
-    if (!mounted) return;
-    if (!exported.success) {
-      await showWaypointErrorDialog(
-        context,
-        title: '설정을 디스크에 풀지 못했습니다',
-        message: exported.message,
-      );
-      return;
-    }
     await _runProjectScript(project);
   }
 
@@ -11394,6 +12585,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (renamed == null || !mounted) return;
         mapName = renamed;
       }
+      // 사용자가 보는 프로젝트 원본은 고정 project 디렉터리에도 반드시 남긴다.
+      // 예전에는 이 버튼이 MySQL에만 저장해서 `project에서 열기` 목록이 비었고,
+      // 별도의 `project에 저장` 버튼을 한 번 더 눌러야 했다.
+      final savedToFile = await _writeProject(mapName: mapName);
+      if (!savedToFile || !mounted) return;
       await _writeMapProject(mapName);
       if (!mounted) return;
       setState(() {
@@ -11407,7 +12603,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         if (!mounted) return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('`$mapName` 프로젝트를 MySQL에 저장했습니다.')),
+        SnackBar(
+          content: Text('`$mapName` 프로젝트를 project 디렉터리에 저장하고 MySQL과 동기화했습니다.'),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
@@ -11475,9 +12673,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ).showSnackBar(SnackBar(content: Text('`$picked` 프로젝트를 찾지 못했습니다.')));
         return;
       }
+      // 이전 버전에서 MySQL에만 저장한 프로젝트도 한 번 열면 고정 project
+      // 디렉터리에 같은 이름으로 복구한다. 이후에는 파일 목록에서도 보인다.
+      final projectFile = projectFileName(picked);
+      await saveProjectFile(picked, Uint8List.fromList(utf8.encode(payload)));
       _applyProjectData(
         jsonDecode(payload) as Map<String, dynamic>,
-        sourceName: picked,
+        sourceName: projectFile,
         fallbackMapName: picked,
       );
       await _loadFleetForProject(picked);
@@ -11485,7 +12687,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       await _switchOpenProject(picked);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('`$picked` 프로젝트를 MySQL에서 불러왔습니다.')),
+        SnackBar(
+          content: Text('`$picked` 프로젝트를 불러오고 project/$projectFile에 동기화했습니다.'),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
@@ -11568,12 +12772,28 @@ class _ControlDashboardState extends State<ControlDashboard> {
         sourceName: fileName,
         fallbackMapName: fileName.replaceFirst(RegExp(r'\.rmfproject$'), ''),
       );
-      // 파일에서 연 맵은 아직 MySQL의 프로젝트가 아니다. `프로젝트 저장`으로
-      // 등록하기 전까지는 작업을 붙일 곳이 없으므로 열린 프로젝트를 비운다.
-      await _switchOpenProject(null);
+      final mapName = (data['mapName'] as String?)?.trim().isNotEmpty == true
+          ? (data['mapName'] as String).trim()
+          : fileName.replaceFirst(RegExp(r'\.rmfproject$'), '');
+      // 고정 디렉터리의 파일이 MySQL에도 등록된 프로젝트라면 작업·로봇까지
+      // 같은 프로젝트로 연결한다. 파일을 열었다는 이유로 연결을 끊지 않는다.
+      final storedInDatabase = await mapProjectExists(mapName);
+      if (storedInDatabase) {
+        await _loadFleetForProject(mapName);
+        if (!mounted) return;
+        await _switchOpenProject(mapName);
+      } else {
+        await _switchOpenProject(null);
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$fileName 작업을 불러왔습니다. 작업을 만들려면 프로젝트로 저장하세요.')),
+        SnackBar(
+          content: Text(
+            storedInDatabase
+                ? '$fileName 프로젝트를 불러오고 MySQL 데이터와 연결했습니다.'
+                : '$fileName 작업을 불러왔습니다. 작업을 만들려면 프로젝트로 저장하세요.',
+          ),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
@@ -11604,6 +12824,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       final loadedWaypoints = <Offset>[];
       final loadedNames = <Offset, String>{};
       final loadedTypes = <Offset, String>{};
+      final loadedDockHeadings = <Offset, double>{};
       for (final item in waypointData) {
         final waypoint = item as Map<String, dynamic>;
         final point = _decodeOffset(waypoint['point']);
@@ -11611,6 +12832,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         loadedNames[point] = waypoint['name'] as String? ?? '';
         final category = waypoint['category'] as String? ?? '대기';
         loadedTypes[point] = _migrateWaypointCategory(category, projectVersion);
+        if (waypoint['dockHeading'] case final num heading) {
+          loadedDockHeadings[point] = heading.toDouble();
+        }
       }
       final loadedOverrides = <Offset, Offset>{};
       for (final item in data['wallVertexOverrides'] as List<dynamic>) {
@@ -11757,6 +12981,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         _waypointTypes
           ..clear()
           ..addAll(loadedTypes);
+        _waypointDockHeadings
+          ..clear()
+          ..addAll(loadedDockHeadings);
         _activeLaneEndpoint = data['activeLaneEndpoint'] == null
             ? null
             : _decodeOffset(data['activeLaneEndpoint']);
@@ -12170,12 +13397,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
             : measurement != null && i == measurementIndices.last
             ? 'measurement_end'
             : waypointName ?? (waypointType != null ? 'waypoint_$i' : '');
-        final trafficEditorProperty = switch (waypointType) {
-          '충전' => 'is_charger',
-          '주차' => 'is_parking_spot',
-          '대기' => 'is_holding_point',
-          _ => null,
-        };
+        // 표(`waypoint_table.dart`)와 같은 짝을 본다. 따로 적어 두면 화면은
+        // `is_parking_spot` 이라고 하는데 실제로는 안 나가는 일이 생긴다.
+        final trafficEditorProperty =
+            waypointTrafficEditorProperty[waypointType];
         final waypointProperties = <String>[
           if (trafficEditorProperty != null)
             '$trafficEditorProperty: [4, true]',
@@ -12184,6 +13409,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
           if (waypointType == '드랍오프' && waypointName?.trim().isNotEmpty == true)
             'dropoff_ingestor: [1, "${_yamlEscape(waypointName!.trim())}"]',
           if (waypointType == '설비') 'robosapiens_equipment: [4, true]',
+          // 그 자리에 설 방향 [도]. RMF 는 이 이름을 모르지만 정점 속성을
+          // 아는 이름만 골라 읽으므로(`parse_graph.cpp`) 넣어도 안전하고,
+          // `building_map_generator nav` 가 nav graph 까지 그대로 옮겨 준다.
+          //
+          // 실제로 로봇을 돌리는 것은 이 값이 아니라 작업의 `go_to_place`
+          // `orientation` 이다. 여기 적어 두는 것은 **배포한 맵만 있어도**
+          // 그 각도를 되찾기 위해서다 — 프로젝트를 편집기에 안 열어도 된다.
+          if (_waypointDockHeadings[point] case final heading?)
+            'robosapiens_dock_heading: [3, ${heading.toStringAsFixed(3)}]',
         ];
         final properties = waypointProperties.isEmpty
             ? ''
@@ -12252,6 +13486,109 @@ class _ControlDashboardState extends State<ControlDashboard> {
     } catch (error) {
       _showProcessingWarning('YAML 복사', error);
     }
+  }
+
+  /// 배포 직전에 지금 화면을 열린 프로젝트에 저장한다.
+  ///
+  /// 저장하지 못하면 그대로 넘기지 않는다. 배포 산출물과 저장된 프로젝트가
+  /// 갈리는 순간, 고친 것이 다음에 되돌아간 것처럼 보이는 그 문제가 그대로
+  /// 돌아오기 때문이다. 다만 마지막 판단은 사람에게 맡긴다.
+  Future<bool> _saveBeforeDeploy() async {
+    final project = _openProjectName;
+    if (deployPreflightFor(project) == DeployPreflight.warnNoProject) {
+      return confirmWarningDialog(
+        context,
+        title: '열린 프로젝트가 없습니다',
+        message: deployNoProjectMessage(_deploymentMapName),
+        confirmLabel: '그래도 배포',
+      );
+    }
+    try {
+      await _writeMapProject(project!);
+      return true;
+    } catch (error) {
+      if (!mounted) return false;
+      return confirmWarningDialog(
+        context,
+        title: '프로젝트 저장 실패',
+        message: deploySaveFailedMessage(project!, error),
+        confirmLabel: '그래도 배포',
+      );
+    }
+  }
+
+  /// 설비 로봇의 등록 자리가 지도와 어긋났으면 배포 전에 맞춘다.
+  ///
+  /// Waypoint 를 끌어 옮겨도 등록의 좌표는 따라오지 않는다. 그대로 배포하면
+  /// 팔은 옛 자리에 서고 핑키만 새 자리로 가므로, 옮겨서 떼어 놓은 자리가
+  /// 다시 겹친다. 조용히 고치지는 않는다 — 무엇을 얼마나 옮기는지 보여 준다.
+  Future<bool> _fitSpawnsBeforeDeploy() async {
+    final message = staleWorkcellSpawnMessage(_spawnChecks);
+    if (message == null) return true;
+    final choice = await showMovableDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(
+          Icons.warning_amber_outlined,
+          color: Color(0xFFB45309),
+          size: 32,
+        ),
+        title: const Text('설비 자리가 지도와 다릅니다'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(child: SelectableText(message)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'cancel'),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'asIs'),
+            child: const Text('그대로 배포'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, 'fit'),
+            child: const Text('자리 맞추고 배포'),
+          ),
+        ],
+      ),
+    );
+    if (choice == 'fit') {
+      final changed = await _refitSpawnPoints();
+      if (!mounted) return false;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('설비 $changed대의 자리를 지도에 맞췄습니다.')));
+      return true;
+    }
+    return choice == 'asIs';
+  }
+
+  /// 팔과 핑키가 부딪히는 자리가 있으면 배포 전에 세운다.
+  ///
+  /// 이 검사는 작업을 실행할 때만 돌았다. 그래서 작업을 아직 안 짠 자리는
+  /// 아무도 안 본 채로 배포되었고, 부딪히는 것은 실제로 부딪힌 뒤에 알았다.
+  /// 배포는 좌표가 파일에 박히는 순간이니 여기서도 본다.
+  ///
+  /// [_fitSpawnsBeforeDeploy] 다음에 부른다 — 등록 좌표가 지도와 맞은 뒤라야
+  /// 재는 거리가 배포에 나갈 그 거리다.
+  Future<bool> _reachOkBeforeDeploy() async {
+    final checks = _reachChecksForDeploy(_deploymentMapName, _fleetRobots);
+    final warning = workcellReachWarning(checks);
+    if (warning == null) return true;
+    final danger = checks.any((check) => check.isDanger);
+    if (!mounted) return false;
+    return confirmWarningDialog(
+      context,
+      title: danger ? '핑키와 로봇팔이 부딪힐 위험이 있습니다' : '픽업 자리를 확인하세요',
+      message:
+          '배포에 나갈 설비 자리와 픽업 자리를 살폈습니다.\n\n'
+          '$warning\n\n'
+          '이대로 배포하면 이 좌표가 산출물에 그대로 박힙니다 — '
+          'Waypoint 를 옮기거나 적재 방향을 고친 뒤 다시 배포하세요.',
+      confirmLabel: danger ? '위험을 알고도 배포' : '그래도 배포',
+    );
   }
 
   Future<void> _deployMap() async {
@@ -12331,8 +13668,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
               ),
               const SizedBox(height: 14),
               const Text(
-                '오류 검증 → YAML/이미지 저장 → nav graph/world 생성 → '
-                'RMF 맵 설치 → Map Server/Fleet Adapter 재시작 → 지도 수신 확인',
+                '프로젝트 저장 → 오류 검증 → YAML/이미지 저장 → nav graph/world '
+                '생성 → RMF 맵 설치 → Map Server/Fleet Adapter 재시작 → '
+                '지도 수신 확인',
                 style: TextStyle(
                   fontSize: 12,
                   color: Color(0xFF64748B),
@@ -12357,6 +13695,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
 
     if (shouldDeploy != true || !mounted) return;
+    // 배포에 들어가는 그 내용을 원장(MySQL)에도 남긴다.
+    //
+    // 예전에는 배포가 화면 상태만 내보냈다. Waypoint 를 옮겨 배포해 놓고 앱을
+    // 다시 열면 저장된 옛 자리가 화면으로 돌아왔고, 다음 배포에서 그 옛 자리가
+    // 다시 나갔다 — 고쳐 놓은 픽업 자리가 도로 팔과 겹쳤다.
+    // 자리부터 맞춘다. 저장이 그 결과까지 담아야 화면·원장·산출물이 같아진다.
+    if (!await _fitSpawnsBeforeDeploy()) return;
+    if (!mounted) return;
+    // 자리를 맞춘 뒤라야 재는 거리가 배포에 나갈 그 거리다.
+    if (!await _reachOkBeforeDeploy()) return;
+    if (!mounted) return;
+    if (!await _saveBeforeDeploy()) return;
+    if (!mounted) return;
     showMovableDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -12490,7 +13841,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '맵 관리',
                         '그리드맵',
                         '로봇 관리',
-                        'WorkCell 관리',
+                        'Policy 관리',
                         '작업 관리',
                         '로봇 모델 관리',
                         'ROS2 확인',
@@ -12501,677 +13852,770 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       ][_selectedMenu],
                     ),
                     Expanded(
-                      child: _selectedMenu == _menuDashboard
-                          ? _MainDashboard(
-                              drawing: _robotRuntimeDrawing,
-                              mapName:
-                                  _robotDeployedMap?.summary.name ?? _mapName,
-                              openProjectName: _openProjectName,
-                              mapReady:
-                                  (_robotDeployedMap?.waypoints ??
-                                          _laneWaypoints)
-                                      .isNotEmpty,
-                              deployed:
-                                  _isDeployed || _robotDeployedMap != null,
-                              lanes:
-                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
-                              waypoints:
-                                  _robotDeployedMap?.waypoints ??
-                                  _laneWaypoints,
-                              waypointNames:
-                                  _robotDeployedMap?.waypointNames ??
-                                  _waypointNames,
-                              robots: _mockRobots,
-                              tasks: _mockTasks,
-                              warning: _processingWarning,
-                              onOpenMap: () =>
-                                  setState(() => _selectedMenu = _menuMap),
-                              onOpenRobots: () =>
-                                  setState(() => _selectedMenu = _menuRobots),
-                              onOpenTasks: () =>
-                                  setState(() => _selectedMenu = _menuTasks),
-                              onLoadMap: _loadMapForRobots,
-                              onSpawn: _spawnMockRobot,
-                              onCreateTask: _createMockTask,
-                            )
-                          : _selectedMenu == _menuMap
-                          ? SingleChildScrollView(
-                              padding: const EdgeInsets.fromLTRB(
-                                32,
-                                30,
-                                32,
-                                40,
-                              ),
-                              child: Center(
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 1767,
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      _PageHeading(
-                                        onHelp: () => _showUsageGuide(
-                                          context,
-                                          _UsageGuideTopic.map,
+                      // 로봇이 움직일 때 다시 그리는 범위를 여기까지로 묶는다.
+                      //
+                      // 왼쪽 메뉴와 상단 제목은 로봇 위치와 아무 상관이 없다.
+                      // 예전에는 100ms 타이머가 이 State 에 `setState` 를 걸어
+                      // 화면 전체를 초당 열 번 다시 만들었다.
+                      child: ValueListenableBuilder<int>(
+                        valueListenable: _mockTick,
+                        builder: (context, _, _) =>
+                            _selectedMenu == _menuDashboard
+                            ? _MainDashboard(
+                                drawing: _robotRuntimeDrawing,
+                                mapName:
+                                    _robotDeployedMap?.summary.name ?? _mapName,
+                                openProjectName: _openProjectName,
+                                mapReady:
+                                    (_robotDeployedMap?.waypoints ??
+                                            _laneWaypoints)
+                                        .isNotEmpty,
+                                deployed:
+                                    _isDeployed || _robotDeployedMap != null,
+                                lanes:
+                                    _robotDeployedMap?.lanes ??
+                                    _recommendedLanes,
+                                waypoints:
+                                    _robotDeployedMap?.waypoints ??
+                                    _laneWaypoints,
+                                waypointNames:
+                                    _robotDeployedMap?.waypointNames ??
+                                    _waypointNames,
+                                robots: _mockRobots,
+                                tasks: _mockTasks,
+                                warning: _processingWarning,
+                                onOpenMap: () =>
+                                    setState(() => _selectedMenu = _menuMap),
+                                onOpenRobots: () =>
+                                    setState(() => _selectedMenu = _menuRobots),
+                                onOpenTasks: () =>
+                                    setState(() => _selectedMenu = _menuTasks),
+                                onLoadMap: _loadMapForRobots,
+                                onSpawn: _spawnMockRobot,
+                                onCreateTask: _createMockTask,
+                              )
+                            : _selectedMenu == _menuMap
+                            ? SingleChildScrollView(
+                                padding: const EdgeInsets.fromLTRB(
+                                  32,
+                                  30,
+                                  32,
+                                  40,
+                                ),
+                                child: Center(
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 1767,
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        _PageHeading(
+                                          onHelp: () => _showUsageGuide(
+                                            context,
+                                            _UsageGuideTopic.map,
+                                          ),
+                                          onUpload: _pickDrawing,
+                                          exportEnabled: _drawing != null,
+                                          onValidate: _showValidationDialog,
+                                          onRecommend:
+                                              _showLaneRecommendationsDialog,
+                                          onDownload: _downloadBuildingYaml,
+                                          onCopy: _copyBuildingYaml,
+                                          onSaveProject: _saveProject,
+                                          onSaveProjectAs: _saveProjectAs,
+                                          onLoadProject: _loadProject,
+                                          onSaveToDatabase:
+                                              _saveProjectToDatabase,
+                                          onOpenFromDatabase:
+                                              _openProjectFromDatabase,
+                                          onNewProject: _createNewProject,
+                                          onRmfConfig: _showRmfConfigDialog,
                                         ),
-                                        onUpload: _pickDrawing,
-                                        exportEnabled: _drawing != null,
-                                        onValidate: _showValidationDialog,
-                                        onRecommend:
-                                            _showLaneRecommendationsDialog,
-                                        onDownload: _downloadBuildingYaml,
-                                        onCopy: _copyBuildingYaml,
-                                        onSaveProject: _saveProject,
-                                        onSaveProjectAs: _saveProjectAs,
-                                        onLoadProject: _loadProject,
-                                        onSaveToDatabase:
-                                            _saveProjectToDatabase,
-                                        onOpenFromDatabase:
-                                            _openProjectFromDatabase,
-                                        onNewProject: _createNewProject,
-                                        onRmfConfig: _showRmfConfigDialog,
-                                      ),
-                                      const SizedBox(height: 14),
-                                      _MapFileStatus(
-                                        sourceLabel: '현재 작업',
-                                        sourceName:
-                                            _projectFileName ?? '저장 전 편집 작업',
-                                        buildingYamlName: _yamlFileName,
-                                        pendingDeployment: !_isDeployed,
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Align(
-                                        alignment: Alignment.centerRight,
-                                        child: Wrap(
-                                          spacing: 8,
-                                          runSpacing: 8,
-                                          children: [
-                                            OutlinedButton.icon(
-                                              onPressed:
-                                                  _showScenarioMapAssistant,
-                                              icon: const Icon(
-                                                Icons.auto_awesome_outlined,
-                                                size: 18,
-                                              ),
-                                              label: const Text('시나리오 맵 자동 완성'),
-                                            ),
-                                            OutlinedButton.icon(
-                                              onPressed:
-                                                  _showRobotSafetySettings,
-                                              icon: const Icon(
-                                                Icons
-                                                    .health_and_safety_outlined,
-                                                size: 18,
-                                              ),
-                                              label: const Text('로봇 안전 기준'),
-                                            ),
-                                            // 지금 높이를 단추에 적는다. 도면
-                                            // 어디에도 안 보이는 값이라, 열어
-                                            // 보지 않으면 2.5m 인 줄 모른다.
-                                            OutlinedButton.icon(
-                                              onPressed:
-                                                  _showWallHeightSettings,
-                                              icon: const Icon(
-                                                Icons.height,
-                                                size: 18,
-                                              ),
-                                              label: Text(
-                                                '벽 높이 '
-                                                '${_wallHeightMeters.toStringAsFixed(2)}m',
-                                              ),
-                                            ),
-                                            // 도메인도 단추에 적는다. 어긋나면
-                                            // 오류 없이 아무것도 안 통하므로,
-                                            // 지금 값이 늘 보여야 한다.
-                                            OutlinedButton.icon(
-                                              onPressed: _showRosDomainSettings,
-                                              icon: const Icon(
-                                                Icons.lan_outlined,
-                                                size: 18,
-                                              ),
-                                              label: Text(
-                                                'ROS 도메인 $_rosDomainId',
-                                              ),
-                                            ),
-                                          ],
+                                        const SizedBox(height: 14),
+                                        _MapFileStatus(
+                                          sourceLabel: '현재 작업',
+                                          sourceName:
+                                              _projectFileName ?? '저장 전 편집 작업',
+                                          buildingYamlName: _yamlFileName,
+                                          pendingDeployment: !_isDeployed,
                                         ),
-                                      ),
-                                      if (_mapScenarioSummary != null) ...[
                                         const SizedBox(height: 8),
-                                        Container(
-                                          width: double.infinity,
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 13,
-                                            vertical: 10,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFF5F3FF),
-                                            borderRadius: BorderRadius.circular(
-                                              9,
-                                            ),
-                                            border: Border.all(
-                                              color: const Color(0xFFDDD6FE),
-                                            ),
-                                          ),
-                                          child: Text(
-                                            '적용된 운영 시나리오 · $_mapScenarioSummary',
-                                            style: const TextStyle(
-                                              color: Color(0xFF5B21B6),
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                      const SizedBox(height: 24),
-                                      _StageBar(activeStage: _stage),
-                                      const SizedBox(height: 24),
-                                      LayoutBuilder(
-                                        builder: (context, constraints) {
-                                          if (constraints.maxWidth < 980) {
-                                            return Column(
-                                              children: [
-                                                _MapWorkspace(
-                                                  drawing: _drawing,
-                                                  transformController:
-                                                      _mapTransform,
-                                                  onZoomIn: () =>
-                                                      _zoomMap(1.25),
-                                                  onZoomOut: () => _zoomMap(.8),
-                                                  onFitScreen: _fitMapToScreen,
-                                                  onRenumberVertices:
-                                                      _renumberVertices,
-                                                  wallMask: _wallMask,
-                                                  wallColor: _wallColor,
-                                                  floorMask: _floorMask,
-                                                  floorColor: _floorColor,
-                                                  mapVertices: _showVertexLabels
-                                                      ? _visibleMapVertices()
-                                                      : const [],
-                                                  vertexLabelRevision:
-                                                      _vertexLabelRevision,
-                                                  optimizedWalls:
-                                                      _visibleWallSegments(),
-                                                  recommendedLanes:
-                                                      _recommendedLanes,
-                                                  laneDirections:
-                                                      _laneDirections,
-                                                  laneWaypoints: _laneWaypoints,
-                                                  waypointNames: _waypointNames,
-                                                  waypointTypes: _waypointTypes,
-                                                  activeLaneEndpoint:
-                                                      _activeLaneEndpoint,
-                                                  waypointMode: _isWaypointMode,
-                                                  onAddWaypoint:
-                                                      _addLaneWaypoint,
-                                                  onEditWaypoint: _editWaypoint,
-                                                  onMoveWaypoint: _moveWaypoint,
-                                                  waypointDropIssue:
-                                                      _waypointDropIssue,
-                                                  onSelectLane:
-                                                      _selectLaneForDeletion,
-                                                  isWallConnectMode:
-                                                      _isWallConnectMode,
-                                                  pendingWallVertex:
-                                                      _pendingWallVertex,
-                                                  onToggleWallConnect:
-                                                      _toggleWallConnectMode,
-                                                  onSelectWallVertex:
-                                                      _selectWallConnectionVertex,
-                                                  isWallEndpointEditMode:
-                                                      _isWallEndpointEditMode,
-                                                  onToggleWallEndpointEdit:
-                                                      _toggleWallEndpointEditMode,
-                                                  onMoveWallEndpoint:
-                                                      _moveWallEndpoint,
-                                                  measurement: _measurement,
-                                                  showDrawingInfo:
-                                                      _showDrawingInfo,
-                                                  onCloseDrawingInfo: () =>
-                                                      setState(
-                                                        () => _showDrawingInfo =
-                                                            false,
-                                                      ),
-                                                  isMeasurementSelected:
-                                                      _isMeasurementSelected,
-                                                  onSelectMeasurement:
-                                                      _selectMeasurement,
-                                                  onRemoveMeasurement:
-                                                      _removeMeasurement,
-                                                  isMeasurementMode:
-                                                      _isMeasurementMode,
-                                                  onMeasurementSelected:
-                                                      _askMeasurement,
-                                                  onCloseMeasurementMode: () =>
-                                                      setState(
-                                                        () =>
-                                                            _isMeasurementMode =
-                                                                false,
-                                                      ),
-                                                  isWallEraseMode:
-                                                      _isWallEraseMode,
-                                                  canUndoWallErase:
-                                                      _previousWallMask != null,
-                                                  onToggleWallErase: () =>
-                                                      setState(
-                                                        () => _isWallEraseMode =
-                                                            !_isWallEraseMode,
-                                                      ),
-                                                  onEraseWalls: _eraseWalls,
-                                                  onUndoWallErase:
-                                                      _undoWallErase,
-                                                  isPicking: _isPicking,
-                                                  onPick: _pickDrawing,
-                                                  onRemove: _removeDrawing,
-                                                ),
-                                                const SizedBox(height: 20),
-                                                _SetupPanel(
-                                                  drawing: _drawing,
-                                                  stage: _stage,
-                                                  measurement: _measurement,
-                                                  isMeasurementMode:
-                                                      _isMeasurementMode,
-                                                  onToggleMeasurement:
-                                                      _toggleMeasurementMode,
-                                                  wallColor: _wallColor,
-                                                  floorColor: _floorColor,
-                                                  wallsDetected: _wallsDetected,
-                                                  floorGenerated:
-                                                      _floorGenerated,
-                                                  isDetectingWalls:
-                                                      _isDetectingWalls,
-                                                  isGeneratingFloor:
-                                                      _isGeneratingFloor,
-                                                  onDetectWalls: _detectWalls,
-                                                  onGenerateFloor:
-                                                      _generateFloor,
-                                                  lanesGenerated:
-                                                      _laneWaypoints.isNotEmpty,
-                                                  waypointMode: _isWaypointMode,
-                                                  onToggleWaypoint:
-                                                      _toggleWaypointMode,
-                                                  onWallColorChanged: (color) =>
-                                                      setState(
-                                                        () =>
-                                                            _wallColor = color,
-                                                      ),
-                                                  onFloorColorChanged:
-                                                      (color) => setState(
-                                                        () =>
-                                                            _floorColor = color,
-                                                      ),
-                                                  isDeployed: _isDeployed,
-                                                  onDeploy: _deployMap,
-                                                  onGenerateGrid:
-                                                      _generateGridMap,
-                                                  onStageChanged: (value) =>
-                                                      setState(
-                                                        () => _stage = value,
-                                                      ),
-                                                ),
-                                              ],
-                                            );
-                                          }
-                                          return Row(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
+                                        Align(
+                                          alignment: Alignment.centerRight,
+                                          child: Wrap(
+                                            spacing: 8,
+                                            runSpacing: 8,
                                             children: [
-                                              Expanded(
-                                                child: _MapWorkspace(
-                                                  drawing: _drawing,
-                                                  transformController:
-                                                      _mapTransform,
-                                                  onZoomIn: () =>
-                                                      _zoomMap(1.25),
-                                                  onZoomOut: () => _zoomMap(.8),
-                                                  onFitScreen: _fitMapToScreen,
-                                                  onRenumberVertices:
-                                                      _renumberVertices,
-                                                  wallMask: _wallMask,
-                                                  wallColor: _wallColor,
-                                                  floorMask: _floorMask,
-                                                  floorColor: _floorColor,
-                                                  mapVertices: _showVertexLabels
-                                                      ? _visibleMapVertices()
-                                                      : const [],
-                                                  vertexLabelRevision:
-                                                      _vertexLabelRevision,
-                                                  optimizedWalls:
-                                                      _visibleWallSegments(),
-                                                  recommendedLanes:
-                                                      _recommendedLanes,
-                                                  laneDirections:
-                                                      _laneDirections,
-                                                  laneWaypoints: _laneWaypoints,
-                                                  waypointNames: _waypointNames,
-                                                  waypointTypes: _waypointTypes,
-                                                  activeLaneEndpoint:
-                                                      _activeLaneEndpoint,
-                                                  waypointMode: _isWaypointMode,
-                                                  onAddWaypoint:
-                                                      _addLaneWaypoint,
-                                                  onEditWaypoint: _editWaypoint,
-                                                  onMoveWaypoint: _moveWaypoint,
-                                                  waypointDropIssue:
-                                                      _waypointDropIssue,
-                                                  onSelectLane:
-                                                      _selectLaneForDeletion,
-                                                  isWallConnectMode:
-                                                      _isWallConnectMode,
-                                                  pendingWallVertex:
-                                                      _pendingWallVertex,
-                                                  onToggleWallConnect:
-                                                      _toggleWallConnectMode,
-                                                  onSelectWallVertex:
-                                                      _selectWallConnectionVertex,
-                                                  isWallEndpointEditMode:
-                                                      _isWallEndpointEditMode,
-                                                  onToggleWallEndpointEdit:
-                                                      _toggleWallEndpointEditMode,
-                                                  onMoveWallEndpoint:
-                                                      _moveWallEndpoint,
-                                                  measurement: _measurement,
-                                                  showDrawingInfo:
-                                                      _showDrawingInfo,
-                                                  onCloseDrawingInfo: () =>
-                                                      setState(
-                                                        () => _showDrawingInfo =
-                                                            false,
-                                                      ),
-                                                  isMeasurementSelected:
-                                                      _isMeasurementSelected,
-                                                  onSelectMeasurement:
-                                                      _selectMeasurement,
-                                                  onRemoveMeasurement:
-                                                      _removeMeasurement,
-                                                  isMeasurementMode:
-                                                      _isMeasurementMode,
-                                                  onMeasurementSelected:
-                                                      _askMeasurement,
-                                                  onCloseMeasurementMode: () =>
-                                                      setState(
-                                                        () =>
-                                                            _isMeasurementMode =
-                                                                false,
-                                                      ),
-                                                  isWallEraseMode:
-                                                      _isWallEraseMode,
-                                                  canUndoWallErase:
-                                                      _previousWallMask != null,
-                                                  onToggleWallErase: () =>
-                                                      setState(
-                                                        () => _isWallEraseMode =
-                                                            !_isWallEraseMode,
-                                                      ),
-                                                  onEraseWalls: _eraseWalls,
-                                                  onUndoWallErase:
-                                                      _undoWallErase,
-                                                  isPicking: _isPicking,
-                                                  onPick: _pickDrawing,
-                                                  onRemove: _removeDrawing,
+                                              OutlinedButton.icon(
+                                                onPressed:
+                                                    _showScenarioMapAssistant,
+                                                icon: const Icon(
+                                                  Icons.auto_awesome_outlined,
+                                                  size: 18,
+                                                ),
+                                                label: const Text(
+                                                  '시나리오 맵 자동 완성',
                                                 ),
                                               ),
-                                              const SizedBox(width: 20),
-                                              SizedBox(
-                                                width: 330,
-                                                child: _SetupPanel(
-                                                  drawing: _drawing,
-                                                  stage: _stage,
-                                                  measurement: _measurement,
-                                                  isMeasurementMode:
-                                                      _isMeasurementMode,
-                                                  onToggleMeasurement:
-                                                      _toggleMeasurementMode,
-                                                  wallColor: _wallColor,
-                                                  floorColor: _floorColor,
-                                                  wallsDetected: _wallsDetected,
-                                                  floorGenerated:
-                                                      _floorGenerated,
-                                                  isDetectingWalls:
-                                                      _isDetectingWalls,
-                                                  isGeneratingFloor:
-                                                      _isGeneratingFloor,
-                                                  onDetectWalls: _detectWalls,
-                                                  onGenerateFloor:
-                                                      _generateFloor,
-                                                  lanesGenerated:
-                                                      _laneWaypoints.isNotEmpty,
-                                                  waypointMode: _isWaypointMode,
-                                                  onToggleWaypoint:
-                                                      _toggleWaypointMode,
-                                                  onWallColorChanged: (color) =>
-                                                      setState(
-                                                        () =>
-                                                            _wallColor = color,
-                                                      ),
-                                                  onFloorColorChanged:
-                                                      (color) => setState(
-                                                        () =>
-                                                            _floorColor = color,
-                                                      ),
-                                                  isDeployed: _isDeployed,
-                                                  onDeploy: _deployMap,
-                                                  onGenerateGrid:
-                                                      _generateGridMap,
-                                                  onStageChanged: (value) =>
-                                                      setState(
-                                                        () => _stage = value,
-                                                      ),
+                                              OutlinedButton.icon(
+                                                onPressed:
+                                                    _showRobotSafetySettings,
+                                                icon: const Icon(
+                                                  Icons
+                                                      .health_and_safety_outlined,
+                                                  size: 18,
+                                                ),
+                                                label: const Text('로봇 안전 기준'),
+                                              ),
+                                              // 지금 높이를 단추에 적는다. 도면
+                                              // 어디에도 안 보이는 값이라, 열어
+                                              // 보지 않으면 2.5m 인 줄 모른다.
+                                              OutlinedButton.icon(
+                                                onPressed:
+                                                    _showWallHeightSettings,
+                                                icon: const Icon(
+                                                  Icons.height,
+                                                  size: 18,
+                                                ),
+                                                label: Text(
+                                                  '벽 높이 '
+                                                  '${_wallHeightMeters.toStringAsFixed(2)}m',
+                                                ),
+                                              ),
+                                              // 도메인도 단추에 적는다. 어긋나면
+                                              // 오류 없이 아무것도 안 통하므로,
+                                              // 지금 값이 늘 보여야 한다.
+                                              OutlinedButton.icon(
+                                                onPressed:
+                                                    _showRosDomainSettings,
+                                                icon: const Icon(
+                                                  Icons.lan_outlined,
+                                                  size: 18,
+                                                ),
+                                                label: Text(
+                                                  'ROS 도메인 $_rosDomainId',
                                                 ),
                                               ),
                                             ],
-                                          );
-                                        },
-                                      ),
-                                      if (_processingWarning != null) ...[
-                                        const SizedBox(height: 20),
-                                        _ProcessingWarningPanel(
-                                          message: _processingWarning!,
-                                          onDismiss: _clearProcessingWarning,
+                                          ),
                                         ),
+                                        if (_mapScenarioSummary != null) ...[
+                                          const SizedBox(height: 8),
+                                          Container(
+                                            width: double.infinity,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 13,
+                                              vertical: 10,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFF5F3FF),
+                                              borderRadius:
+                                                  BorderRadius.circular(9),
+                                              border: Border.all(
+                                                color: const Color(0xFFDDD6FE),
+                                              ),
+                                            ),
+                                            child: Text(
+                                              '적용된 운영 시나리오 · $_mapScenarioSummary',
+                                              style: const TextStyle(
+                                                color: Color(0xFF5B21B6),
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(height: 24),
+                                        _StageBar(activeStage: _stage),
+                                        const SizedBox(height: 24),
+                                        LayoutBuilder(
+                                          builder: (context, constraints) {
+                                            if (constraints.maxWidth < 980) {
+                                              return Column(
+                                                children: [
+                                                  _MapWorkspace(
+                                                    drawing: _drawing,
+                                                    metersPerPixel:
+                                                        _metersPerPixel,
+                                                    transformController:
+                                                        _mapTransform,
+                                                    onZoomIn: () =>
+                                                        _zoomMap(1.25),
+                                                    onZoomOut: () =>
+                                                        _zoomMap(.8),
+                                                    onFitScreen:
+                                                        _fitMapToScreen,
+                                                    onRenumberVertices:
+                                                        _renumberVertices,
+                                                    wallMask: _wallMask,
+                                                    wallColor: _wallColor,
+                                                    floorMask: _floorMask,
+                                                    floorColor: _floorColor,
+                                                    mapVertices:
+                                                        _showVertexLabels
+                                                        ? _visibleMapVertices()
+                                                        : const [],
+                                                    vertexLabelRevision:
+                                                        _vertexLabelRevision,
+                                                    optimizedWalls:
+                                                        _visibleWallSegments(),
+                                                    recommendedLanes:
+                                                        _recommendedLanes,
+                                                    laneDirections:
+                                                        _laneDirections,
+                                                    laneWaypoints:
+                                                        _laneWaypoints,
+                                                    waypointNames:
+                                                        _waypointNames,
+                                                    waypointTypes:
+                                                        _waypointTypes,
+                                                    activeLaneEndpoint:
+                                                        _activeLaneEndpoint,
+                                                    waypointMode:
+                                                        _isWaypointMode,
+                                                    onAddWaypoint:
+                                                        _addLaneWaypoint,
+                                                    onEditWaypoint:
+                                                        _editWaypoint,
+                                                    onMoveWaypoint:
+                                                        _moveWaypoint,
+                                                    waypointDropIssue:
+                                                        _waypointDropIssue,
+                                                    onSelectLane:
+                                                        _selectLaneForDeletion,
+                                                    isWallConnectMode:
+                                                        _isWallConnectMode,
+                                                    pendingWallVertex:
+                                                        _pendingWallVertex,
+                                                    onToggleWallConnect:
+                                                        _toggleWallConnectMode,
+                                                    onSelectWallVertex:
+                                                        _selectWallConnectionVertex,
+                                                    isWallEndpointEditMode:
+                                                        _isWallEndpointEditMode,
+                                                    onToggleWallEndpointEdit:
+                                                        _toggleWallEndpointEditMode,
+                                                    onMoveWallEndpoint:
+                                                        _moveWallEndpoint,
+                                                    measurement: _measurement,
+                                                    showDrawingInfo:
+                                                        _showDrawingInfo,
+                                                    onCloseDrawingInfo: () =>
+                                                        setState(
+                                                          () =>
+                                                              _showDrawingInfo =
+                                                                  false,
+                                                        ),
+                                                    isMeasurementSelected:
+                                                        _isMeasurementSelected,
+                                                    onSelectMeasurement:
+                                                        _selectMeasurement,
+                                                    onRemoveMeasurement:
+                                                        _removeMeasurement,
+                                                    isMeasurementMode:
+                                                        _isMeasurementMode,
+                                                    onMeasurementSelected:
+                                                        _askMeasurement,
+                                                    onCloseMeasurementMode:
+                                                        () => setState(
+                                                          () =>
+                                                              _isMeasurementMode =
+                                                                  false,
+                                                        ),
+                                                    isWallEraseMode:
+                                                        _isWallEraseMode,
+                                                    canUndoWallErase:
+                                                        _previousWallMask !=
+                                                        null,
+                                                    onToggleWallErase: () =>
+                                                        setState(
+                                                          () => _isWallEraseMode =
+                                                              !_isWallEraseMode,
+                                                        ),
+                                                    onEraseWalls: _eraseWalls,
+                                                    onUndoWallErase:
+                                                        _undoWallErase,
+                                                    isPicking: _isPicking,
+                                                    onPick: _pickDrawing,
+                                                    onRemove: _removeDrawing,
+                                                  ),
+                                                  const SizedBox(height: 20),
+                                                  _SetupPanel(
+                                                    drawing: _drawing,
+                                                    stage: _stage,
+                                                    measurement: _measurement,
+                                                    isMeasurementMode:
+                                                        _isMeasurementMode,
+                                                    onToggleMeasurement:
+                                                        _toggleMeasurementMode,
+                                                    wallColor: _wallColor,
+                                                    floorColor: _floorColor,
+                                                    wallsDetected:
+                                                        _wallsDetected,
+                                                    floorGenerated:
+                                                        _floorGenerated,
+                                                    isDetectingWalls:
+                                                        _isDetectingWalls,
+                                                    isGeneratingFloor:
+                                                        _isGeneratingFloor,
+                                                    onDetectWalls: _detectWalls,
+                                                    onGenerateFloor:
+                                                        _generateFloor,
+                                                    lanesGenerated:
+                                                        _laneWaypoints
+                                                            .isNotEmpty,
+                                                    waypointMode:
+                                                        _isWaypointMode,
+                                                    onToggleWaypoint:
+                                                        _toggleWaypointMode,
+                                                    onWallColorChanged:
+                                                        (color) => setState(
+                                                          () => _wallColor =
+                                                              color,
+                                                        ),
+                                                    onFloorColorChanged:
+                                                        (color) => setState(
+                                                          () => _floorColor =
+                                                              color,
+                                                        ),
+                                                    isDeployed: _isDeployed,
+                                                    onDeploy: _deployMap,
+                                                    onGenerateGrid:
+                                                        _generateGridMap,
+                                                    onStageChanged: (value) =>
+                                                        setState(
+                                                          () => _stage = value,
+                                                        ),
+                                                  ),
+                                                ],
+                                              );
+                                            }
+                                            return Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Expanded(
+                                                  child: _MapWorkspace(
+                                                    drawing: _drawing,
+                                                    metersPerPixel:
+                                                        _metersPerPixel,
+                                                    transformController:
+                                                        _mapTransform,
+                                                    onZoomIn: () =>
+                                                        _zoomMap(1.25),
+                                                    onZoomOut: () =>
+                                                        _zoomMap(.8),
+                                                    onFitScreen:
+                                                        _fitMapToScreen,
+                                                    onRenumberVertices:
+                                                        _renumberVertices,
+                                                    wallMask: _wallMask,
+                                                    wallColor: _wallColor,
+                                                    floorMask: _floorMask,
+                                                    floorColor: _floorColor,
+                                                    mapVertices:
+                                                        _showVertexLabels
+                                                        ? _visibleMapVertices()
+                                                        : const [],
+                                                    vertexLabelRevision:
+                                                        _vertexLabelRevision,
+                                                    optimizedWalls:
+                                                        _visibleWallSegments(),
+                                                    recommendedLanes:
+                                                        _recommendedLanes,
+                                                    laneDirections:
+                                                        _laneDirections,
+                                                    laneWaypoints:
+                                                        _laneWaypoints,
+                                                    waypointNames:
+                                                        _waypointNames,
+                                                    waypointTypes:
+                                                        _waypointTypes,
+                                                    activeLaneEndpoint:
+                                                        _activeLaneEndpoint,
+                                                    waypointMode:
+                                                        _isWaypointMode,
+                                                    onAddWaypoint:
+                                                        _addLaneWaypoint,
+                                                    onEditWaypoint:
+                                                        _editWaypoint,
+                                                    onMoveWaypoint:
+                                                        _moveWaypoint,
+                                                    waypointDropIssue:
+                                                        _waypointDropIssue,
+                                                    onSelectLane:
+                                                        _selectLaneForDeletion,
+                                                    isWallConnectMode:
+                                                        _isWallConnectMode,
+                                                    pendingWallVertex:
+                                                        _pendingWallVertex,
+                                                    onToggleWallConnect:
+                                                        _toggleWallConnectMode,
+                                                    onSelectWallVertex:
+                                                        _selectWallConnectionVertex,
+                                                    isWallEndpointEditMode:
+                                                        _isWallEndpointEditMode,
+                                                    onToggleWallEndpointEdit:
+                                                        _toggleWallEndpointEditMode,
+                                                    onMoveWallEndpoint:
+                                                        _moveWallEndpoint,
+                                                    measurement: _measurement,
+                                                    showDrawingInfo:
+                                                        _showDrawingInfo,
+                                                    onCloseDrawingInfo: () =>
+                                                        setState(
+                                                          () =>
+                                                              _showDrawingInfo =
+                                                                  false,
+                                                        ),
+                                                    isMeasurementSelected:
+                                                        _isMeasurementSelected,
+                                                    onSelectMeasurement:
+                                                        _selectMeasurement,
+                                                    onRemoveMeasurement:
+                                                        _removeMeasurement,
+                                                    isMeasurementMode:
+                                                        _isMeasurementMode,
+                                                    onMeasurementSelected:
+                                                        _askMeasurement,
+                                                    onCloseMeasurementMode:
+                                                        () => setState(
+                                                          () =>
+                                                              _isMeasurementMode =
+                                                                  false,
+                                                        ),
+                                                    isWallEraseMode:
+                                                        _isWallEraseMode,
+                                                    canUndoWallErase:
+                                                        _previousWallMask !=
+                                                        null,
+                                                    onToggleWallErase: () =>
+                                                        setState(
+                                                          () => _isWallEraseMode =
+                                                              !_isWallEraseMode,
+                                                        ),
+                                                    onEraseWalls: _eraseWalls,
+                                                    onUndoWallErase:
+                                                        _undoWallErase,
+                                                    isPicking: _isPicking,
+                                                    onPick: _pickDrawing,
+                                                    onRemove: _removeDrawing,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 20),
+                                                SizedBox(
+                                                  width: 330,
+                                                  child: _SetupPanel(
+                                                    drawing: _drawing,
+                                                    stage: _stage,
+                                                    measurement: _measurement,
+                                                    isMeasurementMode:
+                                                        _isMeasurementMode,
+                                                    onToggleMeasurement:
+                                                        _toggleMeasurementMode,
+                                                    wallColor: _wallColor,
+                                                    floorColor: _floorColor,
+                                                    wallsDetected:
+                                                        _wallsDetected,
+                                                    floorGenerated:
+                                                        _floorGenerated,
+                                                    isDetectingWalls:
+                                                        _isDetectingWalls,
+                                                    isGeneratingFloor:
+                                                        _isGeneratingFloor,
+                                                    onDetectWalls: _detectWalls,
+                                                    onGenerateFloor:
+                                                        _generateFloor,
+                                                    lanesGenerated:
+                                                        _laneWaypoints
+                                                            .isNotEmpty,
+                                                    waypointMode:
+                                                        _isWaypointMode,
+                                                    onToggleWaypoint:
+                                                        _toggleWaypointMode,
+                                                    onWallColorChanged:
+                                                        (color) => setState(
+                                                          () => _wallColor =
+                                                              color,
+                                                        ),
+                                                    onFloorColorChanged:
+                                                        (color) => setState(
+                                                          () => _floorColor =
+                                                              color,
+                                                        ),
+                                                    isDeployed: _isDeployed,
+                                                    onDeploy: _deployMap,
+                                                    onGenerateGrid:
+                                                        _generateGridMap,
+                                                    onStageChanged: (value) =>
+                                                        setState(
+                                                          () => _stage = value,
+                                                        ),
+                                                  ),
+                                                ),
+                                              ],
+                                            );
+                                          },
+                                        ),
+                                        // 도면 바로 아래에 같은 값을 숫자로
+                                        // 둔다. 끌어서 맞추는 것으로는 1픽셀
+                                        // 아래로 못 내려가고, 그 1픽셀이 몇
+                                        // 밀리미터인지 화면만 봐서는 모른다.
+                                        const SizedBox(height: 20),
+                                        _WaypointTable(
+                                          rows: _waypointRows(),
+                                          robots: [
+                                            for (final robot in _fleetRobots)
+                                              WaypointRobotBinding(
+                                                robotId: robot.robotId,
+                                                displayName: robot.displayName,
+                                                isMobile: robot.isMobile,
+                                                spawnX: robot.spawnX,
+                                                spawnY: robot.spawnY,
+                                              ),
+                                          ],
+                                          hasScale: _metersPerPixel != null,
+                                          expanded: _showWaypointTable,
+                                          onToggle: () => setState(
+                                            () => _showWaypointTable =
+                                                !_showWaypointTable,
+                                          ),
+                                          onName: _setWaypointName,
+                                          onCategory: _setWaypointCategory,
+                                          onHeading: _setWaypointDockHeading,
+                                          onMeters: (point, {x, y}) =>
+                                              _setWaypointMeters(
+                                                point,
+                                                x: x,
+                                                y: y,
+                                              ),
+                                          onPixels: (point, {x, y}) =>
+                                              _setWaypointPixel(
+                                                point,
+                                                dx: x,
+                                                dy: y,
+                                              ),
+                                          onRobot: _setWaypointRobot,
+                                          onDelete: _confirmDeleteWaypoint,
+                                          issueMessage: _waypointDropMessage,
+                                        ),
+                                        if (_processingWarning != null) ...[
+                                          const SizedBox(height: 20),
+                                          _ProcessingWarningPanel(
+                                            message: _processingWarning!,
+                                            onDismiss: _clearProcessingWarning,
+                                          ),
+                                        ],
                                       ],
-                                    ],
+                                    ),
                                   ),
                                 ),
-                              ),
-                            )
-                          : _selectedMenu == _menuGrid
-                          ? _GridMapPage(
-                              projectName: _openProjectName,
-                              mapName: _mapName,
-                              hasDrawing: _drawing != null,
-                              calibrated: _metersPerPixel != null,
-                              floorGenerated: _floorGenerated,
-                              resolution: _occupancyResolution(),
-                              mapDirectory: _mapDirectoryFor(
-                                _openProjectName ?? _mapName,
-                              ),
-                              onGenerate: _generateGridMap,
-                              onOpenMap: () =>
-                                  setState(() => _selectedMenu = _menuMap),
-                              generating: _isGeneratingGrid,
-                              preview: _gridPreview,
-                              previewGrid: _gridPreviewGrid,
-                              previewDirectory: _gridPreviewDirectory,
-                              previewSavedAt: _gridPreviewSavedAt,
-                              slamMap: _slamMap,
-                              slamPreview: _slamPreview,
-                              readingSlam: _isReadingSlamMap,
-                              useSlamMap: _useSlamMap,
-                              onUploadSlam: _uploadSlamMap,
-                              onSaveSlamOrigin: _saveSlamOrigin,
-                              onUseSlamMapChanged: (value) =>
-                                  setState(() => _useSlamMap = value),
-                              slamScale: _slamScaleComparison(),
-                              onApplySlamScale: (ratio) =>
-                                  unawaited(_applySlamScale(ratio)),
-                              resolutionMode: _gridResolutionMode,
-                              targetWidth: _gridTargetWidth,
-                              targetHeight: _gridTargetHeight,
-                              padToTarget: _gridPadToTarget,
-                              manualResolution: _gridManualResolution,
-                              extent: _occupancyExtent(),
-                              robotWidth: _robotWidthMeters,
-                              drawingScale: _metersPerPixel,
-                              onResolutionChanged:
-                                  (mode, width, height, pad, manual) =>
-                                      setState(() {
-                                        _gridResolutionMode = mode;
-                                        // 0 이나 음수가 들어오면 격자를 못
-                                        // 만든다. 앞 값을 지킨다.
-                                        if (width > 0) _gridTargetWidth = width;
-                                        if (height > 0) {
-                                          _gridTargetHeight = height;
-                                        }
-                                        _gridPadToTarget = pad;
-                                        if (manual > 0) {
-                                          _gridManualResolution = manual;
-                                        }
-                                      }),
-                              unsavedChanges: _gridSettingChanges,
-                              onSaveSettings: () =>
-                                  unawaited(_saveGridSettings()),
-                            )
-                          : _selectedMenu == _menuRobots
-                          ? _RobotManagementPage(
-                              drawing: _robotRuntimeDrawing,
-                              activeMapSourceName: _activeMapSourceName,
-                              activeBuildingYamlName: _activeBuildingYamlName,
-                              pendingDeployment:
-                                  _robotDeployedMap?.summary.yamlPath.endsWith(
-                                    '.rmfproject',
-                                  ) ??
-                                  !_isDeployed,
-                              lanes:
-                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
-                              waypoints:
-                                  _robotDeployedMap?.waypoints ??
-                                  _laneWaypoints,
-                              waypointNames:
-                                  _robotDeployedMap?.waypointNames ??
-                                  _waypointNames,
-                              robots: _mockRobots,
-                              projectName: _openProjectName,
-                              // 차례의 `RMF 설정 내보내기` 칸이 이 둘로 배포
-                              // 산출물을 읽는다. 맵 이름은 산출물 파일 이름과
-                              // 같은 것이라야 한다 — 열린 프로젝트 이름과 다를
-                              // 수 있다.
-                              mapDirectory: _deployedMapDirectory,
-                              deployMapName:
-                                  _robotDeployedMap?.summary.name ?? _mapName,
-                              fleetName: _fleetSettings.fleetName,
-                              registeredRobots: _fleetRobots,
-                              onLoadMap: _loadMapForRobots,
-                              onSpawn: _spawnMockRobot,
-                              onToggle: _toggleMockRobot,
-                              onRemove: _removeMockRobot,
-                              onRegisterRobot: () =>
-                                  unawaited(_registerFleetRobot()),
-                              onOpenRobot: (id) =>
-                                  unawaited(_showRobotDetail(id)),
-                              onEditRegisteredRobot: (robot) =>
-                                  unawaited(_updateFleetRobot(robot)),
-                              onUnregisterRobot: (robot) =>
-                                  unawaited(_unregisterFleetRobot(robot)),
-                              onSendRobot: (robot) =>
-                                  unawaited(_sendRobotToWaypoint(robot)),
-                              onRegisterFromChargers: () =>
-                                  unawaited(_registerRobotsFromChargers()),
-                              onCheckSpawns: () => unawaited(_showSpawnCheck()),
-                              spawnChecks: _spawnChecks,
-                              onStartBackend: _startBackendForOpenProject,
-                              onRefreshScripts: _refreshProjectScripts,
-                              telemetry: _telemetry,
-                            )
-                          : _selectedMenu == _menuTasks
-                          ? _TaskManagementPage(
-                              tasks: _mockTasks,
-                              robots: _mockRobots,
-                              drawing: _robotRuntimeDrawing,
-                              lanes:
-                                  _robotDeployedMap?.lanes ?? _recommendedLanes,
-                              waypoints:
-                                  _robotDeployedMap?.waypoints ??
-                                  _laneWaypoints,
-                              waypointNames:
-                                  _robotDeployedMap?.waypointNames ??
-                                  _waypointNames,
-                              activeMapName:
-                                  _robotDeployedMap?.summary.name ?? _mapName,
-                              activeMapSourceName: _activeMapSourceName,
-                              activeBuildingYamlName: _activeBuildingYamlName,
-                              pendingDeployment:
-                                  _robotDeployedMap?.summary.yamlPath.endsWith(
-                                    '.rmfproject',
-                                  ) ??
-                                  !_isDeployed,
-                              mapReady:
-                                  (_robotDeployedMap?.waypoints ??
-                                          _laneWaypoints)
-                                      .isNotEmpty,
-                              onLoadMap: _loadMapForRobots,
-                              onOpenRobots: () =>
-                                  setState(() => _selectedMenu = _menuRobots),
-                              onCreate: _createMockTask,
-                              onReturnRobots: _returnRobotsToSpawn,
-                              onShowDetail: _showTaskDetail,
-                              onRun: _runMockTask,
-                              onEdit: _editMockTask,
-                              onDelete: _deleteMockTask,
-                              onCancel: _cancelMockTask,
-                              readiness: _readiness,
-                              onRefreshReadiness: _refreshReadiness,
-                            )
-                          : _selectedMenu == _menuRobotModels
-                          ? const _RobotModelManagementPage()
-                          : _selectedMenu == _menuFiles
-                          ? _ProjectFilesPage(
-                              projectName: _openProjectName,
-                              mapName: _mapName,
-                              fleetName: _fleetSettings.fleetName,
-                              robotCount: _fleetRobots.length,
-                              mapDirectory: _mapDirectoryFor(
-                                _openProjectName ?? _mapName,
-                              ),
-                              onOpenMap: () =>
-                                  setState(() => _selectedMenu = _menuMap),
-                              onExport: _exportRmfConfig,
-                              onRun: _runProjectScript,
-                              onStop: _stopProjectScript,
-                            )
-                          : _selectedMenu == _menuPolicies
-                          ? WorkcellPolicyPage(
-                              projectName: _openProjectName,
-                              robots: _fleetRobots,
-                              onChanged: (policies) {
-                                if (!listEquals(
-                                  _workcellPolicyModels,
-                                  policies,
-                                )) {
-                                  setState(
-                                    () => _workcellPolicyModels = policies,
-                                  );
-                                }
-                              },
-                            )
-                          : _selectedMenu == _menuRos2
-                          ? const Ros2InspectPage()
-                          : _selectedMenu == _menuLog
-                          ? _ProjectLogPage(
-                              mapDirectory: _deployedMapDirectory,
-                              mapName:
-                                  _robotDeployedMap?.summary.name ?? _mapName,
-                            )
-                          : _selectedMenu == _menuAnalytics
-                          ? const _OperationsAnalyticsPage()
-                          : _selectedMenu == _menuProjectAnalytics
-                          ? const _ProjectAnalyticsPage()
-                          // 여기까지 왔으면 아직 안 만든 화면이다. 예전에는
-                          // 항목 수가 메뉴보다 적고 순서도 달라, 메뉴를 하나
-                          // 늘리면 범위 넘침으로 터졌다. 메뉴 이름을 그대로
-                          // 쓴다.
-                          : const _ComingSoonPage(title: '준비 중'),
+                              )
+                            : _selectedMenu == _menuGrid
+                            ? _GridMapPage(
+                                projectName: _openProjectName,
+                                mapName: _mapName,
+                                hasDrawing: _drawing != null,
+                                calibrated: _metersPerPixel != null,
+                                floorGenerated: _floorGenerated,
+                                resolution: _occupancyResolution(),
+                                mapDirectory: _mapDirectoryFor(
+                                  _openProjectName ?? _mapName,
+                                ),
+                                onGenerate: _generateGridMap,
+                                onOpenMap: () =>
+                                    setState(() => _selectedMenu = _menuMap),
+                                generating: _isGeneratingGrid,
+                                preview: _gridPreview,
+                                previewGrid: _gridPreviewGrid,
+                                previewDirectory: _gridPreviewDirectory,
+                                previewSavedAt: _gridPreviewSavedAt,
+                                slamMap: _slamMap,
+                                slamPreview: _slamPreview,
+                                readingSlam: _isReadingSlamMap,
+                                useSlamMap: _useSlamMap,
+                                onUploadSlam: _uploadSlamMap,
+                                onSaveSlamOrigin: _saveSlamOrigin,
+                                onUseSlamMapChanged: (value) =>
+                                    setState(() => _useSlamMap = value),
+                                slamScale: _slamScaleComparison(),
+                                onApplySlamScale: (ratio) =>
+                                    unawaited(_applySlamScale(ratio)),
+                                resolutionMode: _gridResolutionMode,
+                                targetWidth: _gridTargetWidth,
+                                targetHeight: _gridTargetHeight,
+                                padToTarget: _gridPadToTarget,
+                                manualResolution: _gridManualResolution,
+                                extent: _occupancyExtent(),
+                                robotWidth: _robotWidthMeters,
+                                drawingScale: _metersPerPixel,
+                                onResolutionChanged:
+                                    (mode, width, height, pad, manual) =>
+                                        setState(() {
+                                          _gridResolutionMode = mode;
+                                          // 0 이나 음수가 들어오면 격자를 못
+                                          // 만든다. 앞 값을 지킨다.
+                                          if (width > 0) {
+                                            _gridTargetWidth = width;
+                                          }
+                                          if (height > 0) {
+                                            _gridTargetHeight = height;
+                                          }
+                                          _gridPadToTarget = pad;
+                                          if (manual > 0) {
+                                            _gridManualResolution = manual;
+                                          }
+                                        }),
+                                unsavedChanges: _gridSettingChanges,
+                                onSaveSettings: () =>
+                                    unawaited(_saveGridSettings()),
+                              )
+                            : _selectedMenu == _menuRobots
+                            ? _RobotManagementPage(
+                                rosDomainId: _rosDomainId,
+                                drawing: _robotRuntimeDrawing,
+                                activeMapSourceName: _activeMapSourceName,
+                                activeBuildingYamlName: _activeBuildingYamlName,
+                                pendingDeployment:
+                                    _robotDeployedMap?.summary.yamlPath
+                                        .endsWith('.rmfproject') ??
+                                    !_isDeployed,
+                                lanes:
+                                    _robotDeployedMap?.lanes ??
+                                    _recommendedLanes,
+                                waypoints:
+                                    _robotDeployedMap?.waypoints ??
+                                    _laneWaypoints,
+                                waypointNames:
+                                    _robotDeployedMap?.waypointNames ??
+                                    _waypointNames,
+                                robots: _mockRobots,
+                                projectName: _openProjectName,
+                                // 차례의 `RMF 설정 내보내기` 칸이 이 둘로 배포
+                                // 산출물을 읽는다. 맵 이름은 산출물 파일 이름과
+                                // 같은 것이라야 한다 — 열린 프로젝트 이름과 다를
+                                // 수 있다.
+                                mapDirectory: _deployedMapDirectory,
+                                deployMapName:
+                                    _robotDeployedMap?.summary.name ?? _mapName,
+                                fleetName: _fleetSettings.fleetName,
+                                registeredRobots: _fleetRobots,
+                                onLoadMap: _loadMapForRobots,
+                                onSpawn: _spawnMockRobot,
+                                onToggle: _toggleMockRobot,
+                                onRemove: _removeMockRobot,
+                                onRegisterRobot: () =>
+                                    unawaited(_registerFleetRobot()),
+                                onOpenRobot: (id) =>
+                                    unawaited(_showRobotDetail(id)),
+                                policies: _workcellPolicyModels,
+                                onManageWorkcellPolicies: (robot) =>
+                                    unawaited(_showWorkcellPolicies(robot)),
+                                onEditRegisteredRobot: (robot) =>
+                                    unawaited(_updateFleetRobot(robot)),
+                                onUnregisterRobot: (robot) =>
+                                    unawaited(_unregisterFleetRobot(robot)),
+                                onSendRobot: (robot) =>
+                                    unawaited(_sendRobotToWaypoint(robot)),
+                                onRegisterFromChargers: () =>
+                                    unawaited(_registerRobotsFromChargers()),
+                                onCheckSpawns: () =>
+                                    unawaited(_showSpawnCheck()),
+                                spawnChecks: _spawnChecks,
+                                onStartBackend: _startBackendForOpenProject,
+                                onRefreshScripts: _refreshProjectScripts,
+                                telemetry: _telemetry,
+                              )
+                            : _selectedMenu == _menuTasks
+                            ? _TaskManagementPage(
+                                tasks: _mockTasks,
+                                robots: _mockRobots,
+                                drawing: _robotRuntimeDrawing,
+                                lanes:
+                                    _robotDeployedMap?.lanes ??
+                                    _recommendedLanes,
+                                waypoints:
+                                    _robotDeployedMap?.waypoints ??
+                                    _laneWaypoints,
+                                waypointNames:
+                                    _robotDeployedMap?.waypointNames ??
+                                    _waypointNames,
+                                activeMapName:
+                                    _robotDeployedMap?.summary.name ?? _mapName,
+                                activeMapSourceName: _activeMapSourceName,
+                                activeBuildingYamlName: _activeBuildingYamlName,
+                                pendingDeployment:
+                                    _robotDeployedMap?.summary.yamlPath
+                                        .endsWith('.rmfproject') ??
+                                    !_isDeployed,
+                                mapReady:
+                                    (_robotDeployedMap?.waypoints ??
+                                            _laneWaypoints)
+                                        .isNotEmpty,
+                                onLoadMap: _loadMapForRobots,
+                                onOpenRobots: () =>
+                                    setState(() => _selectedMenu = _menuRobots),
+                                onCreate: _createMockTask,
+                                onReturnRobots: _returnRobotsToSpawn,
+                                onShowDetail: _showTaskDetail,
+                                onRun: _runMockTask,
+                                onEdit: _editMockTask,
+                                onDelete: _deleteMockTask,
+                                onCancel: _cancelMockTask,
+                                readiness: _readiness,
+                                onRefreshReadiness: _refreshReadiness,
+                              )
+                            : _selectedMenu == _menuRobotModels
+                            ? const _RobotModelManagementPage()
+                            : _selectedMenu == _menuFiles
+                            ? _ProjectFilesPage(
+                                projectName: _openProjectName,
+                                mapName: _mapName,
+                                fleetName: _fleetSettings.fleetName,
+                                robotCount: _fleetRobots.length,
+                                mapDirectory: _mapDirectoryFor(
+                                  _openProjectName ?? _mapName,
+                                ),
+                                onOpenMap: () =>
+                                    setState(() => _selectedMenu = _menuMap),
+                                onExport: _exportRmfConfig,
+                                onRun: _runProjectScript,
+                                onStop: _stopProjectScript,
+                              )
+                            : _selectedMenu == _menuPolicies
+                            ? WorkcellPolicyPage(
+                                projectName: _openProjectName,
+                                robots: _fleetRobots,
+                                onChanged: (policies) {
+                                  if (!listEquals(
+                                    _workcellPolicyModels,
+                                    policies,
+                                  )) {
+                                    setState(
+                                      () => _workcellPolicyModels = policies,
+                                    );
+                                  }
+                                },
+                              )
+                            : _selectedMenu == _menuRos2
+                            ? const Ros2InspectPage()
+                            : _selectedMenu == _menuLog
+                            ? _ProjectLogPage(
+                                mapDirectory: _deployedMapDirectory,
+                                mapName:
+                                    _robotDeployedMap?.summary.name ?? _mapName,
+                              )
+                            : _selectedMenu == _menuAnalytics
+                            ? const _OperationsAnalyticsPage()
+                            : _selectedMenu == _menuProjectAnalytics
+                            ? const _ProjectAnalyticsPage()
+                            // 여기까지 왔으면 아직 안 만든 화면이다. 예전에는
+                            // 항목 수가 메뉴보다 적고 순서도 달라, 메뉴를 하나
+                            // 늘리면 범위 넘침으로 터졌다. 메뉴 이름을 그대로
+                            // 쓴다.
+                            : const _ComingSoonPage(title: '준비 중'),
+                      ),
                     ),
                   ],
                 ),
@@ -13263,7 +14707,7 @@ class _SequentialTaskEditorDialog extends StatefulWidget {
     this.initialTrigger = _OrderTrigger.manual,
     this.editing = false,
     required this.robots,
-    required this.workcellPolicies,
+    required this.policyChoices,
     required this.drawing,
     required this.lanes,
     required this.waypoints,
@@ -13277,7 +14721,13 @@ class _SequentialTaskEditorDialog extends StatefulWidget {
   final _OrderTrigger initialTrigger;
   final bool editing;
   final List<_MockRobot> robots;
-  final List<String> workcellPolicies;
+
+  /// 이 자리에서 고를 수 있는 policy. 자리를 맡는 설비마다 다르다.
+  ///
+  /// 픽업 요청은 자리 이름(`target_guid`)으로 가고, 답하는 것은 그 자리를 맡는
+  /// 설비 하나다. 팔마다 붙여 둔 policy 가 다르므로 목록도 그 설비의 것이라야
+  /// 한다.
+  final WorkcellPolicyChoices Function(String? station) policyChoices;
   final UploadedDrawing? drawing;
   final List<(Offset, Offset)> lanes;
   final List<Offset> waypoints;
@@ -13305,6 +14755,85 @@ class _SequentialTaskEditorDialogState
     );
   }
 
+  /// 이 단계에서 로봇이 서 있을 자리.
+  ///
+  /// 픽업 요청은 바로 앞 이동 단계의 목적지 이름으로 나간다(`target_guid`).
+  /// 그 자리를 맡는 설비가 이 단계를 실제로 하는 팔이다.
+  String? _stationForStep(int index) {
+    for (var i = index - 1; i >= 0; i--) {
+      final step = _steps[i];
+      if (step.type != _TaskStepType.navigate) continue;
+      final destination = step.destination;
+      if (destination == null) continue;
+      final name = widget.waypointNames[destination]?.trim() ?? '';
+      return name.isEmpty ? null : name;
+    }
+    return null;
+  }
+
+  /// 이 픽업 단계에서 고를 수 있는 policy.
+  WorkcellPolicyChoices _choicesForStep(int index) =>
+      widget.policyChoices(_stationForStep(index));
+
+  /// 왜 이 목록인지 한 줄로 밝힌다.
+  String _policyHelperText(WorkcellPolicyChoices choices, bool rejected) {
+    if (rejected) {
+      return '${choices.workcellId} 에 붙지 않은 Policy 입니다. '
+          '로봇 관리에서 붙이거나 다른 것을 고르세요.';
+    }
+    if (choices.fallback) {
+      return choices.scoped
+          ? '${choices.workcellId} 에 붙은 Policy 가 없어 기본 동작을 씁니다. '
+                '로봇 관리에서 붙이면 여기에 나옵니다.'
+          : '붙여 둔 Policy 가 없어 기본 동작을 씁니다.';
+    }
+    return choices.scoped
+        ? '${choices.station} 자리를 맡는 ${choices.workcellId} 에 붙은 Policy'
+        : '앞에 이동 단계를 두면 그 자리를 맡는 설비의 Policy 만 보여 줍니다.';
+  }
+
+  /// 픽업 단계의 Policy 칸.
+  ///
+  /// 팔마다 붙여 둔 policy 가 다르므로 이 자리를 맡는 설비의 것만 내민다.
+  Widget _policyField(_TaskStepDraft step, int index) {
+    final choices = _choicesForStep(index);
+    final rejected = choices.rejects(step.policyId);
+    // 고를 것이 하나도 없으면 작업 자체를 만들 수 없다. 기본 동작은 늘 남긴다.
+    // 예전에 고른 값도 남겨야 남의 설비 것으로 저장된 작업을 열어 볼 수 있다.
+    final options = <String>{
+      ...choices.policyIds,
+      if (choices.policyIds.isEmpty) 'armLoad',
+      step.policyId,
+    }.toList();
+    return DropdownButtonFormField<String>(
+      initialValue: step.policyId,
+      decoration: InputDecoration(
+        labelText: choices.fallback ? '픽업 동작' : '픽업 Policy',
+        helperText: _policyHelperText(choices, rejected),
+        helperMaxLines: 3,
+        helperStyle: rejected
+            ? const TextStyle(color: Color(0xFFDC2626))
+            : null,
+        isDense: true,
+        border: const OutlineInputBorder(),
+      ),
+      items: [
+        for (final policy in options)
+          DropdownMenuItem(
+            value: policy,
+            child: Text(
+              policy == 'armLoad'
+                  ? '기본 armLoad'
+                  : choices.policyIds.contains(policy)
+                  ? policy
+                  : '$policy · 이 설비에 없음',
+            ),
+          ),
+      ],
+      onChanged: (value) => setState(() => step.policyId = value!),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -13312,7 +14841,8 @@ class _SequentialTaskEditorDialogState
     _description.text = widget.initialDescription;
     _robotId = widget.initialRobotId;
     _trigger = widget.initialTrigger;
-    final defaultArmAction = widget.workcellPolicies.firstOrNull ?? 'armLoad';
+    final defaultArmAction =
+        widget.policyChoices(null).policyIds.firstOrNull ?? 'armLoad';
     _steps = widget.initialSteps?.isNotEmpty == true
         ? widget.initialSteps!
               .map(
@@ -13544,8 +15074,11 @@ class _SequentialTaskEditorDialogState
                                         _TaskStepType.returnHome) {
                                       step.destination = null;
                                     } else if (value == _TaskStepType.armLoad) {
+                                      // 이 자리를 맡는 설비의 것으로 채운다.
                                       step.policyId =
-                                          widget.workcellPolicies.firstOrNull ??
+                                          _choicesForStep(
+                                            index,
+                                          ).policyIds.firstOrNull ??
                                           'armLoad';
                                     }
                                   }),
@@ -13603,47 +15136,7 @@ class _SequentialTaskEditorDialogState
                                           fontWeight: FontWeight.w700,
                                         ),
                                       )
-                                    : DropdownButtonFormField<String>(
-                                        initialValue: step.policyId,
-                                        decoration: InputDecoration(
-                                          labelText:
-                                              widget.workcellPolicies.isEmpty
-                                              ? '픽업 동작'
-                                              : '픽업 Policy',
-                                          helperText:
-                                              widget.workcellPolicies.isEmpty
-                                              ? 'Policy가 없어 기본 armLoad를 사용합니다.'
-                                              : 'Gazebo 설비에 자동 생성된 Policy 중 선택',
-                                          isDense: true,
-                                          border: const OutlineInputBorder(),
-                                        ),
-                                        items: [
-                                          if (widget.workcellPolicies.isEmpty)
-                                            const DropdownMenuItem(
-                                              value: 'armLoad',
-                                              child: Text('기본 armLoad'),
-                                            ),
-                                          for (final policy
-                                              in widget.workcellPolicies)
-                                            DropdownMenuItem(
-                                              value: policy,
-                                              child: Text(policy),
-                                            ),
-                                          if (step.policyId != 'armLoad' &&
-                                              !widget.workcellPolicies.contains(
-                                                step.policyId,
-                                              ))
-                                            DropdownMenuItem(
-                                              value: step.policyId,
-                                              child: Text(
-                                                '${step.policyId} · 기존 설정',
-                                              ),
-                                            ),
-                                        ],
-                                        onChanged: (value) => setState(
-                                          () => step.policyId = value!,
-                                        ),
-                                      ),
+                                    : _policyField(step, index),
                               ),
                               if (step.type == _TaskStepType.navigate)
                                 IconButton(
@@ -16952,6 +18445,8 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onRemove,
     required this.onRegisterRobot,
     required this.onOpenRobot,
+    required this.policies,
+    required this.onManageWorkcellPolicies,
     required this.onEditRegisteredRobot,
     required this.onUnregisterRobot,
     required this.onSendRobot,
@@ -16961,6 +18456,7 @@ class _RobotManagementPage extends StatefulWidget {
     required this.onStartBackend,
     required this.onRefreshScripts,
     required this.telemetry,
+    required this.rosDomainId,
     this.mapDirectory,
     this.deployMapName,
   });
@@ -16995,6 +18491,14 @@ class _RobotManagementPage extends StatefulWidget {
 
   /// 로봇 하나의 상세를 연다.
   final ValueChanged<String> onOpenRobot;
+
+  /// 이 프로젝트에 연결된 WorkCell Policy. 설비 로봇 카드에 몇 개 붙었는지
+  /// 보여 준다.
+  final List<WorkcellPolicy> policies;
+
+  /// 설비 로봇 하나에 Policy 를 붙이고 떼는 창을 연다.
+  final ValueChanged<RmfProjectRobot> onManageWorkcellPolicies;
+
   final ValueChanged<RmfProjectRobot> onEditRegisteredRobot;
   final ValueChanged<RmfProjectRobot> onUnregisterRobot;
 
@@ -17016,6 +18520,12 @@ class _RobotManagementPage extends StatefulWidget {
 
   /// Gazebo 에서 실제로 값을 받고 있는지.
   final RobotTelemetryStatus telemetry;
+
+  /// 백엔드가 도는 ROS 도메인.
+  ///
+  /// 노드를 세러 갈 때 넘겨야 한다. 안 넘기면 0 번을 세고, 프로젝트가 22 번을
+  /// 쓰면 멀쩡한 백엔드가 통째로 안 보인다.
+  final int rosDomainId;
 
   @override
   State<_RobotManagementPage> createState() => _RobotManagementPageState();
@@ -17235,16 +18745,31 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     }
   }
 
-  Future<void> _refreshRmfStatus() async {
-    setState(() {
-      _rmfBusy = true;
-      _ghostNodes = false;
-    });
-    final status = await probeRmfRuntime();
+  /// 백엔드가 떠 있는지 다시 본다.
+  ///
+  /// **프로세스 목록이 진실이다.** 노드 목록은 곁들이는 정보다 — 강제 종료된
+  /// 노드가 DDS 에 십수 초 남고, 그동안 목록만 보면 멀쩡히 내려간 백엔드가 떠
+  /// 있다고 읽힌다. 예전에는 이 길만 노드 목록 하나로 판정해서, 중지를 다 하고
+  /// 프로세스가 하나도 없는데도 화면이 계속 `백엔드가 떠 있습니다` 였다.
+  ///
+  /// [quiet] 면 `다시 확인` 단추를 막지 않는다. 뒤에서 되풀이해 읽을 때 쓴다.
+  Future<void> _refreshRmfStatus({bool quiet = false}) async {
+    if (!quiet) {
+      setState(() {
+        _rmfBusy = true;
+        _ghostNodes = false;
+      });
+    }
+    // 프로세스를 먼저 본다. 이것이 없으면 노드가 뭐라 나오든 유령이다.
+    final running = await runningBackendProjects();
+    if (!mounted) return;
+    final processesGone = running.isEmpty;
+    final status = await probeRmfRuntime(rosDomainId: widget.rosDomainId);
     if (!mounted) return;
     setState(() {
       _rmfStatus = status;
-      _rmfBusy = false;
+      _ghostNodes = processesGone && status.isRunning;
+      if (!quiet) _rmfBusy = false;
     });
   }
 
@@ -17260,6 +18785,14 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
     await _refreshUntilClear();
+    if (!mounted || _rmfStatus.isRunning) return;
+    final report = await diagnoseProjectBackendFailure(widget.projectName!);
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: '백엔드 실행 실패 — 원인과 해결 방법',
+      message: report,
+    );
   }
 
   /// 배포된 bringup 이 담고 있는 로봇 수. 안 봤거나 파일이 없으면 null.
@@ -17343,30 +18876,16 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   /// 그래서 판정은 프로세스로 하고, 노드 목록은 뒤에서 조용히 다시 읽어 화면이
   /// 스스로 맞춰지게 둔다.
   Future<void> _refreshUntilClear() async {
-    setState(() {
-      _rmfBusy = true;
-      _ghostNodes = false;
-    });
-    final running = await runningBackendProjects();
+    await _refreshRmfStatus();
     if (!mounted) return;
-    final processesGone = running.isEmpty;
-    var status = await probeRmfRuntime();
-    if (!mounted) return;
-    setState(() {
-      _rmfStatus = status;
-      _ghostNodes = processesGone && status.isRunning;
-      _rmfBusy = false;
-    });
     // 유령이 사라질 때까지 뒤에서 다시 읽는다. 버튼을 막지 않는다.
-    for (var attempt = 0; attempt < 12 && status.isRunning; attempt++) {
+    //
+    // 프로세스도 매번 다시 본다. 처음 값을 붙들고 있으면, 기다리는 동안 사람이
+    // 백엔드를 다시 띄웠을 때 멀쩡한 노드를 유령이라고 적는다.
+    for (var attempt = 0; attempt < 12 && _rmfStatus.isRunning; attempt++) {
       await Future<void>.delayed(const Duration(seconds: 3));
       if (!mounted) return;
-      status = await probeRmfRuntime();
-      if (!mounted) return;
-      setState(() {
-        _rmfStatus = status;
-        _ghostNodes = processesGone && status.isRunning;
-      });
+      await _refreshRmfStatus(quiet: true);
     }
   }
 
@@ -17754,7 +19273,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                                   '${robot.chargerWaypoint ?? '미지정'}'
                                   '${robot.spawnX == null ? '' : ' · spawn '
                                             '${robot.spawnX!.toStringAsFixed(2)}, '
-                                            '${robot.spawnY!.toStringAsFixed(2)}'}',
+                                            '${robot.spawnY!.toStringAsFixed(2)}'}'
+                                  // 설비는 붙은 Policy 가 곧 할 수 있는 일이다.
+                                  '${robot.isMobile ? '' : ' · Policy '
+                                            '${policiesForWorkcell(widget.policies, robot.robotId).length}개'}',
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Color(0xFF64748B),
@@ -17764,6 +19286,20 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                               ],
                             ),
                           ),
+                          // Policy 는 로봇팔이 무엇을 어떻게 집는지 학습해 둔
+                          // 것이라 설비 로봇에만 붙는다.
+                          if (!robot.isMobile)
+                            IconButton(
+                              tooltip: 'Policy 붙이기·떼기',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () =>
+                                  widget.onManageWorkcellPolicies(robot),
+                              icon: const Icon(
+                                Icons.model_training_outlined,
+                                size: 17,
+                                color: Color(0xFF2563EB),
+                              ),
+                            ),
                           // 이동 로봇만 보낼 수 있다. 설비 로봇에게 보내기를
                           // 내밀면 눌러 보고서야 안 된다는 것을 알게 된다.
                           if (robot.isMobile)
@@ -18643,7 +20179,7 @@ class _NavigationRail extends StatelessWidget {
       (Icons.map_outlined, '맵 관리'),
       (Icons.grid_on_outlined, '그리드맵'),
       (Icons.smart_toy_outlined, '로봇 관리'),
-      (Icons.model_training_outlined, 'WorkCell 관리'),
+      (Icons.model_training_outlined, 'Policy 관리'),
       (Icons.assignment_outlined, '작업 관리'),
       (Icons.view_in_ar_outlined, '로봇 모델'),
       (Icons.hub_outlined, 'ROS2 확인'),
@@ -19533,7 +21069,6 @@ class _TaskDetailDialog extends StatefulWidget {
   const _TaskDetailDialog({
     required this.task,
     required this.robotOf,
-    required this.toFloor,
     required this.metersPerPixel,
     required this.waypointLabel,
     required this.dataSource,
@@ -19543,7 +21078,6 @@ class _TaskDetailDialog extends StatefulWidget {
 
   final _MockTask task;
   final _MockRobot? Function(String robotId) robotOf;
-  final Offset Function(Offset point) toFloor;
   final double? metersPerPixel;
   final String Function(Offset point) waypointLabel;
 
@@ -19584,15 +21118,19 @@ class _TaskDetailDialogState extends State<_TaskDetailDialog> {
     super.dispose();
   }
 
+  /// RMF 월드 좌표(m). nav graph·robot.yaml·Gazebo·RViz 가 쓰는 그 값이다.
+  ///
+  /// 예전에는 바닥 왼쪽 아래 기준 **픽셀**과 그 픽셀에 축척만 곱한 값을 나란히
+  /// 보여 줬다. 뒤엣것이 `m` 라고 적혀 있어서 nav graph 의 미터와 같은 값인 줄
+  /// 알기 쉬웠는데, 원점이 달라 전혀 다른 자리였다.
   String _point(Offset point) {
-    final floor = widget.toFloor(point);
-    final pixels =
-        'X ${floor.dx.toStringAsFixed(1)} · Y ${floor.dy.toStringAsFixed(1)} px';
     final scale = widget.metersPerPixel;
-    if (scale == null || scale <= 0) return pixels;
-    return '$pixels  ('
-        '${(floor.dx * scale).toStringAsFixed(2)} · '
-        '${(floor.dy * scale).toStringAsFixed(2)} m)';
+    if (scale == null || scale <= 0) {
+      return 'X ${point.dx.toStringAsFixed(0)} · Y ${point.dy.toStringAsFixed(0)} px'
+          ' · 축척을 재야 미터로 보입니다';
+    }
+    final world = rmfWorldFromPixel(point.dx, point.dy, scale);
+    return 'X ${world.x.toStringAsFixed(3)} · Y ${world.y.toStringAsFixed(3)} m';
   }
 
   String _stepLabel(_MockTaskStep step) => switch (step.type) {
@@ -19934,16 +21472,43 @@ Future<void> showWaypointErrorDialog(
   builder: (_) => _CopyableErrorDialog(title: title, message: message),
 );
 
+/// 같은 팝업으로 경고하고, 그래도 할지 묻는다. 닫으면 **안 하는 것**이다.
+Future<bool> confirmWarningDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required String confirmLabel,
+}) async =>
+    await showMovableDialog<bool>(
+      context: context,
+      builder: (_) => _CopyableErrorDialog(
+        title: title,
+        message: message,
+        confirmLabel: confirmLabel,
+      ),
+    ) ??
+    false;
+
 /// 본문을 복사할 수 있고 크기를 조절할 수 있는 오류 팝업.
 ///
 /// 오류 문구에 좌표·거리·축척 같은 수치가 들어가면 길어진다. 스낵바로는 다
 /// 읽기 전에 사라지고 옮겨 적을 수도 없어서, 닫을 때까지 남고 통째로 복사할 수
 /// 있는 팝업으로 보여 준다. 문구가 길면 오른쪽 아래 모서리를 끌어 넓힌다.
 class _CopyableErrorDialog extends StatefulWidget {
-  const _CopyableErrorDialog({required this.title, required this.message});
+  const _CopyableErrorDialog({
+    required this.title,
+    required this.message,
+    this.confirmLabel,
+  });
 
   final String title;
   final String message;
+
+  /// 있으면 "그래도 …" 단추가 붙고, 그것을 누르면 true 를 돌려준다.
+  ///
+  /// 경고 중에는 사람이 사정을 더 아는 것이 있다. 다만 **기본은 멈추는 것**이라
+  /// 닫기는 언제나 false 다.
+  final String? confirmLabel;
 
   @override
   State<_CopyableErrorDialog> createState() => _CopyableErrorDialogState();
@@ -20042,9 +21607,17 @@ class _CopyableErrorDialogState extends State<_CopyableErrorDialog> {
           icon: const Icon(Icons.content_copy_outlined, size: 18),
           label: const Text('복사'),
         ),
+        if (widget.confirmLabel case final label?)
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFFDC2626),
+            ),
+            child: Text(label),
+          ),
         FilledButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('닫기'),
+          onPressed: () => Navigator.pop(context, false),
+          child: Text(widget.confirmLabel == null ? '닫기' : '취소'),
         ),
       ],
     );
@@ -20160,6 +21733,7 @@ const double mapWorkspaceHeight = 936;
 class _MapWorkspace extends StatelessWidget {
   const _MapWorkspace({
     required this.drawing,
+    required this.metersPerPixel,
     required this.transformController,
     required this.onZoomIn,
     required this.onZoomOut,
@@ -20210,6 +21784,7 @@ class _MapWorkspace extends StatelessWidget {
     required this.onRemove,
   });
   final UploadedDrawing? drawing;
+  final double? metersPerPixel;
   final TransformationController transformController;
   final VoidCallback onZoomIn;
   final VoidCallback onZoomOut;
@@ -20390,6 +21965,7 @@ class _MapWorkspace extends StatelessWidget {
               ? _UploadEmpty(isPicking: isPicking, onPick: onPick)
               : _DrawingPreview(
                   drawing: drawing!,
+                  metersPerPixel: metersPerPixel,
                   transformController: transformController,
                   wallMask: wallMask,
                   wallColor: wallColor,
@@ -20532,6 +22108,7 @@ class _UploadEmpty extends StatelessWidget {
 class _DrawingPreview extends StatelessWidget {
   const _DrawingPreview({
     required this.drawing,
+    required this.metersPerPixel,
     required this.transformController,
     required this.wallMask,
     required this.wallColor,
@@ -20569,6 +22146,7 @@ class _DrawingPreview extends StatelessWidget {
     required this.onEraseWalls,
   });
   final UploadedDrawing drawing;
+  final double? metersPerPixel;
   final TransformationController transformController;
   final _WallMask? wallMask;
   final Color wallColor;
@@ -20631,6 +22209,7 @@ class _DrawingPreview extends StatelessWidget {
                       !waypointMode,
                   child: _WallEditorCanvas(
                     bytes: drawing.bytes!,
+                    metersPerPixel: metersPerPixel,
                     sourceSize: Size(
                       drawing.pixelWidth!.toDouble(),
                       drawing.pixelHeight!.toDouble(),
@@ -20732,6 +22311,7 @@ class _DrawingPreview extends StatelessWidget {
 class _WallEditorCanvas extends StatefulWidget {
   const _WallEditorCanvas({
     required this.bytes,
+    required this.metersPerPixel,
     required this.sourceSize,
     required this.mask,
     required this.color,
@@ -20768,6 +22348,7 @@ class _WallEditorCanvas extends StatefulWidget {
   });
 
   final Uint8List bytes;
+  final double? metersPerPixel;
   final Size sourceSize;
   final _WallMask? mask;
   final Color color;
@@ -21005,11 +22586,6 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
       bottom = math.max(bottom, point.dy);
     }
     return Rect.fromLTRB(left, top, right, bottom);
-  }
-
-  Offset _imageToFloor(Offset point) {
-    final bounds = _floorBounds();
-    return Offset(point.dx - bounds.left, bounds.bottom - point.dy);
   }
 
   ({double left, double right, double top, double bottom}) _wallSpan(
@@ -21287,6 +22863,7 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                   span: _wallSpan(_screenToImage(_waypointCursor!, size)!),
                   sourceSize: widget.sourceSize,
                   waypoints: widget.laneWaypoints,
+                  metersPerPixel: widget.metersPerPixel,
                 ),
               ),
             ),
@@ -21300,9 +22877,9 @@ class _WallEditorCanvasState extends State<_WallEditorCanvas> {
                   : math.max(0, _waypointCursor!.dy - 118),
               child: IgnorePointer(
                 child: _WaypointCoordinateBadge(
-                  point: _imageToFloor(_screenToImage(_waypointCursor!, size)!),
                   imagePoint: _screenToImage(_waypointCursor!, size)!,
                   span: _wallSpan(_screenToImage(_waypointCursor!, size)!),
+                  metersPerPixel: widget.metersPerPixel,
                 ),
               ),
             ),
@@ -21557,16 +23134,790 @@ class _EraseModeBadge extends StatelessWidget {
   );
 }
 
-class _WaypointCoordinateBadge extends StatelessWidget {
-  const _WaypointCoordinateBadge({
-    required this.point,
-    required this.imagePoint,
-    required this.span,
+/// 표에서 좌표 한 칸을 고쳤을 때 그 자리로 옮긴다. 못 옮기면 이유를 돌려준다.
+///
+/// [x] 와 [y] 중 사람이 고친 쪽만 온다. 안 온 쪽은 지금 값을 그대로 쓴다 —
+/// 두 칸을 함께 보내면 아직 안 고친 칸의 반올림된 표시값이 실제 값을 덮는다.
+typedef _WaypointCoordinateEdit =
+    WaypointMoveIssue? Function(Offset point, {double? x, double? y});
+
+/// 도면 아래에 붙는 Waypoint 표.
+///
+/// 도면 위에서는 Waypoint 를 끌어서 옮긴다. 눈으로 맞추는 일이라 1픽셀 아래로는
+/// 못 내려가고, 그 1픽셀이 실제로 몇 밀리미터인지 화면만 봐서는 모른다. 팔과
+/// 핑키가 부딪힌 자리도 그렇게 만들어졌다 — 도면에서는 떨어져 보였는데 미터로
+/// 재면 0.34m 였다.
+///
+/// 그래서 같은 값을 **숫자로** 고칠 자리를 둔다. 고치는 즉시 위 도면이 따라
+/// 움직인다. 여기 없는 값은 그 Waypoint 에 없는 값이다.
+class _WaypointTable extends StatelessWidget {
+  const _WaypointTable({
+    required this.rows,
+    required this.robots,
+    required this.hasScale,
+    required this.expanded,
+    required this.onToggle,
+    required this.onName,
+    required this.onCategory,
+    required this.onHeading,
+    required this.onMeters,
+    required this.onPixels,
+    required this.onRobot,
+    required this.onDelete,
+    required this.issueMessage,
   });
 
-  final Offset point;
+  final List<WaypointRow> rows;
+
+  /// 등록된 로봇 전부. 자리마다 세울 수 있는 것만 골라 보여 준다.
+  final List<WaypointRobotBinding> robots;
+
+  /// 축척을 재었는가. 안 재었으면 미터 칸을 잠근다 — 모르는 값을 0 으로 적으면
+  /// 사람이 그것을 믿는다.
+  final bool hasScale;
+
+  final bool expanded;
+  final VoidCallback onToggle;
+  final void Function(Offset point, String name) onName;
+  final void Function(Offset point, String category) onCategory;
+  final void Function(Offset point, double? degrees) onHeading;
+  final _WaypointCoordinateEdit onMeters;
+  final _WaypointCoordinateEdit onPixels;
+  final void Function(Offset point, String? robotId) onRobot;
+  final void Function(Offset point) onDelete;
+  final String Function(WaypointMoveIssue issue) issueMessage;
+
+  static const double _indexWidth = 40;
+  static const double _nameWidth = 148;
+  static const double _categoryWidth = 116;
+  static const double _numberWidth = 96;
+  static const double _headingWidth = 108;
+  static const double _propertiesWidth = 226;
+  static const double _robotWidth = 196;
+  static const double _laneWidth = 52;
+  static const double _deleteWidth = 48;
+
+  static const double _tableWidth =
+      _indexWidth +
+      _nameWidth +
+      _categoryWidth +
+      _numberWidth * 4 +
+      _headingWidth +
+      _propertiesWidth +
+      _robotWidth +
+      _laneWidth +
+      _deleteWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final missingNames = rows.where((row) => row.isMissingName).length;
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: BorderRadius.circular(14),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 12, 14),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.table_rows_outlined,
+                    size: 19,
+                    color: Color(0xFF2563EB),
+                  ),
+                  const SizedBox(width: 10),
+                  const Text(
+                    'Waypoint 좌표표',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1E293B),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${rows.length}개',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                  if (missingNames > 0) ...[
+                    const SizedBox(width: 10),
+                    _WaypointTableChip(
+                      text: '이름 없음 $missingNames개',
+                      color: const Color(0xFFB91C1C),
+                      background: const Color(0xFFFEE2E2),
+                    ),
+                  ],
+                  if (!hasScale) ...[
+                    const SizedBox(width: 8),
+                    _WaypointTableChip(
+                      text: '축척 미측정 · 미터 잠김',
+                      color: const Color(0xFF92400E),
+                      background: const Color(0xFFFEF3C7),
+                    ),
+                  ],
+                  const Spacer(),
+                  Icon(
+                    expanded ? Icons.expand_less : Icons.expand_more,
+                    color: const Color(0xFF64748B),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expanded) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 12, 18, 4),
+              child: Text(
+                hasScale
+                    ? '숫자를 고치면 위 도면이 바로 따라 움직입니다. 미터는 RMF 월드 좌표(도면 '
+                          '왼쪽 위가 원점 · 건물 안은 y 가 음수)이고, 배포 산출물과 로봇 spawn 이 '
+                          '쓰는 그 값입니다.'
+                    : '거리를 아직 안 재어 미터로는 못 고칩니다. 도면에서 거리를 먼저 재세요 — '
+                          '픽셀만으로는 이 자리가 실제로 몇 미터인지 알 수 없습니다.',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF64748B),
+                  height: 1.5,
+                ),
+              ),
+            ),
+            if (rows.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 10, 18, 20),
+                child: Text(
+                  '아직 Waypoint 가 없습니다. 도면에서 Waypoint 를 먼저 찍으세요.',
+                  style: TextStyle(color: Color(0xFF94A3B8)),
+                ),
+              )
+            else
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
+                child: SizedBox(
+                  width: _tableWidth,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _header(),
+                      const Divider(height: 12),
+                      for (final row in rows)
+                        _WaypointTableRow(
+                          // 좌표가 아니라 자리로 가린다. Waypoint 는 좌표가
+                          // 곧 열쇠라, 숫자를 고치는 순간 열쇠가 바뀐다 —
+                          // 좌표로 가리면 입력하던 칸이 그때 초기화된다.
+                          key: ValueKey(row.index),
+                          row: row,
+                          robots: robots,
+                          hasScale: hasScale,
+                          onName: onName,
+                          onCategory: onCategory,
+                          onHeading: onHeading,
+                          onMeters: onMeters,
+                          onPixels: onPixels,
+                          onRobot: onRobot,
+                          onDelete: onDelete,
+                          issueMessage: issueMessage,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _header() {
+    Widget cell(double width, String label, {TextAlign? align}) => SizedBox(
+      width: width,
+      child: Text(
+        label,
+        textAlign: align,
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF64748B),
+        ),
+      ),
+    );
+    return Row(
+      children: [
+        cell(_indexWidth, '#'),
+        cell(_nameWidth, '이름'),
+        cell(_categoryWidth, '카테고리'),
+        cell(_numberWidth, 'X [m]'),
+        cell(_numberWidth, 'Y [m]'),
+        cell(_numberWidth, 'X [px]'),
+        cell(_numberWidth, 'Y [px]'),
+        cell(_headingWidth, '적재 방향 [도]'),
+        cell(_propertiesWidth, 'building.yaml 속성'),
+        cell(_robotWidth, '이 자리의 로봇'),
+        cell(_laneWidth, 'Lane'),
+        cell(_deleteWidth, ''),
+      ],
+    );
+  }
+}
+
+class _WaypointTableChip extends StatelessWidget {
+  const _WaypointTableChip({
+    required this.text,
+    required this.color,
+    required this.background,
+  });
+
+  final String text;
+  final Color color;
+  final Color background;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration: BoxDecoration(
+      color: background,
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: color),
+    ),
+  );
+}
+
+/// 표 한 줄. 입력칸을 들고 있으므로 StatefulWidget 이다.
+///
+/// 칸에 친 값은 **칸을 떠날 때** 들어간다. 글자를 칠 때마다 반영하면 `1.` 을
+/// 치는 순간 좌표가 1m 로 튀고, 그때 다른 Waypoint 와 겹친다는 이유로 되돌려져
+/// 나머지를 칠 수 없다.
+class _WaypointTableRow extends StatefulWidget {
+  const _WaypointTableRow({
+    super.key,
+    required this.row,
+    required this.robots,
+    required this.hasScale,
+    required this.onName,
+    required this.onCategory,
+    required this.onHeading,
+    required this.onMeters,
+    required this.onPixels,
+    required this.onRobot,
+    required this.onDelete,
+    required this.issueMessage,
+  });
+
+  final WaypointRow row;
+  final List<WaypointRobotBinding> robots;
+  final bool hasScale;
+  final void Function(Offset point, String name) onName;
+  final void Function(Offset point, String category) onCategory;
+  final void Function(Offset point, double? degrees) onHeading;
+  final _WaypointCoordinateEdit onMeters;
+  final _WaypointCoordinateEdit onPixels;
+  final void Function(Offset point, String? robotId) onRobot;
+  final void Function(Offset point) onDelete;
+  final String Function(WaypointMoveIssue issue) issueMessage;
+
+  @override
+  State<_WaypointTableRow> createState() => _WaypointTableRowState();
+}
+
+class _WaypointTableRowState extends State<_WaypointTableRow> {
+  late final TextEditingController _name;
+  late final TextEditingController _xMeters;
+  late final TextEditingController _yMeters;
+  late final TextEditingController _xPixels;
+  late final TextEditingController _yPixels;
+  late final TextEditingController _heading;
+  late final List<({FocusNode node, VoidCallback commit})> _fields;
+  String? _error;
+
+  static String _meters(double value) => value.toStringAsFixed(3);
+  static String _pixels(double value) => value.toStringAsFixed(3);
+
+  String get _xMetersText =>
+      widget.row.world == null ? '' : _meters(widget.row.world!.x);
+  String get _yMetersText =>
+      widget.row.world == null ? '' : _meters(widget.row.world!.y);
+  String get _headingText => widget.row.dockHeadingDegrees == null
+      ? ''
+      : _ControlDashboardState._degreesText(widget.row.dockHeadingDegrees!);
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.row.name);
+    _xMeters = TextEditingController(text: _xMetersText);
+    _yMeters = TextEditingController(text: _yMetersText);
+    _xPixels = TextEditingController(text: _pixels(widget.row.point.dx));
+    _yPixels = TextEditingController(text: _pixels(widget.row.point.dy));
+    _heading = TextEditingController(text: _headingText);
+    _fields = [
+      (node: FocusNode(), commit: _commitName),
+      (node: FocusNode(), commit: _commitXMeters),
+      (node: FocusNode(), commit: _commitYMeters),
+      (node: FocusNode(), commit: _commitXPixels),
+      (node: FocusNode(), commit: _commitYPixels),
+      (node: FocusNode(), commit: _commitHeading),
+    ];
+    for (final field in _fields) {
+      field.node.addListener(() {
+        if (!field.node.hasFocus) field.commit();
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(_WaypointTableRow old) {
+    super.didUpdateWidget(old);
+    // 도면에서 끌어 옮겼거나 되돌리기를 눌렀을 때 칸도 따라 바뀌어야 한다.
+    // 다만 지금 치고 있는 칸은 건드리지 않는다 — 커서가 튄다.
+    _sync(_name, _fields[0].node, widget.row.name);
+    _sync(_xMeters, _fields[1].node, _xMetersText);
+    _sync(_yMeters, _fields[2].node, _yMetersText);
+    _sync(_xPixels, _fields[3].node, _pixels(widget.row.point.dx));
+    _sync(_yPixels, _fields[4].node, _pixels(widget.row.point.dy));
+    _sync(_heading, _fields[5].node, _headingText);
+  }
+
+  void _sync(TextEditingController controller, FocusNode node, String text) {
+    if (node.hasFocus || controller.text == text) return;
+    controller.text = text;
+  }
+
+  @override
+  void dispose() {
+    for (final field in _fields) {
+      field.node.dispose();
+    }
+    _name.dispose();
+    _xMeters.dispose();
+    _yMeters.dispose();
+    _xPixels.dispose();
+    _yPixels.dispose();
+    _heading.dispose();
+    super.dispose();
+  }
+
+  void _commitName() {
+    if (_name.text.trim() == widget.row.name) return;
+    setState(() => _error = null);
+    widget.onName(widget.row.point, _name.text);
+  }
+
+  /// 숫자 칸 하나를 넣는다. 못 읽는 글자면 되돌리고 이유를 남긴다.
+  void _commitNumber(
+    TextEditingController controller,
+    String current, {
+    required bool allowEmpty,
+    required void Function(double? value) apply,
+  }) {
+    if (controller.text.trim() == current.trim()) return;
+    final read = readNumberField(controller.text);
+    if (read.empty) {
+      if (!allowEmpty) {
+        setState(() => _error = '빈 칸으로 둘 수 없습니다.');
+        controller.text = current;
+        return;
+      }
+      setState(() => _error = null);
+      apply(null);
+      return;
+    }
+    final value = read.value;
+    if (value == null || !value.isFinite) {
+      setState(() => _error = '`${controller.text.trim()}` 는 숫자가 아닙니다.');
+      controller.text = current;
+      return;
+    }
+    setState(() => _error = null);
+    apply(value);
+  }
+
+  void _applyMove(
+    WaypointMoveIssue? issue,
+    TextEditingController controller,
+    String current,
+  ) {
+    if (issue == null) return;
+    // 못 옮긴 값을 칸에 남겨 두면 표와 도면이 서로 다른 말을 한다.
+    controller.text = current;
+    setState(() => _error = widget.issueMessage(issue));
+  }
+
+  void _commitXMeters() => _commitNumber(
+    _xMeters,
+    _xMetersText,
+    allowEmpty: false,
+    apply: (value) => _applyMove(
+      widget.onMeters(widget.row.point, x: value),
+      _xMeters,
+      _xMetersText,
+    ),
+  );
+
+  void _commitYMeters() => _commitNumber(
+    _yMeters,
+    _yMetersText,
+    allowEmpty: false,
+    apply: (value) => _applyMove(
+      widget.onMeters(widget.row.point, y: value),
+      _yMeters,
+      _yMetersText,
+    ),
+  );
+
+  void _commitXPixels() => _commitNumber(
+    _xPixels,
+    _pixels(widget.row.point.dx),
+    allowEmpty: false,
+    apply: (value) => _applyMove(
+      widget.onPixels(widget.row.point, x: value),
+      _xPixels,
+      _pixels(widget.row.point.dx),
+    ),
+  );
+
+  void _commitYPixels() => _commitNumber(
+    _yPixels,
+    _pixels(widget.row.point.dy),
+    allowEmpty: false,
+    apply: (value) => _applyMove(
+      widget.onPixels(widget.row.point, y: value),
+      _yPixels,
+      _pixels(widget.row.point.dy),
+    ),
+  );
+
+  void _commitHeading() => _commitNumber(
+    _heading,
+    _headingText,
+    allowEmpty: true,
+    apply: (value) => widget.onHeading(widget.row.point, value),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final row = widget.row;
+    final usesHeading = waypointUsesDockHeading(row.category);
+    final drift = row.spawnDriftMeters;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: _WaypointTable._indexWidth,
+                child: Text(
+                  '${row.index + 1}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF94A3B8),
+                  ),
+                ),
+              ),
+              _field(
+                width: _WaypointTable._nameWidth,
+                controller: _name,
+                focusNode: _fields[0].node,
+                onSubmitted: _commitName,
+                error: row.isMissingName,
+                hint: row.category == '대기' ? '(없어도 됨)' : '이름 필요',
+              ),
+              SizedBox(
+                width: _WaypointTable._categoryWidth,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: waypointCategories.contains(row.category)
+                        ? row.category
+                        : null,
+                    isDense: true,
+                    decoration: _decoration(hint: '미지정'),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF1E293B),
+                    ),
+                    items: [
+                      for (final category in waypointCategories)
+                        DropdownMenuItem(
+                          value: category,
+                          child: Text(category),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) widget.onCategory(row.point, value);
+                    },
+                  ),
+                ),
+              ),
+              _field(
+                width: _WaypointTable._numberWidth,
+                controller: _xMeters,
+                focusNode: _fields[1].node,
+                onSubmitted: _commitXMeters,
+                enabled: widget.hasScale,
+                numeric: true,
+              ),
+              _field(
+                width: _WaypointTable._numberWidth,
+                controller: _yMeters,
+                focusNode: _fields[2].node,
+                onSubmitted: _commitYMeters,
+                enabled: widget.hasScale,
+                numeric: true,
+              ),
+              _field(
+                width: _WaypointTable._numberWidth,
+                controller: _xPixels,
+                focusNode: _fields[3].node,
+                onSubmitted: _commitXPixels,
+                numeric: true,
+              ),
+              _field(
+                width: _WaypointTable._numberWidth,
+                controller: _yPixels,
+                focusNode: _fields[4].node,
+                onSubmitted: _commitYPixels,
+                numeric: true,
+              ),
+              _field(
+                width: _WaypointTable._headingWidth,
+                controller: _heading,
+                focusNode: _fields[5].node,
+                onSubmitted: _commitHeading,
+                enabled: usesHeading,
+                numeric: true,
+                hint: usesHeading ? '안 정함' : '해당 없음',
+              ),
+              SizedBox(
+                width: _WaypointTable._propertiesWidth,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: row.properties.isEmpty
+                      ? const Text(
+                          '—',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFFCBD5E1),
+                          ),
+                        )
+                      : SelectableText(
+                          row.properties.join('\n'),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            height: 1.45,
+                            color: Color(0xFF475569),
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                ),
+              ),
+              SizedBox(
+                width: _WaypointTable._robotWidth,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: _robotCell(row, drift),
+                ),
+              ),
+              SizedBox(
+                width: _WaypointTable._laneWidth,
+                child: Text(
+                  '${row.laneCount}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: _WaypointTable._deleteWidth,
+                child: IconButton(
+                  onPressed: () => widget.onDelete(row.point),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  color: const Color(0xFFDC2626),
+                  tooltip: 'Waypoint 삭제',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_error != null)
+            Padding(
+              padding: EdgeInsets.only(
+                left: _WaypointTable._indexWidth,
+                top: 2,
+              ),
+              child: SelectableText(
+                _error!,
+                style: const TextStyle(fontSize: 11, color: Color(0xFFB91C1C)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 이 자리에 설 로봇을 고르는 칸.
+  ///
+  /// 이동 로봇은 충전 자리에, 설치 로봇은 설비 자리에만 선다. 아무 자리에나
+  /// 묶을 수 있게 두면 핑키의 충전 자리가 통행로 한가운데로 잡힌다.
+  Widget _robotCell(WaypointRow row, double? drift) {
+    const muted = TextStyle(fontSize: 11, color: Color(0xFF94A3B8));
+    final wantsMobile = waypointRobotIsMobile(row.category);
+    if (wantsMobile == null) {
+      return const Text('로봇이 서는 자리가 아닙니다', style: muted);
+    }
+    if (row.name.isEmpty) {
+      // 등록은 자리를 이름으로 가리킨다. 이름이 없으면 묶을 것이 없다.
+      return const Text('이름을 먼저 정하세요', style: muted);
+    }
+    final candidates = [
+      for (final robot in widget.robots)
+        if (robot.isMobile == wantsMobile) robot,
+    ];
+    final current = row.robots.isEmpty ? null : row.robots.first.robotId;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (candidates.isEmpty)
+          Text('등록된 ${wantsMobile ? '이동' : '설치'} 로봇이 없습니다', style: muted)
+        else
+          DropdownButtonFormField<String?>(
+            initialValue: candidates.any((robot) => robot.robotId == current)
+                ? current
+                : null,
+            isDense: true,
+            isExpanded: true,
+            decoration: _decoration(hint: '비어 있음'),
+            style: const TextStyle(fontSize: 12, color: Color(0xFF1E293B)),
+            items: [
+              const DropdownMenuItem<String?>(child: Text('비어 있음')),
+              for (final robot in candidates)
+                DropdownMenuItem<String?>(
+                  value: robot.robotId,
+                  child: Text(
+                    '${robot.robotId} · ${robot.displayName}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+            onChanged: (value) => widget.onRobot(row.point, value),
+          ),
+        // 자리를 옮겨도 등록의 좌표는 따라오지 않는다. 배포에 나가는 것은
+        // 좌표라서, 어긋난 채로 배포하면 팔만 옛 자리에 선다.
+        if (drift != null && drift > .005)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(
+              '등록 자리가 ${drift.toStringAsFixed(2)}m 어긋남',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFFB45309),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  InputDecoration _decoration({String? hint, bool error = false}) =>
+      InputDecoration(
+        isDense: true,
+        hintText: hint,
+        hintStyle: const TextStyle(fontSize: 12, color: Color(0xFFCBD5E1)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        border: const OutlineInputBorder(),
+        enabledBorder: OutlineInputBorder(
+          borderSide: BorderSide(
+            color: error ? const Color(0xFFDC2626) : const Color(0xFFE2E8F0),
+          ),
+        ),
+      );
+
+  Widget _field({
+    required double width,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required VoidCallback onSubmitted,
+    bool enabled = true,
+    bool numeric = false,
+    bool error = false,
+    String? hint,
+  }) => SizedBox(
+    width: width,
+    child: Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: TextField(
+        controller: controller,
+        focusNode: focusNode,
+        enabled: enabled,
+        onSubmitted: (_) => onSubmitted(),
+        keyboardType: numeric
+            ? const TextInputType.numberWithOptions(decimal: true, signed: true)
+            : TextInputType.text,
+        style: const TextStyle(fontSize: 13, color: Color(0xFF1E293B)),
+        decoration: _decoration(hint: hint, error: error),
+      ),
+    ),
+  );
+}
+
+/// Waypoint 를 찍으려고 마우스를 올렸을 때 뜨는 딱지.
+///
+/// 맨 윗줄은 **RMF 월드 좌표(m)** 다. 여기서 본 값이 그대로 `nav_graphs/0.yaml`
+/// 과 `robot.yaml` 의 `spawn_x/spawn_y` 에 들어가므로, 찍기 전에 그 자리가 어디인지
+/// 미리 확인할 수 있어야 한다.
+///
+/// 예전에는 **바닥 왼쪽 아래 기준**으로 잰 값을 보여 줬다. `m` 라고 적혀 있어서
+/// nav graph 의 미터와 같은 줄 알기 쉬웠는데 원점이 달라 전혀 다른 자리였다.
+/// 충전2 는 여기서 `X 1.55 · Y 1.97` 로 보였지만 실제 값은 `1.613, −1.088` 이다.
+///
+/// 아래 두 줄(벽까지 거리)은 그대로 둔다. 그것은 좌표가 아니라 **잰 길이**라
+/// 원점이 없다. Waypoint 를 벽에서 얼마나 띄울지 볼 때 쓰는 값이다.
+class _WaypointCoordinateBadge extends StatelessWidget {
+  const _WaypointCoordinateBadge({
+    required this.imagePoint,
+    required this.span,
+    required this.metersPerPixel,
+  });
+
+  /// 도면 픽셀. RMF 좌표로 옮겨서 보여 준다.
   final Offset imagePoint;
   final ({double left, double right, double top, double bottom}) span;
+  final double? metersPerPixel;
+
+  /// 맨 윗줄. 축척이 없으면 미터인 척하지 않고 픽셀이라고 밝힌다.
+  String get _coordinate {
+    final scale = metersPerPixel;
+    if (scale == null || !scale.isFinite || scale <= 0) {
+      return 'X ${imagePoint.dx.toStringAsFixed(0)}  ·  '
+          'Y ${imagePoint.dy.toStringAsFixed(0)} px  · 축척을 재야 미터로 보입니다';
+    }
+    final world = rmfWorldFromPixel(imagePoint.dx, imagePoint.dy, scale);
+    return 'X ${world.x.toStringAsFixed(3)}  ·  '
+        'Y ${world.y.toStringAsFixed(3)} m';
+  }
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
@@ -21583,7 +23934,7 @@ class _WaypointCoordinateBadge extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'X ${point.dx.toStringAsFixed(1)}  ·  Y ${point.dy.toStringAsFixed(1)}',
+            _coordinate,
             style: const TextStyle(
               color: Color(0xFF0F172A),
               fontSize: 12,
@@ -21592,7 +23943,7 @@ class _WaypointCoordinateBadge extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            '← 왼쪽 ${(imagePoint.dx - span.left).toStringAsFixed(1)}   오른쪽 ${(span.right - imagePoint.dx).toStringAsFixed(1)} →',
+            '← 왼쪽 ${formatMapDistance(imagePoint.dx - span.left, metersPerPixel)}   오른쪽 ${formatMapDistance(span.right - imagePoint.dx, metersPerPixel)} →',
             style: const TextStyle(
               color: Color(0xFF9A3412),
               fontSize: 11,
@@ -21601,7 +23952,7 @@ class _WaypointCoordinateBadge extends StatelessWidget {
           ),
           const SizedBox(height: 3),
           Text(
-            '↑ 위 ${(imagePoint.dy - span.top).toStringAsFixed(1)}   아래 ${(span.bottom - imagePoint.dy).toStringAsFixed(1)} ↓',
+            '↑ 위 ${formatMapDistance(imagePoint.dy - span.top, metersPerPixel)}   아래 ${formatMapDistance(span.bottom - imagePoint.dy, metersPerPixel)} ↓',
             style: const TextStyle(
               color: Color(0xFF9A3412),
               fontSize: 11,
@@ -21663,12 +24014,14 @@ class _WaypointWallDistancePainter extends CustomPainter {
     required this.span,
     required this.sourceSize,
     required this.waypoints,
+    required this.metersPerPixel,
   });
 
   final Offset point;
   final ({double left, double right, double top, double bottom}) span;
   final Size sourceSize;
   final List<Offset> waypoints;
+  final double? metersPerPixel;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -21742,14 +24095,14 @@ class _WaypointWallDistancePainter extends CustomPainter {
       if ((center - left).distance > 14) {
         arrow(left, center);
         label(
-          '좌 ${(point.dx - span.left).toStringAsFixed(1)}',
+          '좌 ${formatMapDistance(point.dx - span.left, metersPerPixel)}',
           Offset((left.dx + center.dx) / 2, center.dy - 12),
         );
       }
       if ((right - center).distance > 14) {
         arrow(center, right);
         label(
-          '우 ${(span.right - point.dx).toStringAsFixed(1)}',
+          '우 ${formatMapDistance(span.right - point.dx, metersPerPixel)}',
           Offset((center.dx + right.dx) / 2, center.dy - 12),
         );
       }
@@ -21768,7 +24121,7 @@ class _WaypointWallDistancePainter extends CustomPainter {
         if ((screenEnd - screenStart).distance <= 14) continue;
         arrow(screenStart, screenEnd);
         label(
-          '길이 ${(stops[i + 1] - stops[i]).toStringAsFixed(1)}',
+          '길이 ${formatMapDistance(stops[i + 1] - stops[i], metersPerPixel)}',
           Offset((screenStart.dx + screenEnd.dx) / 2, center.dy - 12),
         );
       }
@@ -21778,14 +24131,14 @@ class _WaypointWallDistancePainter extends CustomPainter {
       if ((center - top).distance > 14) {
         arrow(top, center);
         label(
-          '위 ${(point.dy - span.top).toStringAsFixed(1)}',
+          '위 ${formatMapDistance(point.dy - span.top, metersPerPixel)}',
           Offset(center.dx + 30, (top.dy + center.dy) / 2),
         );
       }
       if ((bottom - center).distance > 14) {
         arrow(center, bottom);
         label(
-          '아래 ${(span.bottom - point.dy).toStringAsFixed(1)}',
+          '아래 ${formatMapDistance(span.bottom - point.dy, metersPerPixel)}',
           Offset(center.dx + 34, (center.dy + bottom.dy) / 2),
         );
       }
@@ -21804,7 +24157,7 @@ class _WaypointWallDistancePainter extends CustomPainter {
         if ((screenEnd - screenStart).distance <= 14) continue;
         arrow(screenStart, screenEnd);
         label(
-          '길이 ${(stops[i + 1] - stops[i]).toStringAsFixed(1)}',
+          '길이 ${formatMapDistance(stops[i + 1] - stops[i], metersPerPixel)}',
           Offset(center.dx + 38, (screenStart.dy + screenEnd.dy) / 2),
         );
       }
@@ -21833,7 +24186,8 @@ class _WaypointWallDistancePainter extends CustomPainter {
       oldDelegate.point != point ||
       oldDelegate.span != span ||
       oldDelegate.sourceSize != sourceSize ||
-      oldDelegate.waypoints != waypoints;
+      oldDelegate.waypoints != waypoints ||
+      oldDelegate.metersPerPixel != metersPerPixel;
 }
 
 class _MeasurementModeBadge extends StatelessWidget {
@@ -25128,7 +27482,6 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.tasksOf,
     required this.telemetry,
     required this.sensorsOf,
-    required this.toFloor,
     required this.metersPerPixel,
     required this.waypointLabel,
     required this.mapDirectory,
@@ -25136,6 +27489,8 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.backendRunning,
     required this.onStartBackend,
     required this.onResubscribe,
+    required this.policiesOf,
+    required this.onManagePolicies,
   });
 
   final String robotId;
@@ -25153,7 +27508,6 @@ class _RobotDetailDialog extends StatefulWidget {
   /// 이 로봇의 라이다·카메라. relay 노드가 파일로 내려 준 것을 읽는다.
   final RobotSensors Function() sensorsOf;
 
-  final Offset Function(Offset point) toFloor;
   final double? metersPerPixel;
   final String Function(Offset point) waypointLabel;
 
@@ -25171,6 +27525,12 @@ class _RobotDetailDialog extends StatefulWidget {
 
   /// 앱이 이 로봇의 토픽을 다시 구독하게 한다.
   final Future<void> Function() onResubscribe;
+
+  /// 이 로봇에 붙은 Policy. 설비 로봇(WorkCell)에만 쓴다.
+  final List<WorkcellPolicy> Function() policiesOf;
+
+  /// Policy 를 붙이고 떼는 창을 연다.
+  final Future<void> Function() onManagePolicies;
 
   @override
   State<_RobotDetailDialog> createState() => _RobotDetailDialogState();
@@ -25353,15 +27713,19 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     RobotDataSource.real: Color(0xFF15803D),
   };
 
+  /// RMF 월드 좌표(m). nav graph·robot.yaml·Gazebo·RViz 가 쓰는 그 값이다.
+  ///
+  /// 예전에는 바닥 왼쪽 아래 기준 **픽셀**과 그 픽셀에 축척만 곱한 값을 나란히
+  /// 보여 줬다. 뒤엣것이 `m` 라고 적혀 있어서 nav graph 의 미터와 같은 값인 줄
+  /// 알기 쉬웠는데, 원점이 달라 전혀 다른 자리였다.
   String _point(Offset point) {
-    final floor = widget.toFloor(point);
-    final pixels =
-        'X ${floor.dx.toStringAsFixed(1)} · Y ${floor.dy.toStringAsFixed(1)} px';
     final scale = widget.metersPerPixel;
-    if (scale == null || scale <= 0) return pixels;
-    return '$pixels  ('
-        '${(floor.dx * scale).toStringAsFixed(2)} · '
-        '${(floor.dy * scale).toStringAsFixed(2)} m)';
+    if (scale == null || scale <= 0) {
+      return 'X ${point.dx.toStringAsFixed(0)} · Y ${point.dy.toStringAsFixed(0)} px'
+          ' · 축척을 재야 미터로 보입니다';
+    }
+    final world = rmfWorldFromPixel(point.dx, point.dy, scale);
+    return 'X ${world.x.toStringAsFixed(3)} · Y ${world.y.toStringAsFixed(3)} m';
   }
 
   Widget _row(String label, String value, {Color? color}) => Padding(
@@ -25779,6 +28143,33 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     ),
   );
 
+  /// 이 설비가 할 수 있는 일. 붙은 policy 가 곧 그것이다.
+  ///
+  /// 이동 로봇에는 없는 칸이다. Policy 는 로봇팔이 무엇을 어떻게 집는지 학습해
+  /// 둔 것이라 설비 로봇에만 붙는다.
+  List<Widget> _policySection() {
+    final policies = widget.policiesOf();
+    return [
+      _heading('Policy'),
+      if (policies.isEmpty)
+        _row('붙은 Policy', '없음 — 아래에서 붙이면 작업의 픽업 단계에서 고를 수 있습니다.')
+      else
+        for (final policy in policies)
+          _row(
+            policy.id,
+            policy.objectType.isEmpty ? '물품 미지정' : '물품 ${policy.objectType}',
+          ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 2),
+        child: OutlinedButton.icon(
+          onPressed: () => unawaited(widget.onManagePolicies()),
+          icon: const Icon(Icons.model_training_outlined, size: 18),
+          label: const Text('Policy 붙이기·떼기'),
+        ),
+      ),
+    ];
+  }
+
   /// 화면에 뿌리는 것과 같은 내용을 글로 만든다.
   String _asText() {
     final robot = widget.robotOf();
@@ -25798,6 +28189,8 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
         '${registered.isMobile ? '충전' : '설비'} 자리 '
             '${registered.chargerWaypoint ?? '미지정'}',
         if (registered.isMobile) '구획 ${registered.zones.join(', ')}',
+        if (!registered.isMobile)
+          'Policy ${widget.policiesOf().isEmpty ? '없음' : [for (final policy in widget.policiesOf()) policy.id].join(', ')}',
       ] else
         '등록되지 않은 로봇입니다 (사람·휴머노이드).',
       '',
@@ -25884,6 +28277,8 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                 ),
                 _row('Gazebo', registered.runsInGazebo ? '올라감' : '올리지 않음'),
               ],
+              if (registered != null && !registered.isMobile)
+                ..._policySection(),
               _heading('지금 상태'),
               if (robot == null)
                 _row('배치', '지도에 배치되지 않았습니다.')

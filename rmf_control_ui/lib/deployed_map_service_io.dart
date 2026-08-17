@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'deployed_map_models.dart';
+import 'rmf_config_export_io.dart' show safeMapDirectoryName;
 
 Directory? _findProjectRoot() {
   final configured = Platform.environment['RMF_ROOT'];
@@ -26,6 +27,29 @@ String _value(String yaml, String key, {String fallback = ''}) {
     multiLine: true,
   ).firstMatch(yaml);
   return match?.group(1)?.trim() ?? fallback;
+}
+
+/// [mapName] 의 배포 산출물이 디스크에 있는가.
+///
+/// **배포 여부는 디스크의 사실이지 앱의 기억이 아니다.** 앱은 배포에 성공한
+/// 순간을 `_isDeployed` 로 들고 있는데, 그것은 이 세션에서 방금 배포했다는
+/// 뜻일 뿐이다. 앱을 다시 켜거나, 배포가 실제로는 다 됐는데 확인 단계에서
+/// 실패로 끝나거나, 맵과 상관없는 편집 하나로도 그 기억은 사라진다. 그때마다
+/// 멀쩡히 배포된 맵을 두고 `먼저 맵을 배포하세요` 가 뜬다.
+///
+/// 배포가 만드는 것 둘만 본다 — 건물 맵과 주행 그래프. RMF 가 읽는 것이
+/// 그 둘이고, 나머지(실행 스크립트·로봇 디렉터리)는 내보내기가 만드는 것이라
+/// 여기서 볼 것이 아니다.
+///
+/// 목록을 훑지 않고 경로를 곧바로 본다. 새 작업을 누를 때마다 `rmf_maps` 를
+/// 통째로 훑으면 메시와 텍스처까지 다 걸어야 한다.
+bool deployedMapExists(String mapName) {
+  if (mapName.trim().isEmpty) return false;
+  final root = _findProjectRoot();
+  if (root == null) return false;
+  final directory = '${root.path}/rmf_maps/${safeMapDirectoryName(mapName)}';
+  return File('$directory/$mapName.building.yaml').existsSync() &&
+      File('$directory/nav_graphs/0.yaml').existsSync();
 }
 
 Future<List<DeployedMapSummary>> listDeployedMaps() async {
@@ -131,6 +155,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     final waypoints = <Offset>[];
     final names = <Offset, String>{};
     final categories = <Offset, String>{};
+    final dockHeadings = <Offset, double>{};
     for (final value in data['waypoints'] as List<dynamic>) {
       final waypoint = value as Map<String, dynamic>;
       final point = decodePoint(waypoint['point']);
@@ -138,6 +163,10 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
       names[point] = waypoint['name'] as String? ?? '';
       final category = (waypoint['category'] as String? ?? '').trim();
       if (category.isNotEmpty) categories[point] = category;
+      // 이 자리에서 로봇이 볼 방향. 없는 프로젝트가 대부분이라 없으면 넘어간다.
+      if (waypoint['dockHeading'] case final num heading) {
+        dockHeadings[point] = heading.toDouble();
+      }
     }
     return DeployedMapData(
       summary: summary,
@@ -151,6 +180,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
       waypoints: waypoints,
       waypointNames: names,
       waypointCategories: categories,
+      waypointDockHeadings: dockHeadings,
       laneDirections: directions,
     );
   }
@@ -172,6 +202,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
   final vertices = <Offset>[];
   final names = <int, String>{};
   final equipmentIndices = <int>{};
+  final dockHeadingByIndex = <int, double>{};
   var inVertices = false;
   for (final line in const LineSplitter().convert(yaml)) {
     if (line.startsWith('    vertices:')) {
@@ -191,6 +222,16 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     names[index] = match.group(3)!;
     if (line.contains('robosapiens_equipment: [4, true]')) {
       equipmentIndices.add(index);
+    }
+    // 이 자리에 설 방향. traffic_editor 형식이라 `[3, 값]` 으로 적힌다(3=실수).
+    // RMF 는 모르는 이름의 정점 속성을 그냥 지나치므로 넣어도 안전하다 —
+    // `parse_graph.cpp` 는 아는 이름만 골라 읽는다.
+    final heading = RegExp(
+      r'robosapiens_dock_heading:\s*\[\s*\d+\s*,\s*(-?[0-9.]+)\s*\]',
+    ).firstMatch(line);
+    if (heading != null) {
+      final degrees = double.tryParse(heading.group(1)!);
+      if (degrees != null) dockHeadingByIndex[index] = degrees;
     }
   }
 
@@ -233,10 +274,14 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     if (index < vertices.length) waypointSet.add(vertices[index]);
   }
   final waypointNames = <Offset, String>{};
+  final waypointDockHeadings = <Offset, double>{};
   for (var i = 0; i < vertices.length; i++) {
     final name = names[i]?.trim() ?? '';
     if (name.isNotEmpty && waypointSet.contains(vertices[i])) {
       waypointNames[vertices[i]] = name;
+    }
+    if (dockHeadingByIndex[i] case final degrees?) {
+      waypointDockHeadings[vertices[i]] = degrees;
     }
   }
   return DeployedMapData(
@@ -247,6 +292,7 @@ Future<DeployedMapData> loadDeployedMap(DeployedMapSummary summary) async {
     lanes: lanes,
     waypoints: waypointSet.toList(),
     waypointNames: waypointNames,
+    waypointDockHeadings: waypointDockHeadings,
     laneDirections: directions,
   );
 }

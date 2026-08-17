@@ -30,7 +30,6 @@ from sensor_msgs.msg import Image, LaserScan
 # (RMF 가 아는 이름, ROS 네임스페이스)
 ROBOTS = [
     ('pinky_01', 'pinky_01'),
-    ('pinky_02', 'pinky_02'),
 ]
 
 # 카메라를 줄여서 보낼 크기. 원본 그대로 두면 한 장에 2.7MB 라 디스크만 먹는다.
