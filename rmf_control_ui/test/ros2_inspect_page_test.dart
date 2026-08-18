@@ -30,7 +30,7 @@ void main() {
     // 사이드바에서 작업 → ROS2 확인 → 설정 파일 순서다.
     final files = tester.getTopLeft(find.text('설정 파일')).dy;
     final ros2 = tester.getTopLeft(find.text('ROS2 확인')).dy;
-    final tasks = tester.getTopLeft(find.text('작업').first).dy;
+    final tasks = tester.getTopLeft(find.text('작업 관리').first).dy;
     expect(tasks, lessThan(ros2));
     expect(ros2, lessThan(files));
   });

@@ -105,6 +105,20 @@ ReadinessReport buildReadinessReport({
   Nav2MapAlignment? alignment,
   // `/clock` 을 내는 곳의 수. null 이면 못 셌다.
   int? clockPublishers,
+  // 이 프로젝트가 시뮬레이터로 도는가.
+  //
+  // 시뮬레이터가 없으면 `/clock` 자체가 없다 — 실행 스크립트가 `use_sim_time` 을
+  // false 로 두고 모든 노드가 실제 시계를 쓴다. 그런 프로젝트에 시계 칸을 두면
+  // **영영 안 채워지는 칸**이 하나 남는다. 실물 Pinky 로 돌린 확인표가 그랬다:
+  //
+  //     (모름) 시뮬레이션 시계 — 백엔드가 떠야 확인할 수 있습니다
+  //
+  // 백엔드를 띄워도 그대로였고, 그러면 다 됐는지를 이 표로 알 수 없게 된다
+  // (`isReady` 는 모든 칸이 ready 여야 참이다).
+  //
+  // 기본값을 true 로 둔다 — 대부분의 프로젝트가 시뮬레이터를 쓰고, 모르는 채로
+  // 칸을 없애면 진짜 두 시계 문제를 놓친다.
+  bool usesSimulator = true,
   // Nav2 `map_server` 의 생명주기 상태(`active` 여야 지도가 나온다).
   // null 이면 못 물었다.
   String? mapServerState,
@@ -228,7 +242,11 @@ ReadinessReport buildReadinessReport({
   //      비운다(`Detected jump back in time`). AMCL 은 위치추정을 잃고 Nav2 는
   //      명령을 멈춘다 — 로봇은 멀쩡한데 가만히 서 있고, 원인이 한 시간 전에
   //      남은 프로세스라는 것은 어디에도 안 보인다.
-  if (!backendRunning || clockPublishers == null) {
+  //
+  //      시뮬레이터가 없으면 이 칸을 아예 두지 않는다. 볼 시계가 없다.
+  if (!usesSimulator) {
+    // 아무 칸도 넣지 않는다.
+  } else if (!backendRunning || clockPublishers == null) {
     checks.add(
       const ReadinessCheck(
         title: '시뮬레이션 시계',

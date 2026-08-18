@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,7 +34,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const RmfControlApp());
-    await tester.tap(find.text('로봇'));
+    await tester.tap(find.text('로봇 관리').first);
     await tester.pumpAndSettle();
   }
 
@@ -424,9 +425,9 @@ void main() {
       const expected = {
         '_menuDashboard': ('대시보드', '_MainDashboard'),
         '_menuGrid': ('그리드맵', '_GridMapPage'),
-        '_menuRobots': ('로봇', '_RobotManagementPage'),
+        '_menuRobots': ('로봇 관리', '_RobotManagementPage'),
         '_menuFiles': ('설정 파일', '_ProjectFilesPage'),
-        '_menuTasks': ('작업', '_TaskManagementPage'),
+        '_menuTasks': ('작업 관리', '_TaskManagementPage'),
         '_menuLog': ('로그 분석', '_ProjectLogPage'),
         '_menuAnalytics': ('운영 분석', '_OperationsAnalyticsPage'),
       };
@@ -440,7 +441,9 @@ void main() {
         final branch = source.indexOf('_selectedMenu == ${entry.key}');
         expect(branch, greaterThan(-1), reason: '${entry.key} 분기가 없다');
         expect(
-          source.substring(branch, branch + 90),
+          // 분기와 화면 이름 사이에 줄바꿈과 들여쓰기가 들어간다. 창이 좁으면
+          // 화면 이름이 가운데서 잘려, 멀쩡한 짝을 어긋났다고 한다.
+          source.substring(branch, math.min(branch + 220, source.length)),
           contains(entry.value.$2),
           reason: '${entry.key} 자리에 다른 화면이 붙었다',
         );

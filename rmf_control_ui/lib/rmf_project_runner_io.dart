@@ -340,8 +340,20 @@ Future<int?> _runningPgid(String mapName) async {
 /// [gazeboGui] 와 [rviz] 는 창을 띄울지 말지다. 실행 스크립트가 같은 이름의
 /// 환경 변수로 받는다. 기본은 둘 다 안 띄우는 것이다 — 창이 없어도 라이다·
 /// 카메라는 돌고, 창 두 개를 함께 띄우면 시뮬레이션이 눈에 띄게 느려진다.
+/// [rosDomainId] 를 반드시 넘긴다.
+///
+/// 실행 스크립트는 `${ROS_DOMAIN_ID:-<프로젝트 값>}` 으로 되어 있다. 터미널에서
+/// 한 번만 다른 망에 띄워 보는 길을 열어 두려고 그렇게 했는데, `Process.start`
+/// 는 부모 환경을 **물려준다.** 그래서 앱을 띄운 셸에 `export ROS_DOMAIN_ID=22`
+/// 가 있으면 그 22 가 프로젝트 값을 이긴다 — 도메인을 고치고 다시 배포해도
+/// 백엔드는 계속 22 에서 돌았고, 로봇은 52 에 있어 `/tf` 가 하나도 안 왔다.
+/// 화면에는 `frame does not exist` 로만 보인다.
+///
+/// 앱에서 띄울 때는 프로젝트가 정한 값이 authority 다. 여기서 못 박아 물려받은
+/// 값을 덮는다. 터미널에서 직접 돌릴 때의 덮어쓰기는 그대로 열려 있다.
 Future<RmfRunResult> startProject(
   String mapName, {
+  required int rosDomainId,
   SimulationBackend backend = SimulationBackend.gazebo,
   bool gazeboGui = false,
   bool rviz = false,
@@ -471,6 +483,8 @@ Future<RmfRunResult> startProject(
       // 터미널에서 직접 띄울 때와 같은 방법이라야 앱 밖에서도 재현되기
       // 때문이다.
       environment: {
+        // 물려받은 값을 덮는다. 안 덮으면 앱을 띄운 셸의 값이 이긴다.
+        'ROS_DOMAIN_ID': '$rosDomainId',
         'SIM_BACKEND': backend.storageValue,
         'GAZEBO_GUI': '$gazeboGui',
         'SIMULATOR_GUI': '$gazeboGui',

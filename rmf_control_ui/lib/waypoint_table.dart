@@ -39,6 +39,38 @@ const List<String> waypointCategories = [
 bool waypointUsesDockHeading(String? category) =>
     category == '픽업' || category == '드랍오프';
 
+/// 카테고리를 바꾸면서 정해 둔 적재 방향이 버려지는가. 안 버려지면 null.
+///
+/// 픽업·드랍오프가 아닌 자리에 각도를 남겨 두면, 나중에 다시 픽업으로 바꿨을
+/// 때 잊어버린 옛 각도가 되살아난다. 그래서 지우는 것이 맞다 — 다만 **말없이**
+/// 지우면 안 된다.
+///
+/// 실제로 픽업3 에 180 도를 넣었다고 기억하는데 저장된 프로젝트에도 배포된
+/// building.yaml 에도 각도가 없던 일이 있었다. 지울 때 아무 말이 없으니 사람은
+/// 넣은 줄로 남아 있고, 앱은 없는 상태로 간다. 여기서 무슨 값이 사라지는지
+/// 돌려주고, 부르는 쪽이 그것을 사람에게 보인다.
+String? dockHeadingDropMessage({
+  required String? previousCategory,
+  required String? newCategory,
+  required String waypointName,
+  required double? dockHeadingDegrees,
+}) {
+  if (dockHeadingDegrees == null) return null;
+  if (!waypointUsesDockHeading(previousCategory)) return null;
+  if (waypointUsesDockHeading(newCategory)) return null;
+  final name = waypointName.trim();
+  final where = name.isEmpty ? '이 자리' : name;
+  return '$where 의 적재 방향 '
+      '${_degreesLabel(dockHeadingDegrees)}도를 지웠습니다 — '
+      '$newCategory 자리는 방향을 안 씁니다.';
+}
+
+/// 각도를 사람이 읽을 글자로. 소수점 뒤가 0 이면 떼어 낸다.
+String _degreesLabel(double degrees) {
+  final text = degrees.toStringAsFixed(1);
+  return text.endsWith('.0') ? text.substring(0, text.length - 2) : text;
+}
+
 /// 이 자리에 세울 수 있는 로봇 종류. 로봇이 서는 자리가 아니면 null.
 ///
 /// 참이면 이동 로봇, 거짓이면 설치 로봇이다

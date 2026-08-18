@@ -11,7 +11,10 @@ import 'package:rmf_control_ui/main.dart';
 /// 네 단계 떨어져 있다. 그래서 맵 메뉴에서 따로 부를 수 있어야 한다.
 void main() {
   Future<void> openMapMenu(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1600, 1000);
+    // 화면을 길게 잡아 메뉴 전체를 한 번에 담는다. 맵 화면에는 스크롤 되는 것이
+    // 여럿이라 `scrollUntilVisible` 이 어느 것을 굴릴지 못 고른다
+    // (`waypoint_table_page_test.dart` 와 같은 이유다).
+    tester.view.physicalSize = const Size(1600, 4000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -25,9 +28,6 @@ void main() {
     await openMapMenu(tester);
 
     final tile = find.text('그리드맵 작성');
-    await tester.scrollUntilVisible(tile, 120);
-    await tester.pumpAndSettle();
-
     expect(tile, findsOneWidget);
     expect(
       find.textContaining('점유격자'),
@@ -40,9 +40,6 @@ void main() {
     // 배포 전체를 돌리지 않고 지도만 다시 만들 수 있어야 한다.
     await openMapMenu(tester);
 
-    await tester.scrollUntilVisible(find.text('그리드맵 작성'), 120);
-    await tester.pumpAndSettle();
-
     expect(find.text('그리드맵 작성'), findsOneWidget);
     expect(find.textContaining('배포'), findsWidgets);
   });
@@ -51,9 +48,6 @@ void main() {
     // 그리드맵은 도면의 바닥과 벽에서 만들어진다. 도면도 없이 누르게 두면
     // 빈 격자가 만들어지고, 그것을 들고 AMCL 이 아무 데도 못 잡는다.
     await openMapMenu(tester);
-
-    await tester.scrollUntilVisible(find.text('그리드맵 작성'), 120);
-    await tester.pumpAndSettle();
 
     final tile = tester.widget<InkWell>(
       find

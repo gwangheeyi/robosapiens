@@ -1,3 +1,30 @@
 Pinky를 namespace 를 이용하여 bringup 하기
 
 ros2 launch pinky_bringup bringup_robot.launch.xml namespace:=pinky_01
+
+핑키를 trihouse ssid 에 연결시키기 위해
+
+sudo nmcli device wifi connect "trihouse" password "trihouse" ifname wlan0
+
+이렇게 하면 pinky가 시작하면 먼저 trihouse ssid 에 연결한다.
+
+pinky_01,pinky_02 를 trihouse ssid 에 연결하고 내 컴도 trihouse ssid 에 연결하면 이제 namespace 로 
+핑키 2대를 통제할 수 있다
+
+linux ssid 검색
+sudo nmcli dev wifi list
+
+내 컴에서 무선인터넷 2개 연결하기
+
+1. FASTCAMPUS
+sudo nmcli device wifi connect "FASTCAMPUS_10F" ifname wlo1
+
+2. trihouse
+sudo nmcli device set wlx588694f485ac managed yes
+sudo nmcli device wifi connect "trihouse" password "trihouse" ifname wlx588694f485ac
+
+
+pinky2 namespace를 이용해서 브링업 하기
+
+ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml \
+  namespace:=pinky_02

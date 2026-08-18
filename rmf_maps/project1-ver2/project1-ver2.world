@@ -1,25 +1,14 @@
 <sdf version="1.7">
   <world name="sim_world">
-    <plugin filename="gz-sim-sensors-system"
-            name="gz::sim::systems::Sensors">
-      <render_engine>ogre2</render_engine>
-    </plugin>
-    <plugin filename="gz-sim-imu-system"
-            name="gz::sim::systems::Imu">
-    </plugin>
-
     <physics name="10ms" type="ode">
       <max_step_size>0.01</max_step_size>
       <real_time_factor>1.0</real_time_factor>
-      <dart>
-        <collision_detector>bullet</collision_detector>
-      </dart>
     </physics>
-    <plugin filename="libgz-sim-physics-system.so" name="gz::sim::systems::Physics">
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
     </plugin>
-    <plugin filename="libgz-sim-user-commands-system.so" name="gz::sim::systems::UserCommands">
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands">
     </plugin>
-    <plugin filename="libgz-sim-scene-broadcaster-system.so" name="gz::sim::systems::SceneBroadcaster">
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster">
     </plugin>
     <plugin filename="libdoor.so" name="door">
     </plugin>
@@ -255,9 +244,11 @@
       <uri>model://project1-ver2_L1</uri>
       <pose>0 0 0.0 0 0 0</pose>
     </include>
-    <rmf_charger_waypoints name="charger_waypoints">
-      <rmf_vertex name="&#52649;&#51204;1" x="1.611759136353792" y="-0.7171659662425742" level="L1" />
-      <rmf_vertex name="&#52649;&#51204;2" x="1.6132757861609355" y="-1.0877514220939253" level="L1" />
-    </rmf_charger_waypoints>
+    <plugin name="register_component" filename="libregister_component.so">
+      <component name="Chargers">
+        <rmf_charger name="&#52649;&#51204;1" x="1.611759136353792" y="-0.7171659662425742" z="0.0" />
+        <rmf_charger name="&#52649;&#51204;2" x="1.6132757861609355" y="-1.0877514220939253" z="0.0" />
+      </component>
+    </plugin>
   </world>
 </sdf>

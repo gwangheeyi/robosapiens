@@ -28,7 +28,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const RmfControlApp());
-    await tester.tap(find.text('로봇'));
+    await tester.tap(find.text('로봇 관리').first);
     await tester.pumpAndSettle();
   }
 
@@ -36,11 +36,11 @@ void main() {
     await openRobotMenu(tester);
     await registerRobot(tester);
 
-    await tester.tap(find.textContaining('PK_01 · 핑키 1호').first);
+    await tester.tap(find.textContaining('pinky_01 · PK-01').first);
     await tester.pumpAndSettle();
 
     // 제목이 그 로봇이다.
-    expect(find.text('PK_01 · 핑키 1호'), findsWidgets);
+    expect(find.text('pinky_01 · PK-01'), findsWidgets);
     expect(find.text('등록 정보'), findsOneWidget);
     expect(find.text('지금 상태'), findsOneWidget);
     expect(find.text('맡은 작업'), findsOneWidget);
@@ -53,7 +53,7 @@ void main() {
     await openRobotMenu(tester);
     await registerRobot(tester, workcell: true);
 
-    await tester.tap(find.textContaining('OMX_01').first);
+    await tester.tap(find.textContaining('omx_01 · OMX-01').first);
     await tester.pumpAndSettle();
 
     expect(find.text('설치 로봇'), findsWidgets);
@@ -68,7 +68,7 @@ void main() {
   testWidgets('값의 출처를 크게 보여 준다', (tester) async {
     await openRobotMenu(tester);
     await registerRobot(tester);
-    await tester.tap(find.textContaining('PK_01 · 핑키 1호').first);
+    await tester.tap(find.textContaining('pinky_01 · PK-01').first);
     await tester.pumpAndSettle();
 
     // 기본값은 앱 Mock 이다. 그것을 실물로 착각하는 것이 가장 위험하다.
@@ -79,7 +79,7 @@ void main() {
   testWidgets('Mock 로봇은 토픽이 없다고 밝힌다', (tester) async {
     await openRobotMenu(tester);
     await registerRobot(tester);
-    await tester.tap(find.textContaining('PK_01 · 핑키 1호').first);
+    await tester.tap(find.textContaining('pinky_01 · PK-01').first);
     await tester.pumpAndSettle();
 
     // 앱 안에만 있는 로봇이라 주고받을 상대가 없다. 빈 자리를 두면 토픽이
@@ -101,7 +101,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('저장'));
     await tester.pumpAndSettle();
-    await tester.tap(find.textContaining('PK_01 · 핑키 1호').first);
+    await tester.tap(find.textContaining('pinky_01 · PK-01').first);
     await tester.pumpAndSettle();
 
     expect(find.text('주고받는 토픽'), findsOneWidget);
@@ -119,7 +119,7 @@ void main() {
   testWidgets('배치하지 않은 로봇도 열린다', (tester) async {
     await openRobotMenu(tester);
     await registerRobot(tester);
-    await tester.tap(find.textContaining('PK_01 · 핑키 1호').first);
+    await tester.tap(find.textContaining('pinky_01 · PK-01').first);
     await tester.pumpAndSettle();
 
     // 등록만 하고 아직 안 올렸어도 등록 정보는 볼 수 있어야 한다.

@@ -14,6 +14,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'rmf_task_models.dart';
+import 'ros_static_peers_io.dart';
 import 'workspace_paths_io.dart';
 
 export 'rmf_task_models.dart';
@@ -28,6 +29,8 @@ String _withRosEnvironment(String command) {
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '
+      // 로봇이 다른 기계에 있으면 이것 없이는 상대를 못 찾는다.
+      '${rosStaticPeersExport()}'
       '$command';
 }
 

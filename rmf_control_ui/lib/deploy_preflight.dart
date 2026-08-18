@@ -12,6 +12,9 @@ library;
 import 'dart:math' as math;
 
 import 'robot_spawn_check.dart';
+// 적재 방향을 쓰는 카테고리가 무엇인지는 표와 **같은 곳**을 봐야 한다. 여기에
+// 따로 적어 두면 배포 점검이 표와 다른 말을 하게 된다.
+import 'waypoint_table.dart' show waypointUsesDockHeading;
 
 /// 배포 직전에 할 일.
 enum DeployPreflight {
@@ -79,6 +82,53 @@ String? staleWorkcellSpawnMessage(
 }
 
 String _m(double value) => value.toStringAsFixed(2);
+
+/// 배포 전에 볼 자리 하나의 적재 방향.
+class DockHeadingCheck {
+  const DockHeadingCheck({
+    required this.name,
+    required this.category,
+    required this.degrees,
+  });
+
+  /// Waypoint 이름. 배포 산출물에서 이 자리를 가리키는 이름이다.
+  final String name;
+
+  /// Waypoint 카테고리(`픽업`·`드랍오프`·`대기` …).
+  final String category;
+
+  /// 정해 둔 적재 방향 [도]. 안 정했으면 null.
+  final double? degrees;
+}
+
+/// 적재 방향을 안 정한 픽업·드랍오프 자리. 다 정해 놓았으면 null.
+///
+/// 각도는 **안 정해도 된다** — 비워 두면 RMF 가 들어온 길 방향대로 세운다.
+/// 그러나 그 자리에서 팔이 물건을 집는다면 로봇이 어느 쪽을 보고 서는지가
+/// 결과를 가른다. 그래서 막지는 않고 알리기만 한다.
+///
+/// 실제로 픽업3 에 180 도를 넣었다고 기억하는데 저장된 프로젝트에도 배포된
+/// building.yaml 에도 `robosapiens_dock_heading` 이 없던 일이 있었다. 각도는
+/// 카테고리를 픽업·드랍오프 밖으로 바꾸는 순간 말없이 지워지므로, 사람은 넣은
+/// 줄 알고 앱은 없는 상태로 갈린다. 배포는 그것을 알아챌 수 있는 마지막
+/// 자리다 — 여기를 지나면 로봇이 그 자리에서 아무 방향으로나 선다.
+String? missingDockHeadingMessage(List<DockHeadingCheck> checks) {
+  final lines = <String>[];
+  for (final check in checks) {
+    if (!waypointUsesDockHeading(check.category)) continue;
+    if (check.degrees != null) continue;
+    final name = check.name.trim();
+    lines.add('${name.isEmpty ? '(이름 없음)' : name} · ${check.category}');
+  }
+  if (lines.isEmpty) return null;
+  return '다음 자리에 적재 방향이 없습니다.\n\n'
+      '${lines.join('\n')}\n\n'
+      '이대로 배포하면 building.yaml 에 `robosapiens_dock_heading` 이 안 '
+      '들어가고, 로봇은 그 자리에서 들어온 길 방향 그대로 섭니다. 팔이 물건을 '
+      '집는 자리라면 매번 다른 쪽을 보고 서게 됩니다.\n\n'
+      '각도를 넣으려면 Waypoint 를 열어 `적재 방향 (도)` 에 적으세요. '
+      '방향을 안 따져도 되는 자리면 그대로 배포하셔도 됩니다.';
+}
 
 /// 저장이 안 됐을 때의 경고. 왜 그냥 넘기면 안 되는지까지 적는다.
 String deploySaveFailedMessage(String project, Object error) =>

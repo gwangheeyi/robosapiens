@@ -2390,10 +2390,17 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 이 프로젝트가 쓸 ROS 도메인을 받는다.
   ///
   /// 로봇을 등록할 때 이 값을 기본으로 가져간다. 대마다 고칠 수 있다.
+  ///
+  /// **입력칸은 비운 채로 연다.** 지금 값을 채워 놓으면 고치러 온 사람이 먼저
+  /// 그것을 지워야 한다. 두 자리 숫자를 지우는 일이지만, 앞자리만 지우고 새 값을
+  /// 붙여 `522` 같은 값이 들어가는 길이기도 하다. 지금 값은 아래 안내로 보이고,
+  /// 비운 채 저장하면 그대로 둔다 — 열었다가 마음이 바뀌어도 잃는 것이 없다.
   Future<void> _showRosDomainSettings() async {
-    final controller = TextEditingController(text: '$_rosDomainId');
+    final controller = TextEditingController();
     String? error;
-    String? warning = rosDomainIdWarning(_rosDomainId);
+    // 빈 칸은 "지금 값을 그대로 둔다" 는 뜻이라 경고할 것이 없다. 지금 값에 대한
+    // 경고를 미리 띄우면, 사람이 아직 아무것도 안 했는데 무엇이 잘못된 줄 안다.
+    String? warning;
     final domain = await showMovableDialog<int>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -2420,15 +2427,22 @@ class _ControlDashboardState extends State<ControlDashboard> {
                     keyboardType: TextInputType.number,
                     decoration: InputDecoration(
                       labelText: 'ROS_DOMAIN_ID',
+                      hintText: '$_rosDomainId',
                       helperText:
+                          '지금 $_rosDomainId 입니다. 비워 두면 그대로 둡니다.\n'
                           '0 ~ $maxRosDomainId. 터미널에서 `echo \$ROS_DOMAIN_ID` 로 '
                           '지금 쓰는 값을 볼 수 있습니다.',
-                      helperMaxLines: 2,
+                      helperMaxLines: 3,
                       errorText: error,
                       border: const OutlineInputBorder(),
                     ),
                     onChanged: (_) => setDialogState(() {
                       error = null;
+                      // 빈 칸은 "그대로 둔다" 라서 따질 것이 없다.
+                      if (controller.text.trim().isEmpty) {
+                        warning = null;
+                        return;
+                      }
                       final value = int.tryParse(controller.text.trim());
                       warning = value == null || rosDomainIdError(value) != null
                           ? null
@@ -2472,6 +2486,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
             ),
             FilledButton(
               onPressed: () {
+                // 비운 채 저장하면 지금 값을 그대로 둔다. 여기서 0 으로 읽으면
+                // 열어 보기만 한 사람의 도메인이 조용히 0 이 되고, 그다음부터
+                // 아무것도 안 통하면서 오류는 안 난다.
+                if (controller.text.trim().isEmpty) {
+                  Navigator.pop(dialogContext);
+                  return;
+                }
                 final value = int.tryParse(controller.text.trim());
                 final nextError = rosDomainIdError(value);
                 if (nextError != null) {
@@ -4688,6 +4709,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 표에서 카테고리를 고친다.
   void _setWaypointCategory(Offset point, String category) {
     if (_waypointTypes[point] == category) return;
+    // 무엇이 사라지는지 지우기 전에 읽어 둔다. 지운 뒤에는 물어볼 곳이 없다.
+    final dropped = dockHeadingDropMessage(
+      previousCategory: _waypointTypes[point],
+      newCategory: category,
+      waypointName: _waypointNames[point] ?? '',
+      dockHeadingDegrees: _waypointDockHeadings[point],
+    );
     _recordUndo();
     setState(() {
       _waypointTypes[point] = category;
@@ -4700,6 +4728,26 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _isDeployed = false;
       _vertexLabelRevision++;
     });
+    // 지우는 것은 맞지만 말없이 지우면 안 된다. 되돌리기가 있으니 막지는 않고
+    // 무슨 값이 사라졌는지만 밝힌다.
+    if (dropped != null) _showDockHeadingDropped(dropped);
+  }
+
+  /// 카테고리를 바꾸면서 적재 방향이 사라졌다고 알린다.
+  ///
+  /// 사라진 각도를 숫자로 적는다 — 되돌리기를 안 쓰고 손으로 다시 넣더라도
+  /// 무슨 값이었는지 여기서 읽을 수 있어야 한다.
+  void _showDockHeadingDropped(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 6),
+          action: SnackBarAction(label: '되돌리기', onPressed: _undo),
+        ),
+      );
   }
 
   /// 표에서 적재 방향을 고친다. null 이면 각도를 요구하지 않는다.
@@ -5022,6 +5070,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return;
     }
     if (action != 'save' || name.isEmpty) return;
+    // 카테고리를 픽업·드랍오프 밖으로 바꾸면 정해 둔 각도가 사라진다. 무엇이
+    // 사라지는지 지우기 전에 읽어 둔다.
+    final dropped = dockHeadingDropMessage(
+      previousCategory: _waypointTypes[waypoint],
+      newCategory: selectedType,
+      waypointName: name,
+      dockHeadingDegrees: _waypointDockHeadings[waypoint],
+    );
     _recordUndo();
     setState(() {
       _waypointNames[waypoint] = name;
@@ -5036,6 +5092,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
       }
       _isDeployed = false;
     });
+    if (dropped != null) {
+      _showDockHeadingDropped(dropped);
+      return;
+    }
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Waypoint 정보를 수정했습니다.')));
@@ -5576,9 +5636,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ({Map<String, String> params, List<String> warnings})
   _rewriteNav2ParamsForRobots() {
     final source = readVendorNav2Params();
-    final navigating = _fleetRobots.where(
-      (robot) => robot.isMobile && robot.runsInGazebo,
-    );
+    final navigating = navigatingRobots(_fleetRobots);
     if (source == null) {
       return (
         params: const {},
@@ -6296,13 +6354,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 로봇 상세의 진단이 이 값을 본다. 창을 열 때마다 프로세스를 뒤지면
     // 창이 늦게 뜬다.
     //
-    // 여기서 묻는 것은 "Gazebo 가 도는가" 지 "이 프로젝트의 프로세스가 있는가"
-    // 가 아니다. 진단의 `Gazebo` 고리가 이 값을 그대로 쓰기 때문이다. 예전에는
-    // 뒤엣것을 물어서, Gazebo 가 죽고 RMF·Nav2 만 남은 상태를 초록으로 보여
-    // 줬다.
+    // Gazebo 를 쓰는 프로젝트에서 묻는 것은 "Gazebo 가 도는가" 지 "이 프로젝트의
+    // 프로세스가 있는가" 가 아니다. 진단의 `Gazebo` 고리가 이 값을 그대로 쓰기
+    // 때문이다. 예전에는 뒤엣것을 물어서, Gazebo 가 죽고 RMF·Nav2 만 남은 상태를
+    // 초록으로 보여 줬다. 시뮬레이터가 없는 프로젝트는 볼 Gazebo 가 없으므로
+    // RMF core 를 본다 — [_probeBackendRunning] 이 갈라 준다.
     try {
-      final running = await gazeboRunningProjects();
-      if (mounted) setState(() => _markBackendRunning(running.isNotEmpty));
+      final running = await _probeBackendRunning();
+      if (mounted) setState(() => _markBackendRunning(running));
     } catch (_) {}
   }
 
@@ -6563,6 +6622,43 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _backendUpAt = running ? (_backendUpAt ?? DateTime.now()) : null;
   }
 
+  /// 이 프로젝트가 무엇으로 물리를 돌리는가. 디스크에 저장된 실행 설정을 본다.
+  ///
+  /// 못 읽었으면 Gazebo 로 본다 — 예전 동작이고, 대부분의 프로젝트가 그것이다.
+  Future<SimulationBackend> _projectSimBackend(String mapName) async {
+    if (mapName.trim().isEmpty) return SimulationBackend.gazebo;
+    try {
+      final settings = await loadProjectSimulationSettings(mapName);
+      return settings.backend;
+    } catch (_) {
+      return SimulationBackend.gazebo;
+    }
+  }
+
+  /// 시뮬레이터로 도는 프로젝트인가. `/clock` 이 있을지를 이것으로 가른다.
+  ///
+  /// 확인표를 만드는 [_readiness] 는 동기 getter 라 디스크를 읽을 수 없다.
+  /// [_refreshReadiness] 가 읽어서 여기 남겨 둔다.
+  bool _usesSimulator = true;
+
+  /// 백엔드가 떠 있는지 **프로젝트의 시뮬레이터 설정에 맞게** 묻는다.
+  ///
+  /// 예전에는 어디서든 `gazeboRunningProjects()` 를 불렀다. 실물 로봇만 쓰는
+  /// 프로젝트(`시뮬레이터 없음`)에는 Gazebo 가 없으니 늘 "안 떠 있다" 가 나왔고,
+  /// RMF 가 다 떠 있는데도 확인표가 막힘으로 보이고 로봇을 못 보냈다.
+  ///
+  /// [usesGazebo] 를 알고 있으면 넘긴다 — 방금 실행 팝업에서 고른 값이 디스크에
+  /// 아직 안 내려갔을 수 있다.
+  Future<bool> _probeBackendRunning({String? mapName, bool? usesGazebo}) async {
+    final name = mapName ?? _robotDeployedMap?.summary.name ?? _mapName;
+    final running = await backendRunningProjects(
+      usesGazebo:
+          usesGazebo ??
+          (await _projectSimBackend(name)) == SimulationBackend.gazebo,
+    );
+    return running.isNotEmpty;
+  }
+
   Future<void> _startBackendFromDetail() async {
     final name = _robotDeployedMap?.summary.name ?? _mapName;
     if (name.trim().isEmpty) return;
@@ -6579,13 +6675,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (windows == null || !mounted) return;
     await startProject(
       name,
+      rosDomainId: _rosDomainId,
       backend: windows.backend,
       gazeboGui: windows.gazeboGui,
       rviz: windows.rviz,
     );
-    final running = await gazeboRunningProjects();
+    // 방금 고른 값을 그대로 쓴다. 디스크에 아직 안 내려갔을 수 있다.
+    final running = await _probeBackendRunning(
+      mapName: name,
+      usesGazebo: windows.backend == SimulationBackend.gazebo,
+    );
     if (!mounted) return;
-    setState(() => _markBackendRunning(running.isNotEmpty));
+    setState(() => _markBackendRunning(running));
   }
 
   /// `/fleet_states` 를 마지막으로 읽은 결과. 아직 안 읽었으면 null.
@@ -6624,6 +6725,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
       attachedRobots: snapshot?.robots ?? const {},
       alignment: _mapAlignment,
       clockPublishers: _clockPublishers,
+      // 시뮬레이터가 없으면 시계 칸을 아예 안 만든다. 볼 `/clock` 이 없다.
+      usesSimulator: _usesSimulator,
       mapServerState: _mapServerState,
       backendUptime: _backendUpAt == null
           ? null
@@ -6672,9 +6775,21 @@ class _ControlDashboardState extends State<ControlDashboard> {
   Future<void> _refreshReadiness() async {
     // 백엔드가 없으면 읽을 토픽도 없다. 그때마다 ros2 를 띄우면 8초씩 기다렸다
     // 실패하는 일만 되풀이한다.
-    final running = await gazeboRunningProjects();
+    //
+    // 무엇을 세는지는 프로젝트의 시뮬레이터 설정이 가른다. 실물 로봇만 쓰는
+    // 프로젝트에서 Gazebo 를 찾으면 늘 없다고 나온다.
+    //
+    // 설정은 한 번만 읽는다. 이 값으로 두 가지를 가른다 — 백엔드를 무엇으로
+    // 셀지, 그리고 시계 칸을 둘지.
+    final simBackend = await _projectSimBackend(
+      _robotDeployedMap?.summary.name ?? _mapName,
+    );
     if (!mounted) return;
-    final backendRunning = running.isNotEmpty;
+    final usesSimulator = simBackend != SimulationBackend.none;
+    final backendRunning = await _probeBackendRunning(
+      usesGazebo: simBackend == SimulationBackend.gazebo,
+    );
+    if (!mounted) return;
     // RobotTelemetryBridge가 이미 /fleet_states를 계속 읽고 있다. 준비 확인마다
     // 별도 `ros2 topic echo --once`를 띄우면 같은 DDS 데이터를 중복 구독하며
     // 순간적으로 CPU 한 코어를 대부분 사용한다.
@@ -6705,7 +6820,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 예전에는 이 확인 하나가 3~4초 사는 `ros2` 프로세스를 띄웠고, 그 값이
     // 비싸서 여섯 번에 한 번만 물었다. 지금은 `pgrep` 한 번이라 그럴 이유가
     // 없다 — 늦게 갱신되면 남은 다리를 알아채는 것도 그만큼 늦는다.
-    final clocks = backendRunning
+    //
+    // 시뮬레이터가 없으면 묻지 않는다. `/clock` 을 내는 곳이 없으니 셀 것도
+    // 없고, 확인표에 시계 칸도 안 나간다.
+    final clocks = backendRunning && usesSimulator
         ? await probeClockPublishers(rosDomainId: _rosDomainId)
         : null;
     // 지도 서버도 매번 본다. 여기가 꺼져 있으면 그 아래가 전부 무너지는데,
@@ -6721,6 +6839,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _markBackendRunning(backendRunning);
       _fleetSnapshot = snapshot;
       _mapAlignment = alignment;
+      _usesSimulator = usesSimulator;
       // 백엔드가 내려갔으면 지난 값을 들고 있지 않는다. 없는 시계를 세어 둔
       // 값이 남으면 다음에 띄울 때까지 거짓말을 한다.
       _clockPublishers = backendRunning ? clocks : null;
@@ -7677,11 +7796,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   /// 지금 단계보다 뒤를 짚으면 사이의 단계도 함께 끝난 것이 된다. RMF 는 단계를
   /// 건너뛰지 않으므로 뒤 단계에 닿았다는 것은 앞 단계를 이미 지났다는 뜻이다
   /// ([matchedProgressStep] 이 무엇을 뛰어넘어도 되는지 가린다).
-  void _completeTaskStepsThrough(
-    _MockRobot robot,
-    _MockTask task,
-    int index,
-  ) {
+  void _completeTaskStepsThrough(_MockRobot robot, _MockTask task, int index) {
     for (var i = task.currentStepIndex; i <= index; i++) {
       if (i < 0 || i >= task.steps.length) continue;
       task.steps[i].status = _TaskStepStatus.completed;
@@ -10192,6 +10307,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
           mapDirectory: mapDirectory,
           buildingYamlName: _yamlFileNameFor(mapName),
           robots: deployRobots,
+          // 실물 이동 로봇이 있으면 RMF core 도 벽시계로 돈다. 안 넘기면
+          // 기본값 true 가 되어, /clock 이 없는 실물 구성에서 RMF 가 시간이
+          // 멈춘 줄 알고 기다린다.
+          useSimTime: projectUsesSimTime(deployRobots),
           laneWidth: _laneDisplayWidth,
           // RViz 가 로봇을 그릴 공 크기. 안 넘기면 상류 기본값 0.5m 가 되어
           // 지름 1m 짜리 덩어리가 도면을 덮는다.
@@ -10334,6 +10453,40 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
         generatedAt: now,
       ),
+      // 도메인 다리는 로봇마다 파일이 따로다. 한 파일에 모으면 이관 전 로봇
+      // 두 대의 루트 이름(`/odom`)이 같은 열쇠로 겹쳐, YAML 을 읽는 순간
+      // 뒤엣것이 앞엣것을 덮어쓰고 한 대가 조용히 빠진다.
+      for (final robot in domainBridgeRobots(deployRobots))
+        MapProjectFile(
+          fileName: '${mapName}_domain_bridge_${robot.gzName}.yaml',
+          kind: 'bridge',
+          description:
+              '${robot.robotId} 이 아직 루트 토픽(/cmd_vel · /odom)을 쓸 때, '
+              '이 로봇만의 ROS 도메인에서 관제 도메인으로 옮기면서 '
+              '/${robot.gzName}/odom 처럼 이름을 갈라 준다. 두 대가 같은 '
+              '/cmd_vel 을 쓰는 것을 막는다. tf 는 옮기지 않아 Nav2 는 안 되고, '
+              'namespace 이관까지의 중간 다리다.',
+          content: buildRobotDomainBridgeYaml(
+            mapName: mapName,
+            robot: robot,
+            projectDomainId: _rosDomainId,
+          ),
+          generatedAt: now,
+        ),
+      MapProjectFile(
+        fileName: '${mapName}_domain_bridge.sh',
+        kind: 'bridge',
+        description:
+            '실물 로봇마다 도메인 다리를 하나씩 띄운다. stop 을 붙여 실행하면 '
+            '내린다. 다리는 로봇 수만큼 프로세스가 뜬다.',
+        executable: true,
+        content: buildDomainBridgeScript(
+          mapName: mapName,
+          robots: deployRobots,
+          projectDomainId: _rosDomainId,
+        ),
+        generatedAt: now,
+      ),
       MapProjectFile(
         fileName: 'isaac/start_$mapName.py',
         kind: 'isaac',
@@ -10406,8 +10559,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
           generatedAt: now,
         ),
         // Nav2 는 이동 로봇만 쓴다. 설치 로봇은 한자리에 붙어 있어 길을 찾을
-        // 일이 없다.
-        if (robot.isMobile && robot.runsInGazebo) ...[
+        // 일이 없다. 실물이든 Gazebo 든 위쪽은 같으므로 출처는 안 가린다
+        // ([navigatingRobots] 와 같은 규칙이다).
+        if (robot.isMobile && robot.dataSource.usesTopics) ...[
           MapProjectFile(
             fileName: '${robotDirectoryName(robot)}/nav2.launch.xml',
             kind: 'nav2',
@@ -12203,6 +12357,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (windows == null || !mounted) return;
     final result = await startProject(
       mapName,
+      // 앱을 띄운 셸의 ROS_DOMAIN_ID 가 이기지 않게 못 박는다.
+      rosDomainId: _rosDomainId,
       backend: windows.backend,
       gazeboGui: windows.gazeboGui,
       rviz: windows.rviz,
@@ -13565,6 +13721,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return choice == 'asIs';
   }
 
+  /// 배포 전에 볼 자리별 적재 방향.
+  ///
+  /// 배포에 나가는 것은 편집기의 지금 상태다([_dockHeadingsByStation] 과 같은
+  /// 자리를 본다). [_dockHeadingDegreesFor] 는 배포한 맵을 먼저 보므로 여기서
+  /// 쓰면 안 된다 — 아직 안 나간 각도를 이미 나간 것으로 읽는다.
+  List<DockHeadingCheck> get _dockHeadingChecks => [
+    for (final point in _laneWaypoints)
+      DockHeadingCheck(
+        name: _waypointNames[point] ?? '',
+        category: _waypointTypes[point] ?? '대기',
+        degrees: _waypointDockHeadings[point],
+      ),
+  ];
+
+  /// 적재 방향을 안 정한 픽업·드랍오프 자리가 있으면 배포 전에 알린다.
+  ///
+  /// 각도는 안 넣어도 되는 값이라 막지 않는다. 다만 넣은 줄 알았는데 안 들어간
+  /// 경우를 여기서 잡는다 — 카테고리를 바꾸는 순간 각도가 지워지므로, 사람의
+  /// 기억과 앱의 상태가 갈릴 수 있는 유일한 값이다.
+  Future<bool> _dockHeadingsOkBeforeDeploy() async {
+    final message = missingDockHeadingMessage(_dockHeadingChecks);
+    if (message == null) return true;
+    return confirmWarningDialog(
+      context,
+      title: '적재 방향이 없는 자리가 있습니다',
+      message: message,
+      confirmLabel: '그대로 배포',
+    );
+  }
+
   /// 팔과 핑키가 부딪히는 자리가 있으면 배포 전에 세운다.
   ///
   /// 이 검사는 작업을 실행할 때만 돌았다. 그래서 작업을 아직 안 짠 자리는
@@ -13705,6 +13891,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
     if (!mounted) return;
     // 자리를 맞춘 뒤라야 재는 거리가 배포에 나갈 그 거리다.
     if (!await _reachOkBeforeDeploy()) return;
+    if (!mounted) return;
+    // 저장보다 앞이라야 한다. 여기서 취소하고 각도를 넣으러 가는 사람이,
+    // 각도 없는 상태가 프로젝트에 이미 덮어써진 채로 돌아가면 안 된다.
+    if (!await _dockHeadingsOkBeforeDeploy()) return;
     if (!mounted) return;
     if (!await _saveBeforeDeploy()) return;
     if (!mounted) return;
@@ -15712,6 +15902,141 @@ class _TaskManagementPage extends StatelessWidget {
   String _time(DateTime value) =>
       '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}:${value.second.toString().padLeft(2, '0')}';
 
+  String _date(DateTime value) =>
+      '${value.year}-${value.month.toString().padLeft(2, '0')}-'
+      '${value.day.toString().padLeft(2, '0')}';
+
+  /// 어제 만든 작업이 미래에 만든 것처럼 보이지 않게 한다.
+  ///
+  /// [_time] 은 시:분:초만 찍는다. 그래서 어제 20:40 에 만든 작업이 오늘 20:01
+  /// 에 복사한 글에서는 **39분 뒤**에 생긴 것으로 읽혔다. 실제로 그 글을 보고
+  /// 시각이 어긋난 줄로 알았다. 날짜가 오늘과 다르면 날짜까지 적는다.
+  String _stamp(DateTime value, DateTime now) =>
+      value.year == now.year && value.month == now.month && value.day == now.day
+      ? _time(value)
+      : '${_date(value)} ${_time(value)}';
+
+  String _stepMark(_TaskStepStatus status) => switch (status) {
+    _TaskStepStatus.pending => '대기',
+    _TaskStepStatus.active => '진행',
+    _TaskStepStatus.completed => '완료',
+    _TaskStepStatus.failed => '실패',
+    _TaskStepStatus.cancelled => '취소',
+  };
+
+  String _readinessMark(ReadinessState state) => switch (state) {
+    ReadinessState.ready => '됨',
+    ReadinessState.blocked => '막힘',
+    ReadinessState.unknown => '모름',
+  };
+
+  /// 화면에 떠 있는 것을 그대로 글로 옮긴다.
+  ///
+  /// 막힌 자리를 남에게 전할 때가 문제였다. 화면을 눈으로 보고 옮겨 적으면
+  /// **준비 상태와 단계별 상태가 빠진다** — 정작 원인은 대개 그 두 곳에 있다.
+  /// 작업이 `실패` 인 것만 전해도 몇 번째 단계에서 무슨 이유로 멈췄는지는 안
+  /// 넘어가므로, 보이는 것을 통째로 복사할 수 있게 둔다.
+  ///
+  /// 화면에 안 보이는 것은 넣지 않는다. 여기에 로그나 토픽까지 담으면 무엇을
+  /// 보고 적은 글인지 알 수 없게 된다 — 그것은 `ROS2 확인` 이 할 일이다.
+  String _asText() {
+    final now = DateTime.now();
+    final stamp = '${_date(now)} ${_time(now)}';
+
+    int count(_MockTaskStatus status) =>
+        tasks.where((task) => task.status == status).length;
+    final idle = robots
+        .where((robot) => robot.kind.canCarry && robot.activeTaskId == null)
+        .length;
+
+    final out = StringBuffer()
+      ..writeln('=== 작업 관리 · $stamp ===')
+      ..writeln('맵: ${mapReady ? activeMapName : '아직 불러오지 않았습니다'}')
+      ..writeln('불러온 맵: $activeMapSourceName')
+      ..writeln('building.yaml: $activeBuildingYamlName');
+    if (pendingDeployment) {
+      out.writeln('배포: 고친 것이 아직 배포되지 않았습니다.');
+    }
+
+    out
+      ..writeln()
+      ..writeln('[준비 상태] ${readiness.summary}');
+    for (final check in readiness.checks) {
+      out.writeln(
+        '  (${_readinessMark(check.state)}) ${check.title} — ${check.detail}',
+      );
+    }
+
+    out
+      ..writeln()
+      ..writeln(
+        '[집계] 전체 ${tasks.length} · '
+        '대기 ${count(_MockTaskStatus.queued)} · '
+        '진행 중 ${count(_MockTaskStatus.active)} · '
+        '완료 ${count(_MockTaskStatus.completed)} · '
+        '취소 ${count(_MockTaskStatus.cancelled)} · '
+        '실패 ${count(_MockTaskStatus.failed)} · '
+        '가용 로봇 $idle',
+      )
+      ..writeln()
+      ..writeln('[로봇 ${robots.length}대]');
+    if (robots.isEmpty) {
+      out.writeln('  Spawn 된 로봇이 없습니다.');
+    }
+    for (final robot in robots) {
+      // 좌표는 안 적는다. 여기서 쥔 `position` 은 도면 **픽셀**이라 그대로
+      // 적으면 nav_graphs 나 robot.yaml 의 미터와 같은 자리로 읽힌다 — 두
+      // 숫자를 맞춰 보다 시간을 버리는 그 혼동이다. 자리를 봐야 하면 맵
+      // 관리에서 본다. 이 화면에도 숫자로는 안 떠 있다.
+      out.writeln(
+        '  ${robot.id} · ${robot.kind.label} · '
+        '배터리 ${robot.battery.toStringAsFixed(0)}% · '
+        '${robot.activeTaskId == null ? '유휴' : '작업 ${robot.activeTaskId}'}'
+        '${robot.moving ? ' · 이동 중' : ''}'
+        '${robot.rmfDriven ? ' · RMF 주행' : ''}'
+        '${robot.rmfTaskId == null ? '' : ' · RMF ${robot.rmfTaskId}'}',
+      );
+    }
+
+    out
+      ..writeln()
+      ..writeln('[작업 ${tasks.length}건]');
+    if (tasks.isEmpty) {
+      out.writeln('  생성된 작업이 없습니다.');
+    }
+    for (var i = 0; i < tasks.length; i++) {
+      final task = tasks[i];
+      out
+        ..writeln(
+          '  ${i + 1}. ${task.name} · ${task.id} · ${_statusLabel(task.status)}',
+        )
+        ..writeln(
+          '     ${task.type} · ${task.robotId} · '
+          '${task.currentStepIndex}/${task.steps.length}단계 완료 · '
+          '생성 ${_stamp(task.createdAt, now)}'
+          '${task.completedAt == null ? '' : ' · 종료 ${_stamp(task.completedAt!, now)}'}',
+        );
+      if (task.orderId != null) {
+        out.writeln('     주문 ${task.orderId} · 긴급도 ${task.urgency.label}');
+      }
+      if (task.trigger != _OrderTrigger.manual) {
+        out.writeln('     자동화 ${task.trigger.label}');
+      }
+      for (var s = 0; s < task.steps.length; s++) {
+        final step = task.steps[s];
+        out.writeln(
+          '       ${s + 1}) [${_stepMark(step.status)}] ${step.label}'
+          '${step.failureReason == null ? '' : ' — ${step.failureReason}'}',
+        );
+      }
+      if (task.description.isNotEmpty) {
+        out.writeln('     설명: ${task.description}');
+      }
+    }
+
+    return out.toString();
+  }
+
   @override
   Widget build(BuildContext context) {
     final active = tasks
@@ -15754,6 +16079,18 @@ class _TaskManagementPage extends StatelessWidget {
                     _showUsageGuide(context, _UsageGuideTopic.task),
                 icon: const Icon(Icons.help_outline),
                 label: const Text('사용법'),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: _asText()));
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('지금 화면의 상황을 복사했습니다.')),
+                  );
+                },
+                icon: const Icon(Icons.content_copy_outlined),
+                label: const Text('상황 복사'),
               ),
               const SizedBox(width: 10),
               OutlinedButton.icon(
@@ -15869,8 +16206,10 @@ class _TaskManagementPage extends StatelessWidget {
           Expanded(
             child: Row(
               children: [
+                // 작업을 만들 때 Lane과 지점 이름을 눈으로 짚어야 해서
+                // 맵을 목록보다 넓게 준다. 목록은 이름과 단추만 보이면 된다.
                 Expanded(
-                  flex: 2,
+                  flex: 3,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -15903,7 +16242,6 @@ class _TaskManagementPage extends StatelessWidget {
                 ),
                 const SizedBox(width: 18),
                 Expanded(
-                  flex: 3,
                   child: Container(
                     decoration: BoxDecoration(
                       color: Colors.white,
@@ -18724,6 +19062,30 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     super.dispose();
   }
 
+  /// 이 프로젝트가 무엇으로 물리를 돌리는가. 아직 못 읽었으면 null.
+  ///
+  /// 안내 문구가 이것을 봐야 한다. 예전에는 어느 프로젝트에나 `Gazebo` 라고
+  /// 적었다. 실물 로봇만 쓰는 프로젝트(`시뮬레이터 없음`)에서는 **없는 것을
+  /// 정리하라고 하는 셈**이어서, 무엇을 정리해야 하는지 알 수 없었다.
+  SimulationBackend? _simBackend;
+
+  /// 시뮬레이터 이름을 말해도 되는가. 못 읽었으면 말하지 않는다.
+  bool get _hasSimulator =>
+      _simBackend != null && _simBackend != SimulationBackend.none;
+
+  Future<void> _refreshSimBackend() async {
+    final name = widget.projectName;
+    if (name == null || name.trim().isEmpty) return;
+    try {
+      final settings = await loadProjectSimulationSettings(name);
+      if (!mounted) return;
+      setState(() => _simBackend = settings.backend);
+    } catch (_) {
+      // 못 읽었으면 시뮬레이터 이름을 들먹이지 않는다. 틀린 이름을 적는 것보다
+      // 안 적는 편이 낫다.
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -18731,6 +19093,7 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     // 부딪혀 엉뚱한 오류로 나타난다. 화면에 들어올 때 먼저 확인한다.
     unawaited(_refreshRmfStatus());
     unawaited(_refreshDeployedCount());
+    unawaited(_refreshSimBackend());
   }
 
   @override
@@ -18742,6 +19105,9 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
         oldWidget.deployMapName != widget.deployMapName ||
         oldWidget.mapDirectory != widget.mapDirectory) {
       unawaited(_refreshDeployedCount());
+    }
+    if (oldWidget.projectName != widget.projectName) {
+      unawaited(_refreshSimBackend());
     }
   }
 
@@ -19006,7 +19372,9 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                               '맵 프로젝트를 열거나 저장하세요.'
                         : '관제·경로계획을 맡는 ROS 노드(schedule · building map '
                               'server · dispatcher)입니다. `${widget.projectName}` '
-                              '프로젝트로 띄우면 Gazebo 와 함께 올라옵니다.',
+                              '프로젝트로 띄우면 '
+                              '${_hasSimulator ? '${_simBackend!.label} 와 Nav2 가' : 'Nav2 와 어댑터가'} '
+                              '함께 올라옵니다.',
                     style: const TextStyle(
                       fontSize: 12,
                       color: Color(0xFF64748B),
@@ -19058,9 +19426,19 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
                   ),
                   const SizedBox(height: 4),
                   if (!_ghostNodes)
-                    const Text(
-                      '실제 로봇·Gazebo 모드로 새로 띄우기 전에 정리하세요.',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                    Text(
+                      // 시뮬레이터가 없는 프로젝트에 `Gazebo 모드` 라고 적으면
+                      // 띄운 적도 없는 것을 정리하라는 말이 된다. 정리해야 하는
+                      // 것은 지금 떠 있는 이 노드들이다.
+                      _hasSimulator
+                          ? '실제 로봇·${_simBackend!.label} 모드로 새로 띄우기 전에 '
+                                '정리하세요.'
+                          : '새로 띄우기 전에 정리하세요. 두 번 띄우면 schedule node 와 '
+                                'fleet adapter 가 이름이 겹쳐 부딪힙니다.',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF92400E),
+                      ),
                     ),
                 ],
               ],
@@ -19726,12 +20104,14 @@ class _RobotMapCard extends StatelessWidget {
           ? Stack(
               fit: StackFit.expand,
               children: [
+                // 이미지와 Lane 그림은 같은 여백을 써야 겹쳐 놓았을 때
+                // 어긋나지 않는다. 한쪽만 고치지 말 것.
                 Padding(
-                  padding: const EdgeInsets.all(18),
+                  padding: const EdgeInsets.all(8),
                   child: Image.memory(current.bytes!, fit: BoxFit.contain),
                 ),
                 Padding(
-                  padding: const EdgeInsets.all(18),
+                  padding: const EdgeInsets.all(8),
                   child: CustomPaint(
                     painter: _RobotOperationsPainter(
                       sourceSize: Size(

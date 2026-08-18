@@ -22,8 +22,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rmf_control_ui/deploy_preflight.dart';
 import 'package:rmf_control_ui/nav2_params.dart';
 import 'package:rmf_control_ui/rmf_task_request.dart';
+import 'package:rmf_control_ui/waypoint_table.dart';
 
 void main() {
   group('작업 JSON', () {
@@ -196,6 +198,147 @@ controller_server:
         body.substring(deployedBranch, fallback),
         contains('return null;'),
       );
+    });
+  });
+
+  /// 각도가 **말없이** 사라지는 것을 막는다.
+  ///
+  /// 픽업3 에 180 도를 넣었다고 기억하는데 저장된 프로젝트에도 배포된
+  /// building.yaml 에도 각도가 없던 일이 있었다. 저장·불러오기 왕복은 멀쩡했다
+  /// — 카테고리를 바꾸는 순간 각도가 아무 말 없이 지워진 것이다. 사람의 기억과
+  /// 앱의 상태가 갈릴 수 있는 값이라 두 곳에서 잡는다.
+  group('사라지는 각도를 밝힌다', () {
+    test('픽업에서 대기로 바꾸면 무슨 값이 사라지는지 적는다', () {
+      final message = dockHeadingDropMessage(
+        previousCategory: '픽업',
+        newCategory: '대기',
+        waypointName: '픽업3',
+        dockHeadingDegrees: 180,
+      );
+      expect(message, isNotNull);
+      expect(message, contains('픽업3'));
+      // 사라진 각도를 숫자로 적어야 손으로 다시 넣을 수 있다.
+      expect(message, contains('180'));
+      expect(message, contains('대기'));
+    });
+
+    test('소수점 뒤가 0 이면 떼고 적는다', () {
+      expect(
+        dockHeadingDropMessage(
+          previousCategory: '드랍오프',
+          newCategory: '설비',
+          waypointName: '드랍오프1',
+          dockHeadingDegrees: 90,
+        ),
+        contains('90도'),
+      );
+      expect(
+        dockHeadingDropMessage(
+          previousCategory: '드랍오프',
+          newCategory: '설비',
+          waypointName: '드랍오프1',
+          dockHeadingDegrees: 45.5,
+        ),
+        contains('45.5도'),
+      );
+    });
+
+    test('픽업에서 드랍오프로는 각도가 그대로라 알리지 않는다', () {
+      expect(
+        dockHeadingDropMessage(
+          previousCategory: '픽업',
+          newCategory: '드랍오프',
+          waypointName: '픽업3',
+          dockHeadingDegrees: 180,
+        ),
+        isNull,
+      );
+    });
+
+    test('정해 둔 각도가 없으면 사라질 것도 없다', () {
+      expect(
+        dockHeadingDropMessage(
+          previousCategory: '픽업',
+          newCategory: '대기',
+          waypointName: '픽업3',
+          dockHeadingDegrees: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('표와 대화상자 두 곳 다 알린다', () {
+      final source = File('lib/main.dart').readAsStringSync();
+      // 지우기 **전에** 읽어야 한다. 지운 뒤에는 물어볼 곳이 없다.
+      expect(
+        'dockHeadingDropMessage('.allMatches(source).length,
+        2,
+        reason: '_setWaypointCategory 와 _editWaypoint 둘 다에서 봐야 한다',
+      );
+      expect(source, contains('_showDockHeadingDropped(dropped)'));
+    });
+  });
+
+  group('배포 전 점검', () {
+    DockHeadingCheck check(String name, String category, double? degrees) =>
+        DockHeadingCheck(name: name, category: category, degrees: degrees);
+
+    test('각도를 안 정한 픽업·드랍오프를 이름으로 짚는다', () {
+      final message = missingDockHeadingMessage([
+        check('픽업3', '픽업', null),
+        check('드랍오프1', '드랍오프', 90),
+        check('픽업1', '픽업', 0),
+      ]);
+      expect(message, isNotNull);
+      expect(message, contains('픽업3'));
+      // 정해 둔 자리는 안 짚는다. 0 도는 "안 정했다" 가 아니라 오른쪽이다.
+      expect(message, isNot(contains('드랍오프1')));
+      expect(message, isNot(contains('픽업1')));
+      // 무엇이 안 나가는지와 그 결과를 적는다.
+      expect(message, contains('robosapiens_dock_heading'));
+      expect(message, contains('적재 방향 (도)'));
+    });
+
+    test('방향을 안 쓰는 자리는 따지지 않는다', () {
+      expect(
+        missingDockHeadingMessage([
+          check('충전1', '충전', null),
+          check('설비3', '설비', null),
+          check('', '대기', null),
+        ]),
+        isNull,
+      );
+    });
+
+    test('다 정해 놓았으면 아무 말도 안 한다', () {
+      expect(
+        missingDockHeadingMessage([
+          check('픽업3', '픽업', 180),
+          check('드랍오프1', '드랍오프', -90),
+        ]),
+        isNull,
+      );
+    });
+
+    test('저장보다 먼저 묻는다', () {
+      // 여기서 취소하고 각도를 넣으러 가는 사람이, 각도 없는 상태가 프로젝트에
+      // 이미 덮어써진 채로 돌아가면 안 된다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final ask = source.indexOf('_dockHeadingsOkBeforeDeploy()) return;');
+      final save = source.indexOf('_saveBeforeDeploy()) return;');
+      expect(ask, greaterThanOrEqualTo(0));
+      expect(save, greaterThan(ask));
+    });
+
+    test('배포 점검은 편집기 값을 본다', () {
+      // _dockHeadingDegreesFor 는 배포한 맵을 먼저 보므로 여기서 쓰면 아직 안
+      // 나간 각도를 이미 나간 것으로 읽는다.
+      final source = File('lib/main.dart').readAsStringSync();
+      final start = source.indexOf('get _dockHeadingChecks');
+      expect(start, greaterThanOrEqualTo(0));
+      final body = source.substring(start, source.indexOf('\n  ];', start));
+      expect(body, contains('_waypointDockHeadings[point]'));
+      expect(body, isNot(contains('_dockHeadingDegreesFor')));
     });
   });
 }

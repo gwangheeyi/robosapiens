@@ -671,6 +671,35 @@ String buildFleetSimYaml({
 bool projectUsesNav2(List<RmfProjectRobot> robots) =>
     robots.any((robot) => robot.isMobile && robot.dataSource.usesTopics);
 
+/// Nav2 가 몰 이동 로봇. Gazebo 든 실물이든 **위쪽은 똑같다.**
+///
+/// 아래에서 Gazebo 를 몰든 진짜 모터를 몰든 `/<로봇>/odom` · `/scan` · `/cmd_vel`
+/// 이라는 같은 이름으로 같은 형식을 주고받는다. 그래서 Nav2 도 어댑터도 가릴
+/// 이유가 없다.
+///
+/// 예전에는 이 자리가 `runsInGazebo` 였다. 실물 로봇의 출처를 바꾸는 순간
+/// Nav2 도, 어댑터 매핑도, 로봇별 `nav2_params.yaml` 도 통째로 안 만들어졌다 —
+/// **그런데 플릿 설정에는 그대로 들어갔다.** RMF 는 로봇을 아는데 그 로봇을
+/// 모는 것이 하나도 없는 상태가 되고, 오류는 한 줄도 안 났다.
+List<RmfProjectRobot> navigatingRobots(List<RmfProjectRobot> robots) => [
+  for (final robot in robots)
+    if (robot.isMobile && robot.dataSource.usesTopics) robot,
+];
+
+/// RMF·Nav2·어댑터가 시뮬레이터 시계(`/clock`)를 써야 하는가.
+///
+/// **실물 이동 로봇이 하나라도 있으면 벽시계로 통일한다.** 실물의 `odom` ·
+/// `scan` · `tf` 는 벽시계로 찍혀 온다. 그 위의 AMCL 과 어댑터가 sim 시계를
+/// 보면 TF lookup 이 전부 어긋나는데, **오류는 안 나고** 로봇만 안 움직인다.
+///
+/// Gazebo 를 함께 돌려도 된다. 시뮬레이터는 제 안에서만 sim 시계를 쓰고
+/// (`spawn.launch.xml` 의 `use_sim_time=True`), 바깥과는 워크셀 노드를 통해
+/// 만나는데 그쪽은 애초에 벽시계로 돌며 TF 를 안 쓴다. 팔에 보내는 궤적도
+/// `time_from_start` 라는 **상대 시간**이라 어느 시계에서도 같게 돈다.
+bool projectUsesSimTime(List<RmfProjectRobot> robots) => !robots.any(
+  (robot) => robot.isMobile && robot.dataSource == RobotDataSource.real,
+);
+
 String buildProjectLaunchXml({
   required String mapName,
   required String fleetName,
@@ -772,7 +801,21 @@ String buildProjectLaunchXml({
     // 이 <group> 안의 모든 노드에 건다 — 이름이 플릿 전용이라 나머지 노드는
     // 선언하지 않고 그냥 지나친다.
     ..writeln('    <set_parameter name="${fleetName}_radius"')
-    ..writeln('                   value="${_n(footprintRadius)}"/>')
+    ..writeln('                   value="${_n(footprintRadius)}"/>');
+  // 로봇을 그리는 색. 라이다 점과 같은 색을 줘야 화면에서 공과 점이 한 로봇의
+  // 것으로 읽힌다. 상류는 모든 로봇을 자홍으로 칠했다 — 두 대가 같은 복도에
+  // 있으면 어느 공이 누구인지 알 수 없었다.
+  //
+  // `<로봇이름>_color` 는 우리가 fleet_states_visualizer 에 추가한 것이다.
+  // 이 파라미터를 모르는 예전 빌드에서는 그냥 무시되고 자홍으로 남는다.
+  final painted = navigatingRobots(robots);
+  for (var i = 0; i < painted.length; i++) {
+    final color = robotColorFor(i);
+    buffer
+      ..writeln('    <set_parameter name="${painted[i].robotId}_color"')
+      ..writeln('                   value="${color.launchList}"/>');
+  }
+  buffer
     ..writeln(
       '    <include file="\$(find-pkg-share rmf_visualization)'
       '/visualization.launch.xml">',
@@ -972,10 +1015,12 @@ String buildProjectGzBridgeYaml({
     );
     entry(
       buffer,
-      // Nav2 controller/behavior -> cmd_vel -> velocity_smoother ->
-      // cmd_vel_smoothed 순서다. 원본 cmd_vel 을 Gazebo 에 바로 연결하면
-      // 가속·감속 제한과 timeout 정지가 전부 우회된다.
-      ros: '$ns/cmd_vel_smoothed',
+      // buildNav2Launch 가 controller/behavior 의 원시 출력을 cmd_vel_nav 로,
+      // velocity_smoother 의 최종 출력을 cmd_vel 로 리맵한다. 그래서 여기의
+      // cmd_vel 은 이미 smoother 를 거친 값이고, 실물 로봇이 구독하는 이름과도
+      // 같다. Nav2 기본 이름인 cmd_vel_smoothed 를 적으면 발행자가 없어
+      // Gazebo 에 속도가 한 번도 도달하지 않는다.
+      ros: '$ns/cmd_vel',
       gz: '$ns/cmd_vel',
       rosType: 'geometry_msgs/msg/Twist',
       gzType: 'gz.msgs.Twist',
@@ -1007,6 +1052,232 @@ String buildProjectGzBridgeYaml({
       direction: 'GZ_TO_ROS',
     );
   }
+  return buffer.toString();
+}
+
+/// 로봇마다 제 도메인에 있는 실물 Pinky 를 관제 도메인 하나로 모으는 설정.
+///
+/// ## 왜 필요한가
+///
+/// namespace 로 가르려면 `bringup_robot_namespaced.launch.xml` 이 로봇마다
+/// 설치되고 빌드돼 있어야 한다. 로봇 쪽 workspace 를 못 고치는 동안에는 두 대
+/// 모두 루트 이름(`/cmd_vel` · `/odom` · `/scan`)으로 낸다. 같은 도메인에 두면
+/// **두 대가 같은 토픽을 쓴다** — `/cmd_vel` 하나에 둘 다 붙어서, 한 대에게
+/// 보낸 명령으로 두 대가 같이 움직인다. 오류는 안 난다.
+///
+/// `domain_bridge` 는 도메인을 경계로 쓴다. 로봇마다 **다른 도메인**에 그대로
+/// 두고(각자 루트 이름을 써도 도메인이 다르니 안 겹친다), 다리가 관제 도메인
+/// 으로 옮기면서 이름 앞에 namespace 를 붙인다.
+///
+/// ```text
+/// 도메인 61  /cmd_vel /odom /scan   (pinky_01, 로봇 그대로)
+/// 도메인 62  /cmd_vel /odom /scan   (pinky_02, 로봇 그대로)
+///                  ↓ domain_bridge
+/// 도메인 52  /pinky_01/odom  /pinky_02/odom  ...   (관제)
+/// ```
+///
+/// 로봇 펌웨어도 workspace 도 안 고친다. 로봇이 바꾸는 것은
+/// `ROS_DOMAIN_ID` 하나뿐이다.
+///
+/// ## `/tf` 를 다리로 옮기지 않는다
+///
+/// `/tf` 는 월드에 하나뿐인 토픽이라 로봇별로 나누지 않는다
+/// ([MULTI_ROBOT_NAMESPACES.md] 6절). 그런데 루트 이름을 쓰는 로봇은 `/tf` 안의
+/// **프레임 이름**도 `odom → base_footprint` 로 똑같다. 그대로 옮기면 두 대의
+/// TF 나무가 관제 도메인에서 한 이름으로 겹쳐, TF 가 두 로봇 사이를 오가며
+/// 튄다.
+///
+/// `domain_bridge` 는 토픽 이름만 바꾸고 **메시지 안은 못 고친다.** 그래서 이
+/// 파일은 `/tf` 를 옮기지 않는다. 프레임을 가르는 것은 로봇 쪽
+/// `bringup_namespaced.py` 뿐이다 — 그것이 끝나면 이 다리는 필요 없다.
+///
+/// 이 다리만으로 되는 것과 안 되는 것:
+///
+/// | | 다리로 되나 |
+/// |---|---|
+/// | 토픽 이름 분리 (`/pinky_01/odom`) | **된다** |
+/// | 명령이 한 대에만 가기 (`cmd_vel`) | **된다** |
+/// | 메시지 안 프레임 이름 분리 | **안 된다** — 로봇 쪽을 고쳐야 |
+/// | 그래서 Nav2 자율주행 | **안 된다** — TF 가 필요하다 |
+///
+/// 즉 이것은 namespace 이관까지의 **중간 다리**다. 원격 조종·상태 확인·앱
+/// 표시까지는 이걸로 되고, Nav2 는 [PINKY_NAMESPACE_MIGRATION.md] 를 끝내야
+/// 한다.
+/// ## 왜 로봇마다 파일이 따로인가
+///
+/// `domain_bridge` 의 `topics:` 는 **토픽 이름이 열쇠(key)** 인 맵이다. 그런데
+/// 이관 전 로봇은 두 대 모두 루트 이름 `/odom` 을 쓴다. 한 파일에 모으면
+/// 열쇠가 겹쳐서, YAML 을 읽는 순간 **뒤엣것이 앞엣것을 덮어쓴다.**
+///
+/// ```yaml
+/// topics:
+///   "/odom": { from_domain: 61 }   # pinky_01 — 사라진다
+///   "/odom": { from_domain: 62 }   # pinky_02 만 남는다
+/// ```
+///
+/// 오류가 안 난다. 다리는 멀쩡히 뜨고 한 대만 조용히 빠진다. 그래서 로봇마다
+/// 파일과 프로세스를 따로 둔다 — 겹칠 열쇠가 애초에 없다.
+///
+/// 파일 이름은 `<맵>_domain_bridge_<로봇 namespace>.yaml` 이다.
+String buildRobotDomainBridgeYaml({
+  required String mapName,
+  required RmfProjectRobot robot,
+  required int projectDomainId,
+}) {
+  final from = robot.rosDomainId;
+  final ns = robot.gzName;
+  final buffer = StringBuffer()
+    ..writeln('# ${robot.robotId} · ${robot.displayName} 의 domain_bridge 설정.')
+    ..writeln('# rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('#')
+    ..writeln('# 이 로봇은 제 도메인에서 루트 이름(/odom · /cmd_vel)을 그대로')
+    ..writeln('# 쓴다. 이 다리가 관제 도메인 $projectDomainId 으로 옮기면서')
+    ..writeln('# 이름 앞에 $ns 을 붙인다.')
+    ..writeln('#')
+    ..writeln('#   ros2 run domain_bridge domain_bridge \\')
+    ..writeln('#     <맵 디렉터리>/${mapName}_domain_bridge_$ns.yaml')
+    ..writeln('#')
+    ..writeln('# 로봇마다 파일과 프로세스가 따로다. 한 파일에 모으면 두 대의')
+    ..writeln('# 루트 이름이 같은 열쇠로 겹쳐, 뒤엣것이 앞엣것을 덮어쓰고 한')
+    ..writeln('# 대가 조용히 빠진다.')
+    ..writeln('#')
+    ..writeln('# /tf 는 옮기지 않는다. 이름은 바꿀 수 있어도 메시지 안의')
+    ..writeln('# 프레임 이름은 못 고쳐서, 두 대의 TF 가 한 이름으로 겹친다.')
+    ..writeln('# 그래서 이 다리로는 Nav2 가 안 된다 — namespace 이관이 끝나야')
+    ..writeln('# 한다. PINKY_NAMESPACE_MIGRATION.md 를 보라.')
+    ..writeln();
+
+  // 로봇이 제 도메인을 안 정했거나 관제와 같으면 다리를 놓을 수 없다. 조용히
+  // 빈 파일을 내지 말고 무엇을 고쳐야 하는지 파일에 남긴다.
+  if (from == null) {
+    buffer
+      ..writeln('# 이 로봇의 ROS domain ID 가 비어 있다. 로봇 등록에서')
+      ..writeln('# 관제($projectDomainId)와 다른 값을 정해야 다리를 놓는다.')
+      ..writeln('topics: {}');
+    return buffer.toString();
+  }
+  if (from == projectDomainId) {
+    buffer
+      ..writeln('# 로봇 도메인이 관제와 같다($projectDomainId). 옮길 것이 없고,')
+      ..writeln('# 다른 로봇과 루트 토픽이 그대로 겹친다. 로봇 등록에서 이')
+      ..writeln('# 로봇만 쓰는 도메인을 정한다.')
+      ..writeln('topics: {}');
+    return buffer.toString();
+  }
+
+  buffer.writeln('topics:');
+  // 로봇이 내는 것(odom·scan)은 로봇→관제, 명령(cmd_vel)은 관제→로봇이다.
+  // 방향을 뒤집으면 다리는 뜨는데 값이 한쪽으로만 안 온다.
+  void topic(String leaf, String type, {required bool toRobot}) {
+    buffer
+      ..writeln('  "${toRobot ? '/$ns/$leaf' : '/$leaf'}":')
+      ..writeln('    type: $type')
+      ..writeln('    from_domain: ${toRobot ? projectDomainId : from}')
+      ..writeln('    to_domain: ${toRobot ? from : projectDomainId}')
+      ..writeln('    remap: "${toRobot ? '/$leaf' : '/$ns/$leaf'}"');
+  }
+
+  topic('odom', 'nav_msgs/msg/Odometry', toRobot: false);
+  topic('scan', 'sensor_msgs/msg/LaserScan', toRobot: false);
+  topic('joint_states', 'sensor_msgs/msg/JointState', toRobot: false);
+  topic('battery/voltage', 'std_msgs/msg/Float32', toRobot: false);
+  topic('battery/percent', 'std_msgs/msg/Float32', toRobot: false);
+  // 관제가 내려보내는 유일한 명령이다. 이것만 방향이 반대다.
+  topic('cmd_vel', 'geometry_msgs/msg/Twist', toRobot: true);
+  return buffer.toString();
+}
+
+/// 이 프로젝트에서 도메인 다리를 놓을 로봇들.
+///
+/// 실물 이동 로봇만이다. Gazebo 는 같은 PC 의 한 도메인에 있고 Mock 은 ROS 를
+/// 아예 안 쓴다 — 넣어 두면 오지 않을 토픽을 기다리는 다리가 조용히 남는다.
+List<RmfProjectRobot> domainBridgeRobots(List<RmfProjectRobot> robots) => [
+  for (final robot in robots)
+    if (robot.dataSource == RobotDataSource.real && robot.isMobile) robot,
+];
+
+/// 로봇마다 도메인 다리를 하나씩 띄우는 실행 스크립트.
+///
+/// 다리는 로봇 수만큼 프로세스가 뜬다. 하나가 죽어도 나머지는 살아 있어야 해서
+/// 배경으로 띄우고 PID 를 남긴다.
+String buildDomainBridgeScript({
+  required String mapName,
+  required List<RmfProjectRobot> robots,
+  required int projectDomainId,
+}) {
+  final bridged = domainBridgeRobots(robots);
+  final buffer = StringBuffer()
+    ..writeln('#!/usr/bin/env bash')
+    ..writeln('#')
+    ..writeln('# $mapName · 실물 로봇 도메인 다리.')
+    ..writeln('# rmf_control_ui 가 맵 프로젝트에서 생성했다.')
+    ..writeln('#')
+    ..writeln('# 로봇마다 다리를 하나씩 띄운다. 로봇은 제 도메인에서 루트')
+    ..writeln('# 이름을 그대로 쓰고, 관제 도메인 $projectDomainId 에서만')
+    ..writeln('# /<로봇>/odom 처럼 갈라져 보인다.')
+    ..writeln('#')
+    ..writeln('#   ./${mapName}_domain_bridge.sh          # 띄운다')
+    ..writeln('#   ./${mapName}_domain_bridge.sh stop     # 내린다')
+    ..writeln()
+    // ROS 2 와 colcon 의 setup 스크립트가 미정의 변수를 참조해서, -u 로
+    // source 하면 그 자리에서 죽는다.
+    ..writeln('set -eo pipefail')
+    ..writeln()
+    ..writeln('cd "\$(dirname "\$0")"')
+    ..writeln('PID_FILE=".${mapName}_domain_bridge.pids"')
+    ..writeln()
+    ..writeln('stop_bridges() {')
+    ..writeln('  [[ -f \$PID_FILE ]] || return 0')
+    ..writeln('  while read -r pid; do')
+    ..writeln('    [[ -n \$pid ]] && kill "\$pid" 2>/dev/null || true')
+    ..writeln('  done < "\$PID_FILE"')
+    ..writeln('  rm -f "\$PID_FILE"')
+    ..writeln('}')
+    ..writeln()
+    ..writeln('if [[ \${1:-} == stop ]]; then')
+    ..writeln('  stop_bridges')
+    ..writeln('  echo "도메인 다리를 내렸습니다."')
+    ..writeln('  exit 0')
+    ..writeln('fi')
+    ..writeln()
+    // 두 번 띄우면 같은 토픽에 다리가 둘이 된다. 먼저 내린다.
+    ..writeln('stop_bridges')
+    ..writeln()
+    ..writeln('source /opt/ros/jazzy/setup.bash')
+    ..writeln();
+
+  if (bridged.isEmpty) {
+    buffer
+      ..writeln('echo "실물 이동 로봇이 등록돼 있지 않습니다. 놓을 다리가 없습니다."')
+      ..writeln('exit 0');
+    return buffer.toString();
+  }
+
+  for (final robot in bridged) {
+    final ns = robot.gzName;
+    final config = '${mapName}_domain_bridge_$ns.yaml';
+    buffer.writeln('# ${robot.robotId} · ${robot.displayName}');
+    if (robot.rosDomainId == null || robot.rosDomainId == projectDomainId) {
+      // 설정 파일이 비어 있으므로 띄워도 아무것도 안 옮긴다. 왜 빠졌는지
+      // 화면에 남긴다 — 조용히 넘기면 "다리는 떴는데 값이 안 온다" 가 된다.
+      buffer
+        ..writeln(
+          'echo "  ${robot.robotId}: ROS 도메인이 '
+          '${robot.rosDomainId == null ? '비어 있어' : '관제와 같아'} 건너뜁니다."',
+        )
+        ..writeln();
+      continue;
+    }
+    buffer
+      ..writeln(
+        'ros2 run domain_bridge domain_bridge "$config" '
+        '>> "$mapName.log" 2>&1 &',
+      )
+      ..writeln('echo \$! >> "\$PID_FILE"')
+      ..writeln('echo "  ${robot.robotId}: 도메인 ${robot.rosDomainId} → $projectDomainId"')
+      ..writeln();
+  }
+  buffer.writeln('echo "도메인 다리를 띄웠습니다. 내리려면 stop 을 붙여 실행합니다."');
   return buffer.toString();
 }
 
@@ -1359,6 +1630,18 @@ set -euo pipefail
 # 것과 터미널에서 띄운 것이 서로를 못 보던 일이 그래서 생겼다 — 앱은
 # 비대화형 셸로 스크립트를 돌리므로 ~/.bashrc 의 export 를 못 읽는다.
 # 그래서 맵 프로젝트가 정한 값을 여기 박아 둔다.
+# 어디서 온 값인지 남긴다.
+#
+# `:-` 는 환경 변수가 이기게 한다 — 터미널에서 한 번만 다른 망에 띄워 보는 길이다.
+# 그런데 `~/.bashrc` 에 `export ROS_DOMAIN_ID=22` 가 박혀 있으면 **늘** 이긴다.
+# 실제로 도메인을 52 로 고치고 다시 배포해도 백엔드는 계속 22 에서 돌았고, 로봇은
+# 52 에 있어 `/tf` 가 하나도 안 왔다. 화면에는 `frame does not exist` 로만 보여서
+# 프레임 이름이 틀린 줄 알고 한참을 뒤졌다. 그래서 덮였다는 사실을 여기 적는다.
+if [[ -n "\${ROS_DOMAIN_ID:-}" && "\$ROS_DOMAIN_ID" != "$rosDomainId" ]]; then
+  ROS_DOMAIN_SOURCE="환경 변수 — 프로젝트 설정 $rosDomainId 을 덮었습니다"
+else
+  ROS_DOMAIN_SOURCE="프로젝트 설정"
+fi
 export ROS_DOMAIN_ID="\${ROS_DOMAIN_ID:-$rosDomainId}"
 
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
@@ -1563,7 +1846,7 @@ exec > >(exec python3 -u "\$APP_ROOT/openrmf/scripts/log_collector.py" \\
 echo "=== \$(date '+%Y-%m-%d %H:%M:%S') $mapName 실행 ==="
 # 창을 띄웠는지 안 띄웠는지 로그만 봐도 알게 한다. "화면이 안 뜬다" 는 물음이
 # 실은 안 띄우기로 고른 것이었던 적이 여러 번이다.
-echo "Gazebo 창: \$GAZEBO_GUI · RViz: \$RVIZ · ROS_DOMAIN_ID: \$ROS_DOMAIN_ID"
+echo "Gazebo 창: \$GAZEBO_GUI · RViz: \$RVIZ · ROS_DOMAIN_ID: \$ROS_DOMAIN_ID (\$ROS_DOMAIN_SOURCE)"
 echo "시뮬레이션 백엔드: \$SIM_BACKEND · 시뮬레이터 창: \$SIMULATOR_GUI"
 
 # 자기 프로세스 그룹 번호를 남긴다. 중지 스크립트가 이 그룹을 통째로 끊는다.
@@ -1909,7 +2192,7 @@ ADAPTER_RESPAWN_WAIT="\${ADAPTER_RESPAWN_WAIT:-30}"
 ADAPTER_HEALTH_GRACE="\${ADAPTER_HEALTH_GRACE:-120}"
 ADAPTER_HEALTH_INTERVAL="\${ADAPTER_HEALTH_INTERVAL:-30}"
 ADAPTER_HEALTH_FAILURES="\${ADAPTER_HEALTH_FAILURES:-3}"
-EXPECTED_FLEET_ROBOTS="${robots.where((robot) => robot.isMobile && robot.runsInGazebo).map((robot) => robot.robotId).join(' ')}"
+EXPECTED_FLEET_ROBOTS="${navigatingRobots(robots).map((robot) => robot.robotId).join(' ')}"
 
 # ── 지도 서버가 정말 켜졌는지 ──────────────────────────────────────────────
 #
@@ -2420,7 +2703,11 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('-->')
     ..writeln('<launch>')
     ..write(_robotDomainEnv(robot))
-    ..writeln('  <arg name="use_sim_time" default="true"/>')
+    // 실물은 벽시계로 값을 찍어 보낸다. 여기를 true 로 두면 AMCL 이 sim 시계를
+    // 보고, 오지 않을 시각의 scan 을 기다리다 위치추정을 못 한다 — 오류는 안
+    // 난다. 프로젝트 launch 가 이 값을 다시 넘기므로 여기 기본값은 이 파일만
+    // 따로 돌려 볼 때 쓰인다.
+    ..writeln('  <arg name="use_sim_time" default="${robot.runsInGazebo}"/>')
     ..writeln('  <group>')
     // 한 번만 건다. 아래 노드에는 네임스페이스를 따로 걸지 않는다.
     ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
@@ -2459,6 +2746,18 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
         '      <param name="robot_base_frame" '
         'value="${robot.gzName}/base_footprint"/>',
       );
+    }
+    // controller와 recovery behavior의 원시 속도는 smoother 입력으로 보낸다.
+    // smoother의 최종 출력만 실제 로봇이 구독하는 cmd_vel에 연결해야 한다.
+    // 이 remap이 없으면 cmd_vel_smoothed는 구독자 0인 채 버려지고, 실물은
+    // smoothing을 우회한 원시 명령을 간헐적으로 받는다.
+    if (node == 'controller_server' || node == 'behavior_server') {
+      buffer.writeln('      <remap from="cmd_vel" to="cmd_vel_nav"/>');
+    }
+    if (node == 'velocity_smoother') {
+      buffer
+        ..writeln('      <remap from="cmd_vel" to="cmd_vel_nav"/>')
+        ..writeln('      <remap from="cmd_vel_smoothed" to="cmd_vel"/>');
     }
     buffer.writeln('    </node>');
   }
@@ -2792,9 +3091,7 @@ String buildNav2FleetAdapterScript({
   required String fleetName,
   required List<RmfProjectRobot> robots,
 }) {
-  final navigating = robots
-      .where((robot) => robot.isMobile && robot.runsInGazebo)
-      .toList();
+  final navigating = navigatingRobots(robots);
   // RMF 가 아는 이름(로봇 ID)과 ROS 네임스페이스(Gazebo 이름)는 다르다.
   final mapping = navigating
       .map((robot) => "    '${robot.robotId}': '${robot.gzName}',")
@@ -3360,9 +3657,8 @@ String buildProjectNav2LaunchXml({
       ? '$mapName.yaml'
       : mapYamlName.trim();
   final usingSlam = mapYaml != '$mapName.yaml';
-  final navigating = robots
-      .where((robot) => robot.isMobile && robot.runsInGazebo)
-      .toList();
+  final navigating = navigatingRobots(robots);
+  final useSimTime = projectUsesSimTime(robots);
   final buffer = StringBuffer()
     ..writeln("<?xml version='1.0' ?>")
     ..writeln('<!--')
@@ -3397,7 +3693,8 @@ String buildProjectNav2LaunchXml({
     ..writeln('-->')
     ..writeln('<launch>')
     ..writeln('  <arg name="map_dir" default="\$(dirname)"/>')
-    ..writeln('  <arg name="use_sim_time" default="true"/>')
+    // 실물 이동 로봇이 있으면 벽시계다. 자세한 까닭은 [projectUsesSimTime].
+    ..writeln('  <arg name="use_sim_time" default="$useSimTime"/>')
     // relay 와 앱이 만나는 곳. 앱은 ROBOSAPIENS_SENSOR_DIR 환경 변수를 보고
     // 같은 자리를 읽는다.
     ..writeln(
@@ -3461,12 +3758,18 @@ String buildProjectNav2LaunchXml({
       // 못 돌린다. <executable> 은 아무 명령이나 그대로 띄운다.
       //
       ..writeln('  <executable output="screen"')
+      // 무한히 되살리지는 않는다. 설정이 잘못돼 뜨자마자 죽는 경우, 끝없이
+      // 되살리면 로그가 같은 역추적으로 덮여 **진짜 첫 오류가 묻힌다.** 몇 번
+      // 해 보고 그래도 안 되면 멈추고, 실행 스크립트의 감시가 그것을 알린다.
       ..writeln('              respawn="true" respawn_delay="5.0"')
+      ..writeln('              respawn_max_retries="10"')
       ..writeln(
         '              cmd="python3 \$(var map_dir)/${mapName}_nav2_adapter.py'
         ' -c \$(var map_dir)/${fleetName}_config.yaml'
         ' -n \$(var map_dir)/nav_graphs/0.yaml'
-        ' -s"/>',
+        // `-s` 는 어댑터를 sim 시계로 돌린다. 실물 로봇의 TF 는 벽시계로 오므로
+        // 이것이 박혀 있으면 어댑터가 로봇 자리를 영영 못 읽는다.
+        '${useSimTime ? ' -s' : ''}"/>',
       )
       ..writeln('')
       ..writeln('  <!-- 설비 로봇을 RMF 워크셀로 잇는다. 이것이 없으면 로봇이')
@@ -3615,6 +3918,38 @@ double navGraphLaneWidth({required double robotWidthMeters, double? manual}) {
 /// **밑줄이 없다.** RMF 가 함께 주는 `rmf.rviz` 는 `/floor_plan` 을 보고 있어서
 /// 도면이 영영 안 온다. 우리가 설정을 따로 만드는 첫 번째 이유다.
 const String rmfFloorplanTopic = '/floorplan';
+
+/// 로봇 하나에 배정하는 색과 그 색의 이름.
+typedef RobotColor = ({int r, int g, int b, String label});
+
+/// 로봇별 색. 라이다 점과 RViz 의 로봇 표시가 **같은 색**을 쓴다. 전부 같은
+/// 색이면 스캔이 겹쳤을 때 어느 로봇이 무엇을 보고 있는지 구분할 수 없다.
+///
+/// 배경(48;48;48)·격자(130;130;130)·흑백 지도 위에서 서로 갈리는 색만 골랐다.
+/// 첫 색은 원래 라이다에 쓰던 주황이라 로봇이 한 대뿐이면 그림이 그대로다.
+const List<RobotColor> robotPalette = [
+  (r: 255, g: 85, b: 0, label: '주황'),
+  (r: 0, g: 170, b: 255, label: '하늘'),
+  (r: 0, g: 255, b: 128, label: '연두'),
+  (r: 255, g: 0, b: 255, label: '자홍'),
+  (r: 255, g: 220, b: 0, label: '노랑'),
+  (r: 170, g: 85, b: 255, label: '보라'),
+];
+
+/// 색 하나를 쓰는 곳이 두 군데다. 표기를 손으로 두 번 적으면 언젠가 어긋난다
+/// — 값은 팔레트 한 곳에만 두고 표기만 여기서 만든다.
+extension RobotColorFormat on RobotColor {
+  /// RViz 설정의 `Color:` 표기.
+  String get rviz => '$r; $g; $b';
+
+  /// launch `<set_parameter>` 가 fleet_states_visualizer 에 넘기는 표기.
+  /// 그쪽은 `[r, g, b]` 정수 배열을 읽는다.
+  String get launchList => '[$r, $g, $b]';
+}
+
+/// [index] 번째 로봇의 색. 로봇이 팔레트보다 많으면 처음부터 돈다.
+RobotColor robotColorFor(int index) =>
+    robotPalette[index % robotPalette.length];
 
 /// 이 프로젝트를 볼 RViz 설정.
 ///
@@ -3792,15 +4127,19 @@ String buildProjectRvizConfig({
   );
 
   // 라이다. 벽 높이를 낮춰 놓고 라이다가 벽을 넘겨다보는지 여기서 확인한다.
-  for (final robot in robots.where(
-    (robot) => robot.isMobile && robot.runsInGazebo,
-  )) {
+  //
+  // 색은 로봇마다 다르게 준다. 색 이름을 표시 이름에도 적어 둬야 화면의 점과
+  // 왼쪽 목록의 로봇을 눈으로 이을 수 있다.
+  final scanning = navigatingRobots(robots);
+  for (var i = 0; i < scanning.length; i++) {
+    final robot = scanning[i];
+    final color = robotColorFor(i);
     buffer
       ..writeln('    - Class: rviz_default_plugins/LaserScan')
-      ..writeln('      Name: 라이다 ${robot.robotId}')
+      ..writeln('      Name: 라이다 ${robot.robotId} (${color.label})')
       ..writeln('      Enabled: true')
       ..writeln('      Alpha: 1')
-      ..writeln('      Color: 255; 85; 0')
+      ..writeln('      Color: ${color.rviz}')
       ..writeln('      Color Transformer: FlatColor')
       ..writeln('      Decay Time: 0')
       ..writeln('      Position Transformer: XYZ')

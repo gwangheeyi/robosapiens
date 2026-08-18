@@ -98,7 +98,7 @@ void main() {
   group('로봇 등록 창', () {
     testWidgets('속도 칸이 더는 없다', (tester) async {
       await openApp(tester);
-      await tester.tap(find.text('로봇').first);
+      await tester.tap(find.text('로봇 관리').first);
       await tester.pumpAndSettle();
       await tester.tap(find.text('로봇 등록'));
       await tester.pumpAndSettle();

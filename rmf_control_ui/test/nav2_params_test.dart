@@ -26,6 +26,7 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: odom
+    default_server_timeout: 20
 
 controller_server:
   ros__parameters:
@@ -114,6 +115,23 @@ behavior_server:
       // 절대 이름 /scan 이 하나도 안 남아야 한다. 남으면 두 대가 같은 라이다를
       // 본다.
       expect(yaml, isNot(contains('topic: /scan')));
+    });
+  });
+
+  group('실물 action server 대기 시간', () {
+    test('재배포할 때 벤더의 20ms를 2000ms로 늘린다', () {
+      final result = rewrite();
+      expect(
+        result.yaml,
+        contains('default_server_timeout: $nav2DefaultServerTimeoutMs'),
+      );
+      expect(result.yaml, isNot(contains('default_server_timeout: 20\n')));
+      expect(
+        result.changes,
+        contains(
+          'default_server_timeout: 20 → 2000 ms (실제 센서 처리 지연 허용)',
+        ),
+      );
     });
   });
 

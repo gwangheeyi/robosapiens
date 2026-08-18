@@ -148,13 +148,13 @@ sleep 300
     test('막히지 않는다', () async {
       writeRunScript();
 
-      final first = await startProject(mapName);
+      final first = await startProject(mapName, rosDomainId: 0);
       expect(first.success, isTrue, reason: first.message);
       await waitForPgid();
       expect(runningProjectName, mapName);
 
       // 도는 중에는 막는다. 두 벌이 같은 도메인에 뜨면 schedule node 가 부딪힌다.
-      final again = await startProject(mapName);
+      final again = await startProject(mapName, rosDomainId: 0);
       expect(again.success, isFalse);
       expect(again.message, contains('이미 돌고 있습니다'));
 
@@ -162,7 +162,7 @@ sleep 300
       await stopFromTerminal();
 
       // 여기가 예전에 막히던 자리다.
-      final second = await startProject(mapName);
+      final second = await startProject(mapName, rosDomainId: 0);
       expect(
         second.success,
         isTrue,
@@ -172,7 +172,7 @@ sleep 300
 
     test('refreshRunningProject 가 기억을 실제와 맞춘다', () async {
       writeRunScript();
-      expect((await startProject(mapName)).success, isTrue);
+      expect((await startProject(mapName, rosDomainId: 0)).success, isTrue);
       await waitForPgid();
       expect(await refreshRunningProject(), mapName);
 
@@ -188,7 +188,7 @@ sleep 300
       writeRunScript();
       pgidFile().writeAsStringSync('${livePgid()}\n');
 
-      final result = await startProject(mapName);
+      final result = await startProject(mapName, rosDomainId: 0);
       expect(result.success, isFalse);
       expect(result.message, contains('앱이 띄운 것이 아닙니다'));
       expect(result.message, contains('stop_$mapName.sh'));

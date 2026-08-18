@@ -19,6 +19,7 @@ Future<String?> refreshRunningProject() async => null;
 
 Future<RmfRunResult> startProject(
   String mapName, {
+  required int rosDomainId,
   SimulationBackend backend = SimulationBackend.gazebo,
   bool gazeboGui = false,
   bool rviz = false,

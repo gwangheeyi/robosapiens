@@ -179,15 +179,13 @@ void main() {
       );
       final topics = robotTopics(pinky);
       for (final topic in [...topics.incoming, ...topics.outgoing]) {
-        // 화면에는 Nav2가 내는 원본 명령을 보여 준다. Gazebo 다리는 그 명령을
-        // 직접 받지 않고 velocity_smoother의 최종 출력만 받아야 한다.
-        final bridgedTopic = topic.endsWith('/cmd_vel')
-            ? '${topic}_smoothed'
-            : topic;
+        // 이름을 그대로 견준다. cmd_vel 도 예외가 아니다 — Nav2 launch 가
+        // velocity_smoother 의 출력을 cmd_vel 로 리맵하므로, 화면이 보여 주는
+        // 이름과 다리가 받는 이름이 같다.
         expect(
           bridge,
-          contains('ros_topic_name: "$bridgedTopic"'),
-          reason: '$bridgedTopic 이 다리 설정에 없다',
+          contains('ros_topic_name: "$topic"'),
+          reason: '$topic 이 다리 설정에 없다',
         );
       }
     });

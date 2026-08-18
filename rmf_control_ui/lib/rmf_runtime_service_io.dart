@@ -9,6 +9,7 @@ import 'dart:io';
 import 'rmf_config_export.dart';
 import 'rmf_runtime_models.dart';
 import 'ros_probe_io.dart';
+import 'ros_static_peers_io.dart';
 import 'workspace_paths_io.dart';
 
 /// 노드 이름이 이 조각을 담고 있으면 RMF 백엔드로 본다.
@@ -161,6 +162,89 @@ Future<List<String>> gazeboRunningProjects() async {
   running.sort();
   return running;
 }
+
+/// RMF core 가 돌고 있는 맵 프로젝트 이름.
+///
+/// [gazeboRunningProjects] 는 `gz sim` 하나만 센다. 시뮬레이터를 안 쓰는
+/// 프로젝트(`SIM_BACKEND=none`, 실물 로봇)에서는 **물어볼 Gazebo 가 없어서 늘
+/// 빈 목록이 나온다.**
+///
+/// 실측(2026-08-17) — 실물 Pinky 한 대로 `project1-ver2` 를 띄운 상태:
+///
+///     $ ros2 node list | wc -l
+///     38       ← RMF core·Nav2·fleet adapter 가 다 떠 있다
+///     $ pgrep -af "gz sim"
+///     (없음)   ← gazeboRunningProjects() = []
+///
+/// 그래서 앱은 다 떠 있는데도 `Open-RMF 실행 — 떠 있지 않습니다` 로 보여 줬고,
+/// 그 아래 네 단계가 전부 `모름` 이 되었다. 게다가 [robotMoveBlocker] 가 이
+/// 값으로 **보내기를 막는다** — 화면만 틀린 것이 아니라 실제로 로봇을 못
+/// 보냈다.
+///
+/// 여기서는 실행 스크립트가 띄운 `<맵>.launch.xml` 을 센다. 그 launch 가
+/// RMF core 를 물고 있고, 경로에 맵 디렉터리가 들어 있어 프로젝트를 가릴 수
+/// 있다. [runningBackendProjects] 처럼 맵 디렉터리를 물고 있는 것을 전부 세지는
+/// 않는다 — 배포만 해도 `building_map_server` 와 `ros2 run` 껍데기가 남아서
+/// 백엔드가 돈다고 답하게 된다. 배포는 launch 를 띄우지 않으므로 여기에 안
+/// 걸린다.
+Future<List<String>> rmfCoreRunningProjects() async {
+  if (Platform.environment.containsKey('FLUTTER_TEST')) return const [];
+  final root = _findProjectRoot();
+  if (root == null) return const [];
+  final maps = Directory('${root.path}/rmf_maps');
+  if (!maps.existsSync()) return const [];
+  String listing;
+  try {
+    final found = await Process.run('bash', [
+      '-lc',
+      'pgrep -u "\$(id -u)" -af "launch.xml" 2>/dev/null || true',
+    ]).timeout(const Duration(seconds: 10));
+    listing = found.stdout.toString();
+  } catch (_) {
+    // 못 물어봤으면 모른다. 없다고 답한다 — 떠 있다고 잘못 답하면 그 아래를
+    // 아무리 봐도 원인이 안 나온다.
+    return const [];
+  }
+  // 중지 스크립트와 이 검사를 띄운 셸 자신은 세지 않는다. `pgrep -af` 는 그
+  // 글자를 명령줄에 담은 것을 전부 잡는다.
+  final launchLines = listing
+      .split('\n')
+      .where(
+        (line) =>
+            line.contains('.launch.xml') &&
+            !line.contains('stop_') &&
+            !line.contains('pgrep'),
+      )
+      .toList();
+  final running = <String>[];
+  for (final entry in maps.listSync()) {
+    if (entry is! Directory) continue;
+    final name = entry.uri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .last;
+    // 디렉터리 경로째로 찾는다. 맵 이름만 보면 `gwanghee` 가 `gwanghee2` 의
+    // launch 에도 걸린다.
+    if (launchLines.any((line) => line.contains('${entry.path}/'))) {
+      running.add(name);
+    }
+  }
+  running.sort();
+  return running;
+}
+
+/// 이 프로젝트의 백엔드가 떠 있는 것으로 볼 프로세스를 고른다.
+///
+/// Gazebo 를 쓰는 프로젝트는 **Gazebo 가 살아 있는지**가 그대로 답이다. 물리가
+/// 죽고 RMF·Nav2 만 남은 상태를 초록으로 보여 준 적이 있어서, 거기서는 여전히
+/// `gz sim` 하나만 본다.
+///
+/// 시뮬레이터가 없으면 그 질문 자체가 성립하지 않는다. 실물 로봇이 물리를
+/// 맡으므로 볼 것은 RMF core 다.
+Future<List<String>> backendRunningProjects({
+  required bool usesGazebo,
+}) async => usesGazebo
+    ? await gazeboRunningProjects()
+    : await rmfCoreRunningProjects();
 
 /// 셸에 넘길 문자열을 작은따옴표로 감싼다. 맵 이름에 공백이 들어갈 수 있다.
 String _shellQuote(String value) => "'${value.replaceAll("'", r"'\''")}'";
@@ -322,6 +406,9 @@ String _withRosEnvironment(String command) {
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '
+      // 로봇이 다른 기계에 있으면 이것 없이는 상대를 못 찾는다. `/fleet_states` 는
+      // 이 PC 에서 나오지만 노드 목록·서비스 호출은 로봇 쪽도 본다.
+      '${rosStaticPeersExport()}'
       '$command';
 }
 

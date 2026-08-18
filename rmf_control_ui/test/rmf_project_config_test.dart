@@ -312,7 +312,7 @@ void main() {
       );
       for (final topic in [
         'odom',
-        'cmd_vel_smoothed',
+        'cmd_vel',
         'scan',
         'joint_states',
       ]) {
@@ -324,7 +324,7 @@ void main() {
       expect(yaml, isNot(contains('ros_topic_name: "cmd_vel"')));
     });
 
-    test('센서 이름은 같고 속도 명령만 smoother 출력을 Gazebo 입력에 잇는다', () {
+    test('양쪽 토픽 이름이 정확히 같다', () {
       final yaml = buildProjectGzBridgeYaml(
         mapName: 'gwanghee',
         robots: robots,
@@ -337,12 +337,10 @@ void main() {
       ).allMatches(yaml).map((m) => m.group(1)).toList();
       expect(ros, isNotEmpty);
       expect(ros.length, gz.length);
+      // 이름이 한 칸이라도 어긋나면 다리가 조용히 끊긴다. 실제로 ROS 쪽만
+      // cmd_vel_smoothed 로 적혀 있어 Gazebo 가 속도를 한 번도 못 받았다.
       for (var i = 0; i < ros.length; i++) {
-        if (ros[i]!.endsWith('/cmd_vel_smoothed')) {
-          expect(gz[i], ros[i]!.replaceFirst('/cmd_vel_smoothed', '/cmd_vel'));
-        } else {
-          expect(gz[i], ros[i]);
-        }
+        expect(gz[i], ros[i]);
       }
     });
 
@@ -367,9 +365,10 @@ void main() {
         expect(lines[i - 4], contains('cmd_vel'));
       }
       expect('ROS_TO_GZ'.allMatches(yaml).length, robots.length);
-      expect(yaml, contains('ros_topic_name: "/pinky_01/cmd_vel_smoothed"'));
+      expect(yaml, contains('ros_topic_name: "/pinky_01/cmd_vel"'));
       expect(yaml, contains('gz_topic_name: "/pinky_01/cmd_vel"'));
-      expect(yaml, isNot(contains('ros_topic_name: "/pinky_01/cmd_vel"')));
+      // Nav2 기본 이름은 velocity_smoother 리맵 뒤에는 발행자가 없다.
+      expect(yaml, isNot(contains('cmd_vel_smoothed')));
     });
 
     test('핑키 카메라를 ROS로 옮기지 않는다', () {
@@ -1003,12 +1002,18 @@ void main() {
         robots: const [pinky],
       );
       expect(script, contains(r'LOG_FILE="$MAP_DIR/mixed.log"'));
-      // 거르는 awk 를 거쳐 파일로 간다. 이 awk 가 파이프를 쉬지 않고 읽으므로
-      // 교착은 여전히 나지 않는다.
-      expect(script, contains('exec > >(exec awk'));
+      // 거르는 수집기를 거쳐 파일로 간다. 이 수집기가 파이프를 쉬지 않고
+      // 읽으므로 교착은 여전히 나지 않는다.
+      //
+      // 예전에는 awk 였다. mawk 가 detached 세션의 프로세스 치환 파이프에서
+      // 읽기를 멈춘 사례가 있어 `log_collector.py` 로 옮겼다 — 거르는 규칙은
+      // 그 파일에 있고, 여기서는 **파일로 간다는 것**만 지킨다.
+      expect(script, contains('exec > >(exec python3 -u'));
+      expect(script, contains('log_collector.py'));
+      expect(script, contains(r'--out "$LOG_FILE"'));
       // 리다이렉트는 로봇을 띄우기 전에 걸려야 한다.
       expect(
-        script.indexOf('exec > >(exec awk'),
+        script.indexOf('exec > >(exec python3 -u'),
         lessThan(script.indexOf('Gazebo bringup')),
       );
     });
@@ -1021,15 +1026,20 @@ void main() {
         mapDirectory: '/maps/mixed',
         robots: const [pinky],
       );
-      expect(script, contains('if (signature == last_signature) {'));
-      expect(
-        script,
-        contains(r'gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)'),
-      );
-      expect(script, contains('같은 줄 " dup "번 더'));
-      // 넘치면 한 번 밀어 두고 새로 쓴다. 최대 두 배까지만 남는다.
+      // 넘치면 한 번 밀어 두고 새로 쓴다. 최대 두 배까지만 남는다. 한계는
+      // 스크립트가 정하고 수집기에 넘긴다.
       expect(script, contains(r'LOG_MAX_MB="${LOG_MAX_MB:-200}"'));
-      expect(script, contains(r'maxmb * 1048576'));
+      expect(script, contains(r'--max-mb "$LOG_MAX_MB"'));
+      // 접는 일 자체는 수집기가 한다. 스크립트만 봐서는 알 수 없으므로 그쪽을
+      // 직접 본다 — 규칙이 어디에 있든 접기는 살아 있어야 한다.
+      final collector = File(
+        '../openrmf/scripts/log_collector.py',
+      ).readAsStringSync();
+      // 시각만 다른 줄은 같은 줄로 본다.
+      expect(collector, contains('TIMESTAMP.sub("[time]", line)'));
+      expect(collector, contains('if signature == previous:'));
+      expect(collector, contains('같은 줄'));
+      expect(collector, contains('limit = max(1, args.max_mb) * 1024 * 1024'));
     });
 
     test('에러만 따로 모은 파일을 하나 더 쓴다', () {
@@ -1041,8 +1051,13 @@ void main() {
         robots: const [pinky],
       );
       expect(script, contains(r'ERR_FILE="$MAP_DIR/mixed.err.log"'));
-      expect(script, contains('Traceback'));
-      expect(script, contains(r'print $0 > err'));
+      expect(script, contains(r'--err "$ERR_FILE"'));
+      final collector = File(
+        '../openrmf/scripts/log_collector.py',
+      ).readAsStringSync();
+      // 무엇을 에러로 볼지. 역추적은 ERROR 라고 안 적혀 있어도 담아야 한다.
+      expect(collector, contains('Traceback'));
+      expect(collector, contains('errors.write(line'));
     });
 
     test('없으면 무엇을 빌드해야 하는지 알려 준다', () {
@@ -1360,11 +1375,8 @@ void main() {
         lessThan(script.indexOf('gwanghee_nav2.launch.xml')),
       );
       expect(script, contains('flock -n 9'));
-      expect(script, contains('last_signature'));
-      expect(
-        script,
-        contains(r'gsub(/\[[0-9]+\.[0-9]+\]/, "[time]", signature)'),
-      );
+      // 로그는 수집기를 거쳐 파일로 간다. 접는 규칙은 그쪽에 있다.
+      expect(script, contains('log_collector.py'));
     });
 
     test('기본으로는 rmf-web 주소를 안 넘긴다', () {

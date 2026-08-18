@@ -17,6 +17,12 @@ Future<List<String>> runningBackendProjects() async => const [];
 
 Future<List<String>> gazeboRunningProjects() async => const [];
 
+Future<List<String>> rmfCoreRunningProjects() async => const [];
+
+Future<List<String>> backendRunningProjects({
+  required bool usesGazebo,
+}) async => const [];
+
 Future<String> sweepOrphanBackends(String rootPath) async =>
     '웹 빌드에서는 프로세스를 쓸어낼 수 없습니다.';
 

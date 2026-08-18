@@ -12,7 +12,7 @@
   gz_type_name: "gz.msgs.Odometry"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/pinky_02/cmd_vel_smoothed"
+- ros_topic_name: "/pinky_02/cmd_vel"
   gz_topic_name: "/pinky_02/cmd_vel"
   ros_type_name: "geometry_msgs/msg/Twist"
   gz_type_name: "gz.msgs.Twist"

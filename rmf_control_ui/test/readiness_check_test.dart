@@ -69,6 +69,8 @@ void main() {
     // 기본값은 기다려 주는 시간을 한참 지난 값이다. 대부분의 시험은 다 뜬
     // 뒤의 상태를 본다.
     Duration? backendUptime = const Duration(minutes: 5),
+    // 대부분의 시험은 시뮬레이터로 도는 프로젝트를 본다.
+    bool usesSimulator = true,
   }) => buildReadinessReport(
     waypointNames: waypoints,
     robots: robots,
@@ -80,6 +82,7 @@ void main() {
     clockPublishers: clockPublishers,
     mapServerState: mapServerState,
     backendUptime: backendUptime,
+    usesSimulator: usesSimulator,
   );
 
   ReadinessCheck find(ReadinessReport r, String title) =>
@@ -292,6 +295,65 @@ void main() {
       // 이유만 있으면 화면을 보고도 다음 손이 안 나간다.
       final r = report(backendRunning: false, fleetReachable: false);
       expect(r.summary, contains('프로젝트 실행'));
+    });
+  });
+
+  group('시뮬레이터 없이 돌 때', () {
+    // 실물 Pinky 만 쓰는 프로젝트(`SIM_BACKEND=none`)다. 실행 스크립트가
+    // `use_sim_time` 을 false 로 두어 모든 노드가 실제 시계를 쓴다 — `/clock` 을
+    // 내는 곳이 아예 없다.
+
+    test('시계 칸을 두지 않는다', () {
+      // 두면 영영 안 채워지는 칸이 하나 남는다. 실물로 돌린 확인표가 그랬다:
+      //   (모름) 시뮬레이션 시계 — 백엔드가 떠야 확인할 수 있습니다
+      final r = report(usesSimulator: false, clockPublishers: null);
+      expect(
+        r.checks.where((check) => check.title == '시뮬레이션 시계'),
+        isEmpty,
+      );
+      expect(r.checks, hasLength(8));
+    });
+
+    test('시계 없이도 다 됐다고 말할 수 있다', () {
+      // 이것이 핵심이다. 칸이 남아 있으면 `isReady` 가 영영 false 라, 다 됐는지를
+      // 이 표로 알 수 없다.
+      final r = report(usesSimulator: false, clockPublishers: null);
+      expect(r.isReady, isTrue);
+      expect(r.summary, '작업을 낼 수 있습니다.');
+    });
+
+    test('나머지 칸은 그대로 본다', () {
+      // 시계만 빠진다. 지도 서버·어댑터·로봇 붙음은 실물에서도 그대로 봐야 한다.
+      final r = report(usesSimulator: false, clockPublishers: null);
+      expect(find(r, 'Nav2 지도 서버').isReady, isTrue);
+      expect(find(r, '로봇이 RMF 에 붙음').isReady, isTrue);
+    });
+
+    test('막힌 것은 여전히 막혔다고 한다', () {
+      final r = report(
+        usesSimulator: false,
+        clockPublishers: null,
+        backendRunning: false,
+        fleetReachable: false,
+      );
+      expect(r.isReady, isFalse);
+      expect(find(r, 'Open-RMF 실행').isBlocked, isTrue);
+    });
+  });
+
+  group('시뮬레이터로 돌 때는 시계를 계속 본다', () {
+    test('두 시계를 잡아낸다', () {
+      // 남은 `parameter_bridge` 를 잡는 것이 이 칸의 본래 목적이다. 기본값을
+      // true 로 둔 까닭이기도 하다 — 모르는 채로 칸을 없애면 이것을 놓친다.
+      final r = report(clockPublishers: 2);
+      expect(find(r, '시뮬레이션 시계').isBlocked, isTrue);
+      expect(find(r, '시뮬레이션 시계').detail, contains('parameter_bridge'));
+    });
+
+    test('안 넘기면 시계를 보는 쪽이 기본이다', () {
+      // 대부분의 프로젝트가 시뮬레이터를 쓴다.
+      final r = report(clockPublishers: 0);
+      expect(find(r, '시뮬레이션 시계').isBlocked, isTrue);
     });
   });
 }

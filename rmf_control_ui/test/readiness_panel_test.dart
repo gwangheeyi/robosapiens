@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rmf_control_ui/main.dart';
+import 'package:rmf_control_ui/readiness_check.dart';
 
 void main() {
   Future<void> openTasks(WidgetTester tester) async {
@@ -15,7 +16,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const RmfControlApp());
-    await tester.tap(find.text('작업'));
+    await tester.tap(find.text('작업 관리').first);
     await tester.pumpAndSettle();
   }
 
@@ -53,6 +54,17 @@ void main() {
 
   testWidgets('센 단계 수를 보여 준다', (tester) async {
     await openTasks(tester);
-    expect(find.textContaining('/8'), findsOneWidget);
+    // 단계 수를 여기 박아 두면 확인이 하나 늘 때마다 이 시험이 깨진다. 그때
+    // 사람은 숫자만 고치게 되고, 정작 "화면이 센 수를 그대로 보이는가" 는 안
+    // 보게 된다. 그래서 판단하는 쪽에 직접 물어 그 수를 쓴다.
+    final expected = buildReadinessReport(
+      waypointNames: const [],
+      robots: const [],
+      exported: false,
+      backendRunning: false,
+      fleetReachable: false,
+      attachedRobots: const {},
+    ).checks.length;
+    expect(find.textContaining('/$expected'), findsOneWidget);
   });
 }

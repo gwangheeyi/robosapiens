@@ -39,7 +39,7 @@ void main() {
     await tester.tap(find.text('확인'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('로봇'));
+    await tester.tap(find.text('로봇 관리').first);
     await tester.pumpAndSettle();
 
     expect(find.text('로봇 운영'), findsOneWidget);
@@ -64,10 +64,12 @@ void main() {
     await tester.tap(find.text('취소'));
     await tester.pump(const Duration(milliseconds: 400));
 
-    await tester.tap(find.text('작업'));
+    await tester.tap(find.text('작업 관리').first);
     await tester.pumpAndSettle();
 
-    expect(find.text('작업 관리'), findsOneWidget);
+    // 사이드바 항목과 화면 제목이 같은 말이라 하나만 나올 수는 없다. 이 화면이
+    // 열렸다는 것은 바로 아래 항목들이 말해 준다.
+    expect(find.text('작업 관리'), findsWidgets);
     expect(find.text('불러온 맵: '), findsOneWidget);
     expect(find.text('warehouse.building.yaml'), findsOneWidget);
     expect(find.text('현재 운영 맵'), findsOneWidget);

@@ -38,12 +38,14 @@ void main() {
     test('숫자가 아니면 조용히 0 으로 바꾸지 않고 막는다', () {
       // 45 라고 치려다 어긋난 값이 0도로 저장되면, 로봇이 왜 엉뚱한 데를 보고
       // 서 있는지 알 수 없다.
-      expect(
-        source,
-        contains(
-          "headingError =\n                                  '숫자로 적어 주세요",
-        ),
-      );
+      //
+      // 줄바꿈과 들여쓰기까지 적어 두면 안 된다. 포매터가 그 줄을 다시 접는
+      // 순간, 고칠 것이 없는데 시험만 깨진다. 그런 실패는 사람이 곧 무시하게
+      // 되고 그러면 진짜 깨졌을 때도 안 본다. 붙는 값과 그 문구만 본다.
+      expect(source, contains('headingError ='));
+      expect(source, contains("'숫자로 적어 주세요"));
+      // 못 읽은 값을 0 으로 눕히지 않는다.
+      expect(source, isNot(contains('headingError = null;\n      heading = 0')));
     });
 
     test('나가는 길 방향을 눌러서 넣을 수 있다', () {

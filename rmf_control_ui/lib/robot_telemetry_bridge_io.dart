@@ -18,19 +18,24 @@ import 'dart:io';
 import 'rmf_project_config.dart';
 import 'rmf_runtime_models.dart';
 import 'robot_telemetry_models.dart';
+import 'ros_static_peers_io.dart';
 import 'workspace_paths_io.dart';
 
 /// ROS 환경을 읽어 들인 뒤 [command] 를 실행하는 셸 한 줄.
 ///
 /// 앱은 보통 ROS 를 source 하지 않은 셸에서 실행된다. 그대로 `ros2` 를 부르면
 /// 명령을 찾지 못한다.
-String _withRosEnvironment(String command) {
+String _withRosEnvironment(String command, {int? rosDomainId}) {
   final rosSetup =
       Platform.environment['ROS_SETUP'] ?? '/opt/ros/jazzy/setup.bash';
   final workspace = bundledRmfWorkspace();
   return 'set +u; '
       '[ -f "$rosSetup" ] && . "$rosSetup"; '
       '[ -f "$workspace/install/setup.bash" ] && . "$workspace/install/setup.bash"; '
+      '${rosDomainId == null ? '' : 'export ROS_DOMAIN_ID=$rosDomainId; '}'
+      // 로봇이 다른 기계에 있으면 이것 없이는 토픽을 못 찾는다. 그러면 값이 안
+      // 오고, 앱은 멀쩡한 실물 로봇을 Mock 으로 떨어뜨린다.
+      '${rosStaticPeersExport()}'
       '$command';
 }
 
@@ -50,6 +55,7 @@ class _RobotFeed {
     this.spawnX,
     this.spawnY,
     this.spawnHeading = 0,
+    this.rosDomainId,
   });
 
   final String robotId;
@@ -59,6 +65,7 @@ class _RobotFeed {
   final double? spawnX;
   final double? spawnY;
   final double spawnHeading;
+  final int? rosDomainId;
   Process? process;
   StreamSubscription<String>? lines;
   RobotPose? pose;
@@ -157,6 +164,52 @@ class RobotTelemetryBridge {
     ..._fleetPoses,
   };
 
+  /// 한 로봇의 odom을 직접 읽는다.
+  ///
+  /// Gazebo 이동 로봇은 RMF의 `/fleet_states`가 더 정확하지만, 실물 Pinky는
+  /// 자체 namespaced odom만으로도 앱에 살아 있음을 알려야 한다.
+  Future<void> _openFeed(_RobotFeed feed) async {
+    if (Platform.environment.containsKey('FLUTTER_TEST')) return;
+    try {
+      final process = await Process.start('bash', [
+        '-lc',
+        _withRosEnvironment(
+          'exec ros2 topic echo ${feed.topic} --field pose.pose --csv',
+          rosDomainId: feed.rosDomainId,
+        ),
+      ]);
+      feed.process = process;
+      feed.lines = process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen((line) {
+            final pose = RobotPose.parseCsv(line, DateTime.now());
+            if (pose == null) return;
+            feed.pose = pose.toWorld(
+              spawnX: feed.spawnX,
+              spawnY: feed.spawnY,
+              spawnHeading: feed.spawnHeading,
+            );
+            _controller.add(status);
+          });
+      unawaited(
+        process.stderr.transform(utf8.decoder).join().then((message) {
+          if (message.trim().isNotEmpty) feed.error = message.trim();
+        }),
+      );
+      unawaited(
+        process.exitCode.then((_) {
+          if (feed.process != process) return;
+          feed.process = null;
+          _controller.add(status);
+        }),
+      );
+    } catch (error) {
+      feed.error = '$error';
+      feed.process = null;
+    }
+  }
+
   /// 마지막 `/fleet_states` 메시지에 실제로 들어 있던 RMF 로봇 ID.
   Set<String> get attachedRobotIds => _fleetPoses.keys.toSet();
 
@@ -176,13 +229,14 @@ class RobotTelemetryBridge {
     );
   }
 
-  /// [robots] 중 Gazebo 로 돌리는 것만 구독한다.
+  /// [robots] 중 ROS 토픽을 쓰는 Gazebo·실물 로봇을 구독한다.
   ///
   /// 이미 붙어 있는 것은 그대로 두고, 빠진 것만 끊고 새로 생긴 것만 붙인다.
   /// 매번 전부 다시 띄우면 화면이 잠깐씩 빈다.
   ///
   /// [rosDomainId] 는 백엔드가 도는 도메인이다. 반드시 넘긴다 — [_rosDomainId]
-  /// 를 보라.
+  /// 를 보라. 로봇이 [RmfProjectRobot.rosDomainId] 를 따로 정했으면 그 로봇의
+  /// 피드만 그것을 쓴다.
   Future<void> sync(
     Iterable<RmfProjectRobot> robots, {
     required int rosDomainId,
@@ -195,7 +249,7 @@ class RobotTelemetryBridge {
     }
     final wanted = {
       for (final robot in robots)
-        if (robot.runsInGazebo) robot.robotId: robot,
+        if (robot.dataSource.usesTopics) robot.robotId: robot,
     };
     // 위치는 플릿 전체가 담긴 /fleet_states 하나에서 읽는다. 예전에는 로봇마다
     // `ros2 topic echo`를 하나씩 띄워 DDS 그래프를 N번 돌렸고, 등록 대수만큼
@@ -206,21 +260,28 @@ class RobotTelemetryBridge {
     _feeds.clear();
     for (final entry in wanted.entries) {
       final robot = entry.value;
-      if (robot.isMobile) continue;
-      _feeds[entry.key] =
-          _RobotFeed(
-              robotId: entry.key,
-              topic: _liveTopicFor(robot),
-              spawnX: robot.spawnX,
-              spawnY: robot.spawnY,
-              spawnHeading: robot.spawnHeading,
-            )
-            ..pose = RobotPose(
-              x: robot.spawnX ?? 0,
-              y: robot.spawnY ?? 0,
-              heading: robot.spawnHeading,
-              at: DateTime.now(),
-            );
+      // Gazebo 이동 로봇은 아래의 /fleet_states에서 읽는다. 실물은 Gazebo나
+      // RMF 백엔드를 띄우지 않아도 자체 /odom으로 연결 여부가 보여야 한다.
+      if (robot.isMobile && robot.runsInGazebo) continue;
+      _feeds[entry.key] = _RobotFeed(
+        robotId: entry.key,
+        topic: _liveTopicFor(robot),
+        spawnX: robot.spawnX,
+        spawnY: robot.spawnY,
+        spawnHeading: robot.spawnHeading,
+        rosDomainId: robot.rosDomainId ?? rosDomainId,
+      );
+      if (robot.isMobile) {
+        await _openFeed(_feeds[entry.key]!);
+      } else if (robot.runsInGazebo) {
+        // 설치형 Gazebo 로봇은 움직이지 않으므로 등록된 자리가 곧 자세다.
+        _feeds[entry.key]!.pose = RobotPose(
+          x: robot.spawnX ?? 0,
+          y: robot.spawnY ?? 0,
+          heading: robot.spawnHeading,
+          at: DateTime.now(),
+        );
+      }
     }
     _wanted
       ..clear()
@@ -242,8 +303,8 @@ class RobotTelemetryBridge {
       final process = await Process.start('bash', [
         '-lc',
         _withRosEnvironment(
-          'export ROS_DOMAIN_ID=$_rosDomainId; '
           'exec ros2 topic echo /fleet_states',
+          rosDomainId: _rosDomainId,
         ),
       ]);
       _fleetProcess = process;

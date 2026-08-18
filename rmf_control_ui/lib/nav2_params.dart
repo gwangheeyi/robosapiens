@@ -44,6 +44,14 @@ const String nav2MapTopic = '/nav2_map';
 /// `map_server` 쪽에 주는 이름. 루트 네임스페이스라 빗금을 뺀 것이 같은 곳이다.
 const String nav2MapTopicName = 'nav2_map';
 
+/// BT가 내부 Nav2 action server의 목표 승인을 기다리는 시간 [ms].
+///
+/// Nav2 벤더 기본값 20ms는 로컬 시뮬레이터에서는 동작하지만, 실제 Pinky의
+/// LiDAR/TF를 함께 처리하는 관제 PC에서는 스케줄링 지연만으로도 초과한다.
+/// 목표가 planner에 도착했는데도 `compute_path_to_pose` 승인을 기다리다 즉시
+/// 실패하지 않도록 배포 파일에는 2초를 쓴다.
+const int nav2DefaultServerTimeoutMs = 2000;
+
 /// 로봇마다 갈라야 하는 TF 프레임.
 ///
 /// `map` 은 여기 없다 — 같은 건물이므로 **함께 쓴다**. 로봇마다 제 AMCL 이
@@ -303,6 +311,23 @@ Nav2ParamsRewrite rewriteNav2Params({
         'y ${initialY.toStringAsFixed(3)} '
         '(벤더의 리스트 모양은 AMCL 이 못 읽어 버려집니다)',
       );
+      continue;
+    }
+
+    // 실제 센서와 RMF를 함께 처리할 때 20ms는 action server가 목표를 승인하기도
+    // 전에 끝난다. 벤더 파일의 값과 관계없이 배포본에는 운용 기본값을 쓴다.
+    if (key == 'default_server_timeout') {
+      final before = int.tryParse(parts.value.trim());
+      out.add(
+        '$indent$key: $nav2DefaultServerTimeoutMs'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before != nav2DefaultServerTimeoutMs) {
+        changes.add(
+          'default_server_timeout: ${parts.value.trim()} → '
+          '$nav2DefaultServerTimeoutMs ms (실제 센서 처리 지연 허용)',
+        );
+      }
       continue;
     }
 

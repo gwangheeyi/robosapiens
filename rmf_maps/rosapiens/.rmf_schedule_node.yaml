@@ -1,0 +1,60 @@
+- operation: Add
+  participant_description:
+    name: pinky_06
+    group: rosapiens_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.10000000000000001
+        - 0.10000000000000001
+- operation: Add
+  participant_description:
+    name: pinky_05
+    group: rosapiens_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.10000000000000001
+        - 0.10000000000000001
+- operation: Add
+  participant_description:
+    name: pinky_04
+    group: rosapiens_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.10000000000000001
+        - 0.10000000000000001
+- operation: Add
+  participant_description:
+    name: pinky_01
+    group: rosapiens_pinky
+    responsiveness: Responsive
+    profile:
+      footprint:
+        type: Circle
+        index: 0
+      vicinity:
+        type: Circle
+        index: 1
+      shape_context:
+        - 0.10000000000000001
+        - 0.10000000000000001

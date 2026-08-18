@@ -102,6 +102,39 @@ void main() {
       expect(managed, contains('bt_navigator'));
     });
 
+    test('velocity smoother의 최종 출력만 실제 cmd_vel로 보낸다', () {
+      expect(
+        RegExp(r'<remap from="cmd_vel" to="cmd_vel_nav"/>')
+            .allMatches(xml)
+            .length,
+        3,
+      );
+      expect(
+        xml,
+        contains('<remap from="cmd_vel_smoothed" to="cmd_vel"/>'),
+      );
+    });
+
+    test('Gazebo 다리가 smoother 가 실제로 쓰는 이름을 구독한다', () {
+      // 이 둘이 어긋난 적이 있다. launch 는 smoother 출력을 cmd_vel 로
+      // 리맵했는데 다리는 Nav2 기본 이름인 cmd_vel_smoothed 를 구독해서,
+      // 속도 명령이 20Hz 로 발행되는데도 Gazebo 에 한 번도 닿지 않았다.
+      // 로봇은 제자리에 서 있고 Nav2 는 Failed to make progress 만 반복했다.
+      final smootherOutput = RegExp(
+        r'<remap from="cmd_vel_smoothed" to="([^"]+)"/>',
+      ).firstMatch(xml)!.group(1)!;
+      final bridge = buildProjectGzBridgeYaml(
+        mapName: 'gwanghee',
+        robots: [pinky],
+      );
+      final rosToGz = RegExp(
+        r'- ros_topic_name: "([^"]+)"\n'
+        r'  gz_topic_name: "[^"]+"\n'
+        r'  ros_type_name: "geometry_msgs/msg/Twist"',
+      ).allMatches(bridge).map((m) => m.group(1)).toList();
+      expect(rosToGz, ['/${pinky.gzName}/$smootherOutput']);
+    });
+
     test('sim 시간을 쓴다 — Gazebo 와 시계를 맞춰야 한다', () {
       expect(xml, contains('name="use_sim_time"'));
     });
@@ -188,6 +221,169 @@ void main() {
       expect(
         warned.indexOf('벤더 파라미터를 찾지 못했습니다.'),
         lessThan(warned.indexOf('-->')),
+      );
+    });
+  });
+
+  /// 실물 로봇도 Nav2 가 몰아야 한다.
+  ///
+  /// 예전에는 이 자리가 `runsInGazebo` 여서, 로봇의 출처를 `실제 로봇` 으로
+  /// 바꾸는 순간 Nav2 도 어댑터도 통째로 안 만들어졌다. **그런데 플릿 설정에는
+  /// 그대로 들어갔다.** RMF 는 로봇을 아는데 그 로봇을 모는 것이 하나도 없고,
+  /// 오류는 한 줄도 안 났다 — 2026-08-17 에 실제로 그랬다. 백엔드는 9개 중
+  /// 7개가 떴고, 빠진 둘이 로봇을 모는 부분 전부였다.
+  group('실물 이동 로봇', () {
+    const realPinky = RmfProjectRobot(
+      robotId: 'pinky_01',
+      displayName: 'PK-01',
+      model: 'PINKY-GZ',
+      gzName: 'pinky_01',
+      zones: ['ambient'],
+      dataSource: RobotDataSource.real,
+      chargerWaypoint: '충전2',
+      spawnX: 1.613,
+      spawnY: -1.088,
+    );
+
+    test('Nav2 를 붙인다 — 아래가 실물이든 Gazebo 든 위쪽은 같다', () {
+      final xml = buildProjectNav2LaunchXml(
+        mapName: 'gwanghee',
+        robots: const [realPinky],
+        fleetName: 'gwanghee_pinky',
+      );
+      expect(xml, contains('robots/pinky_01/nav2.launch.xml'));
+      expect(xml, isNot(contains('이동 로봇이 없다')));
+    });
+
+    test('어댑터 매핑에 들어간다', () {
+      // 여기 없으면 어댑터가 `네임스페이스를 모릅니다. 건너뜁니다` 만 남기고
+      // 그 로봇을 통째로 지나친다.
+      final script = buildNav2FleetAdapterScript(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        robots: const [realPinky],
+      );
+      expect(script, contains("'pinky_01': 'pinky_01',"));
+    });
+
+    test('어댑터·워크셀·센서릴레이가 함께 살아난다', () {
+      // 셋이 한 `if` 안에 있다. 이동 로봇이 하나도 안 잡히면 픽업 자리에
+      // 답하는 워크셀 노드까지 같이 사라져, 작업이 그 자리에서 영원히 멈춘다.
+      final xml = buildProjectNav2LaunchXml(
+        mapName: 'gwanghee',
+        robots: const [realPinky, omx],
+        fleetName: 'gwanghee_pinky',
+      );
+      expect(xml, contains('gwanghee_nav2_adapter.py'));
+      expect(xml, contains('gwanghee_workcell.py'));
+      expect(xml, contains('gwanghee_sensor_relay.py'));
+    });
+
+    test('실행 전 점검이 이 로봇을 본다', () {
+      final script = buildProjectRunScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/maps/gwanghee',
+        robots: const [realPinky],
+      );
+      expect(script, contains('EXPECTED_FLEET_ROBOTS="pinky_01"'));
+    });
+  });
+
+  /// 실물이 섞이면 **벽시계로 통일한다.**
+  ///
+  /// 실물의 odom·scan·tf 는 벽시계로 찍혀 온다. 그 위의 AMCL 과 어댑터가 sim
+  /// 시계를 보면 TF lookup 이 전부 어긋나는데 오류는 안 나고 로봇만 안 움직인다.
+  group('시계', () {
+    const realPinky = RmfProjectRobot(
+      robotId: 'pinky_01',
+      displayName: 'PK-01',
+      model: 'PINKY-GZ',
+      gzName: 'pinky_01',
+      zones: ['ambient'],
+      dataSource: RobotDataSource.real,
+      chargerWaypoint: '충전2',
+    );
+
+    test('실물 이동 로봇이 있으면 벽시계다', () {
+      expect(projectUsesSimTime(const [realPinky]), isFalse);
+      // Gazebo 설비가 함께 있어도 마찬가지다. 시뮬레이터는 제 안에서만
+      // sim 시계를 쓰고, 워크셀 노드는 애초에 벽시계로 돈다.
+      expect(projectUsesSimTime(const [realPinky, omx]), isFalse);
+    });
+
+    test('전부 Gazebo 면 예전 그대로 sim 시계다', () {
+      expect(projectUsesSimTime(const [pinky, omx]), isTrue);
+      expect(projectUsesSimTime(const [mockPinky]), isTrue);
+    });
+
+    test('프로젝트 Nav2 launch 가 그 값을 기본으로 쓴다', () {
+      expect(
+        buildProjectNav2LaunchXml(
+          mapName: 'gwanghee',
+          robots: const [realPinky],
+        ),
+        contains('<arg name="use_sim_time" default="false"/>'),
+      );
+      expect(
+        buildProjectNav2LaunchXml(mapName: 'gwanghee', robots: const [pinky]),
+        contains('<arg name="use_sim_time" default="true"/>'),
+      );
+    });
+
+    test('어댑터의 -s 가 실물에서는 빠진다', () {
+      // 예전에는 명령줄에 박혀 있어 끌 방법이 없었다.
+      final real = buildProjectNav2LaunchXml(
+        mapName: 'gwanghee',
+        robots: const [realPinky],
+        fleetName: 'gwanghee_pinky',
+      );
+      final adapter = real.substring(real.indexOf('nav2_adapter.py'));
+      expect(
+        adapter.substring(0, adapter.indexOf('/>')),
+        isNot(contains(' -s')),
+      );
+
+      final sim = buildProjectNav2LaunchXml(
+        mapName: 'gwanghee',
+        robots: const [pinky],
+        fleetName: 'gwanghee_pinky',
+      );
+      final simAdapter = sim.substring(sim.indexOf('nav2_adapter.py'));
+      expect(
+        simAdapter.substring(0, simAdapter.indexOf('/>')),
+        contains(' -s'),
+      );
+    });
+
+    test('RMF core 도 같은 시계로 뜬다', () {
+      // 어댑터와 core 가 다른 시계를 보면 예약 시각이 서로 안 맞는다.
+      String core(List<RmfProjectRobot> robots) => buildProjectLaunchXml(
+        mapName: 'gwanghee',
+        fleetName: 'gwanghee_pinky',
+        mapDirectory: '/maps/gwanghee',
+        buildingYamlName: 'gwanghee.building.yaml',
+        robots: robots,
+        useSimTime: projectUsesSimTime(robots),
+      );
+      expect(
+        core(const [realPinky]),
+        contains('<arg name="use_sim_time" default="false"/>'),
+      );
+      expect(
+        core(const [pinky]),
+        contains('<arg name="use_sim_time" default="true"/>'),
+      );
+    });
+
+    test('로봇 한 대 파일은 제 출처를 기본으로 쓴다', () {
+      // 이 파일만 따로 돌려 볼 때 쓰이는 값이다.
+      expect(
+        buildRobotNav2LaunchXml(realPinky, 'gwanghee'),
+        contains('<arg name="use_sim_time" default="false"/>'),
+      );
+      expect(
+        buildRobotNav2LaunchXml(pinky, 'gwanghee'),
+        contains('<arg name="use_sim_time" default="true"/>'),
       );
     });
   });

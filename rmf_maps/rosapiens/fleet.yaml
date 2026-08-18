@@ -1,0 +1,66 @@
+# rosapiens 프로젝트에 띄울 로봇 목록.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다.
+#
+# spawn_x / spawn_y 는 맵 Waypoint 좌표다. zones 는 이 로봇이
+# 진입 가능한 3온도 구획으로 관제 배차의 입찰 자격이 된다.
+robots:
+  - id: pinky_01
+    name: PK-01
+    kind: mobile # 이동 로봇
+    model: PINKY-GZ
+    gz_name: pinky_01
+    zones: [ambient, chilled, frozen]
+    home_charger: 충전1
+    spawn_x: 5.380
+    spawn_y: -4.516
+    spawn_heading: 3.140
+  - id: omx_01
+    name: OMX-01
+    kind: workcell # 설치 로봇
+    model: omx_f
+    gz_name: omx_01
+    zones: []
+    station: OMX1
+    spawn_x: 1.479
+    spawn_y: -5.697
+    spawn_heading: 0.000
+  - id: omx_02
+    name: OMX-02
+    kind: workcell # 설치 로봇
+    model: omx_f
+    gz_name: omx_02
+    zones: []
+    station: OMX2
+    spawn_x: 1.613
+    spawn_y: -2.922
+    spawn_heading: 0.000
+  - id: pinky_04
+    name: PK-04
+    kind: mobile # 이동 로봇
+    model: PINKY-GZ
+    gz_name: pinky_04
+    zones: [ambient, chilled, frozen]
+    home_charger: 충전2
+    spawn_x: 5.385
+    spawn_y: -4.123
+    spawn_heading: 0.000
+  - id: pinky_05
+    name: PK-05
+    kind: mobile # 이동 로봇
+    model: PINKY-GZ
+    gz_name: pinky_05
+    zones: [ambient, chilled, frozen]
+    home_charger: 충전3
+    spawn_x: 5.399
+    spawn_y: -4.866
+    spawn_heading: 0.000
+  - id: pinky_06
+    name: PK-06
+    kind: mobile # 이동 로봇
+    model: PINKY-GZ
+    gz_name: pinky_06
+    zones: [ambient, chilled, frozen]
+    home_charger: 충전4
+    spawn_x: 5.411
+    spawn_y: -5.233
+    spawn_heading: 0.000

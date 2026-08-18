@@ -17,7 +17,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const RmfControlApp());
-    await tester.tap(find.text('로봇'));
+    await tester.tap(find.text('로봇 관리').first);
     await tester.pumpAndSettle();
   }
 
