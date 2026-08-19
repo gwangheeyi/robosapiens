@@ -710,6 +710,108 @@ void main() {
       );
     });
 
+    /// 실물 로봇은 앱이 못 띄운다. 사람이 로봇에 들어가 손으로 올리는데, 그때
+    /// **네임스페이스와 도메인이 어긋나면** 토픽 이름만 보이고 값은 하나도 안
+    /// 온다 — 오류가 안 나서 라이다나 AMCL 을 의심하며 한참을 헤맨다.
+    ///
+    /// 실제로 그 일이 있었다. 로봇이 루트 `/scan` 으로 발행하는데 Nav2 는
+    /// `/pinky_03/scan` 을 구독해서, 라이다가 10Hz 로 멀쩡히 돌고 있는데도
+    /// 지도에 아무것도 안 그려졌다.
+    group('실물 로봇을 띄우는 법', () {
+      final readme = buildRobotReadme(real, 'gwanghee', projectDomainId: 12);
+
+      test('이 로봇의 네임스페이스로 띄우라고 적는다', () {
+        expect(readme, contains('bringup_robot_namespaced.launch.xml'));
+        expect(readme, contains('namespace:=${real.gzName}'));
+      });
+
+      test('프로젝트 도메인을 그대로 적는다', () {
+        expect(readme, contains('export ROS_DOMAIN_ID=12'));
+      });
+
+      test('로봇이 제 도메인을 가지면 그것이 이긴다', () {
+        const own = RmfProjectRobot(
+          robotId: 'RP-02',
+          displayName: '실물 2호',
+          model: 'PINKY-GZ',
+          dataSource: RobotDataSource.real,
+          gzName: 'real_02',
+          zones: ['ambient'],
+          chargerWaypoint: '충전9',
+          rosDomainId: 22,
+        );
+        final text = buildRobotReadme(own, 'gwanghee', projectDomainId: 12);
+        expect(text, contains('export ROS_DOMAIN_ID=22'));
+        expect(text, isNot(contains('export ROS_DOMAIN_ID=12')));
+      });
+
+      test('잘 떴는지 확인하는 법까지 적는다', () {
+        // 자기 이름이 박혀 있어야 그대로 붙여넣어 쓸 수 있다.
+        expect(readme, contains('/${real.gzName}/scan'));
+        expect(readme, contains('/${real.gzName}/odom'));
+        expect(readme, contains('ros2 lifecycle get /${real.gzName}/'));
+        expect(readme, contains('tf2_echo map ${real.gzName}/odom'));
+      });
+
+      test('겪은 증상과 볼 곳을 표로 남긴다', () {
+        expect(readme, contains('토픽이 루트'));
+        expect(readme, contains('`amcl` 만 active'));
+        expect(readme, contains('`map` 프레임이 없다'));
+      });
+
+      test('위치를 잃었을 때 쓸 단추를 알려 준다', () {
+        expect(readme, contains('초기 위치로 보내기'));
+      });
+
+      /// 실물은 이미 그 자리에 있다. `spawn.launch.xml` 을 안내하면 그것을
+      /// 돌려 보고 안 된다고 여긴다.
+      test('Gazebo 에 안 올리는 로봇에게 spawn 을 안내하지 않는다', () {
+        expect(readme, isNot(contains('| `spawn.launch.xml` |')));
+        expect(readme, contains('| `nav2.launch.xml` |'));
+      });
+
+      test('Gazebo 로봇에게는 예전대로 spawn 을 안내한다', () {
+        final gazebo = buildRobotReadme(robots.first, 'gwanghee');
+        expect(gazebo, contains('| `spawn.launch.xml` |'));
+        // 앱이 띄워 주므로 손으로 올리는 안내는 없다.
+        expect(gazebo, isNot(contains('## 로봇에서 띄우기')));
+      });
+
+      test('Mock 로봇에게도 안내하지 않는다 — 앱 안에만 있다', () {
+        expect(
+          buildRobotReadme(mock, 'gwanghee'),
+          isNot(contains('## 로봇에서 띄우기')),
+        );
+      });
+    });
+
+    /// 어댑터가 로봇을 놓치면 **스스로 다시 붙지 않는다.** 재기동해야 붙는데,
+    /// 실측으로 재기동 자체는 4초면 끝났다. 예전 값(유예 120초 · 주기 30초 ·
+    /// 3회)이면 최악에 210초를 기다린 뒤에야 재기동했고, 그동안 화면에는
+    /// 어댑터가 연결되는 중으로만 보였다.
+    test('어댑터를 오래 기다리지 않는다', () {
+      final script = buildProjectRunScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/tmp/gwanghee',
+        robots: robots,
+        rosDomainId: 12,
+      );
+      // `ADAPTER_HEALTH_GRACE="${ADAPTER_HEALTH_GRACE:-45}"` 에서 45 를 뽑는다.
+      int valueOf(String name) {
+        final match = RegExp('$name:-([0-9]+)').firstMatch(script);
+        expect(match, isNotNull, reason: '$name 이 스크립트에 없다');
+        return int.parse(match!.group(1)!);
+      }
+
+      final grace = valueOf('ADAPTER_HEALTH_GRACE');
+      final interval = valueOf('ADAPTER_HEALTH_INTERVAL');
+      final failures = valueOf('ADAPTER_HEALTH_FAILURES');
+      // 최악 = 유예 + 주기 * 실패 횟수.
+      expect(grace + interval * failures, lessThanOrEqualTo(90));
+      // 너무 짧으면 정상 기동 중인 어댑터를 죽여 오히려 느려진다.
+      expect(grace, greaterThanOrEqualTo(30));
+    });
+
     test('출처가 JSON 을 오가도 유지된다', () {
       expect(
         RmfProjectRobot.fromJson(real.toJson()).dataSource,

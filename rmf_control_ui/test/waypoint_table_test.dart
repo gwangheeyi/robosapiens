@@ -111,7 +111,7 @@ void main() {
       );
     });
 
-    test('적재 방향은 물건을 주고받는 자리에만 붙는다', () {
+    test('적재 방향은 로봇이 서는 자리에만 붙는다', () {
       expect(
         waypointVertexProperties(
           category: '픽업',
@@ -120,17 +120,30 @@ void main() {
         ),
         ['pickup_dispenser: 픽업3', 'robosapiens_dock_heading: 90.300'],
       );
-      // 지나가기만 하는 자리에는 뜻이 없다.
+      // 대기도 쓴다 — 좁은 곳에서는 거기 서는 방향이 다음 동작을 가른다.
       expect(
         waypointVertexProperties(
           category: '대기',
           name: '대기1',
           dockHeadingDegrees: 90.3,
         ),
-        ['is_holding_point'],
+        ['is_holding_point', 'robosapiens_dock_heading: 90.300'],
+      );
+      // 방향을 안 쓰는 자리에는 안 붙는다.
+      expect(
+        waypointVertexProperties(
+          category: '주차',
+          name: '주차1',
+          dockHeadingDegrees: 90.3,
+        ),
+        ['is_parking_spot'],
       );
       expect(waypointUsesDockHeading('픽업'), isTrue);
       expect(waypointUsesDockHeading('드랍오프'), isTrue);
+      expect(waypointUsesDockHeading('충전'), isTrue);
+      // 대기에서 -45도로 선 뒤 후진으로 픽업에 들어가는 식으로 쓴다.
+      expect(waypointUsesDockHeading('대기'), isTrue);
+      expect(waypointUsesDockHeading('주차'), isFalse);
       expect(waypointUsesDockHeading('설비'), isFalse);
       expect(waypointUsesDockHeading(null), isFalse);
     });

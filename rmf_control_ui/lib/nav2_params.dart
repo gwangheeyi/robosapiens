@@ -13,6 +13,7 @@
 library;
 
 import 'nav2_progress_checker.dart';
+import 'robot_drive_mode.dart';
 
 /// 다시 쓴 결과.
 class Nav2ParamsRewrite {
@@ -51,6 +52,35 @@ const String nav2MapTopicName = 'nav2_map';
 /// 목표가 planner에 도착했는데도 `compute_path_to_pose` 승인을 기다리다 즉시
 /// 실패하지 않도록 배포 파일에는 2초를 쓴다.
 const int nav2DefaultServerTimeoutMs = 2000;
+
+/// `lifecycle_manager` 가 노드 하나의 전이 응답을 기다리는 시간 [초].
+///
+/// 벤더 기본값은 짧다. 라즈베리파이에서 `controller_server` 는 costmap 을
+/// 만드느라 기동이 무거워, 그 사이 `get_state` 응답이 늦으면 관리자가 실패로
+/// 판정한다. 그리고 실패하면 **뒤의 노드는 시도조차 하지 않는다**:
+///
+///     [lifecycle_manager]: Failed to change state for node: controller_server.
+///       Exception: controller_server/get_state service client:
+///       async_send_request failed.
+///     [lifecycle_manager]: Failed to bring up all requested nodes.
+///       Aborting bringup.
+///
+/// 그때 남는 것이 `amcl` 만 active 고 나머지는 unconfigured 인 상태다. 로봇
+/// 위치는 지도에 뜨는데 주행 명령만 안 먹어서, 원인을 라이다나 AMCL 에서
+/// 찾게 된다 — 정작 그 둘은 멀쩡하다.
+///
+/// `map_server` 에서 같은 일이 이미 있었다. 그쪽은 실행 스크립트가
+/// `ensure_map_server_active` 로 뒤늦게 되살리지만, 로봇 Nav2 에는 그런 보호가
+/// 없다. 여기서 넉넉히 주는 편이 낫다 — 기다리는 값이라 빠른 기계에서는
+/// 그만큼 쓰지 않는다.
+const double nav2LifecycleServiceTimeoutSeconds = 30;
+
+/// 노드가 살아 있는지 확인하는 bond 의 시간 제한 [초].
+///
+/// 0 이면 bond 를 안 쓴다. 켜 두면 기동 직후 바쁜 노드가 heartbeat 를 늦게
+/// 보내는 것만으로 죽은 것으로 보고 전체를 내린다. 라즈베리파이에서는 그 일이
+/// 실제로 일어나므로 벤더 기본값(4초)보다 늘린다.
+const double nav2LifecycleBondTimeoutSeconds = 20;
 
 /// 로봇마다 갈라야 하는 TF 프레임.
 ///
@@ -231,6 +261,10 @@ Nav2ParamsRewrite rewriteNav2Params({
   // 목표 직진 속도 [m/s]. 주면 벤더 값을 덮어쓴다. RMF 쪽 한계와 같은 값을
   // 넣어야 배차 계산과 실제 주행이 어긋나지 않는다.
   double? linearVelocity,
+  // 장애물에 얼마나 여유를 두는가. 기본은 벤더 값 그대로다.
+  RobotDriveMode driveMode = RobotDriveMode.normal,
+  // 후진으로도 갈 수 있는가. 켜면 제자리 회전이 함께 꺼진다.
+  bool allowReversing = false,
 }) {
   final ns = namespace.startsWith('/') ? namespace.substring(1) : namespace;
   final changes = <String>[];
@@ -334,6 +368,63 @@ Nav2ParamsRewrite rewriteNav2Params({
     // ③ 도착 반경. 벤더 값은 사람 다니는 복도를 전제한 0.25m 라, Waypoint 가
     //    0.33m 간격인 맵에서는 이웃 Waypoint 의 도착 원과 겹친다. 어느 지점에
     //    섰는지 구별이 안 된다.
+    // ③-A 후진. 좁은 곳에서는 앞으로 들어갈 수 없는 자리가 있다.
+    //
+    // **두 값을 함께 쓴다.** `RegulatedPurePursuitController` 는 후진을
+    // 허용하면 `use_rotate_to_heading` 을 끄도록 되어 있다 — 둘 다 켜면
+    // 컨트롤러가 파라미터를 거절해 노드가 안 뜬다. 한쪽만 바꾸면 그 조합이
+    // 그대로 나가므로 여기서 같이 정한다.
+    if (key == 'allow_reversing' || key == 'use_rotate_to_heading') {
+      final settings = reversingSettings(allowReversing: allowReversing);
+      final wanted = key == 'allow_reversing'
+          ? settings.allowReversing
+          : settings.useRotateToHeading;
+      final before = parts.value.trim().toLowerCase() == 'true';
+      out.add(
+        '$indent$key: $wanted'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before != wanted) {
+        changes.add(
+          '$key: ${parts.value.trim()} → $wanted '
+          '(${allowReversing ? '후진 허용' : '전진만'})',
+        );
+      }
+      continue;
+    }
+
+    // ③-0 장애물에 두는 여유. `강제` 모드는 이것만 줄인다.
+    //
+    // 라이다로 장애물을 보는 설정은 **안 건드린다** — 그것을 끄면 정말
+    // 부딪히면 안 되는 것도 안 보인다. 여유만 줄여, 닿지도 않을 거리에서
+    // 길을 포기하는 것을 막는다.
+    //
+    // 핑키의 발자국은 한 변 0.12m 라 반지름이 0.06m 인데 벤더 기본값은
+    // 0.15m 였다. 벽에서 15cm 안쪽을 통째로 막힌 것으로 본 셈이라, 좁은
+    // 실험실에서는 갈 수 있는 길이 아예 없어진다.
+    if (key == 'inflation_radius' || key == 'cost_scaling_factor' ||
+        key == 'footprint_padding') {
+      final costmap = costmapForDriveMode(driveMode);
+      final wanted = switch (key) {
+        'inflation_radius' => costmap.inflationRadius,
+        'cost_scaling_factor' => costmap.costScalingFactor,
+        _ => costmap.footprintPadding,
+      };
+      final before = double.tryParse(parts.value.trim());
+      final after = wanted.toStringAsFixed(3);
+      out.add(
+        '$indent$key: $after'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (before == null || (before - wanted).abs() > 1e-9) {
+        changes.add(
+          '$key: ${parts.value.trim()} → $after '
+          '(${driveMode.label} 모드)',
+        );
+      }
+      continue;
+    }
+
     if (key == 'xy_goal_tolerance' && goalTolerance != null) {
       final before = double.tryParse(parts.value.trim());
       final after = goalTolerance.toStringAsFixed(3);

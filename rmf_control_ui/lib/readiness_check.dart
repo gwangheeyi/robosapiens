@@ -12,6 +12,7 @@
 /// 쪽이 하고, 이 파일은 프로세스도 파일도 건드리지 않는다.
 library;
 
+import 'nav2_lifecycle.dart';
 import 'nav2_map_alignment.dart';
 import 'rmf_project_config.dart';
 
@@ -124,6 +125,11 @@ ReadinessReport buildReadinessReport({
   String? mapServerState,
   // 백엔드가 뜬 뒤로 지난 시간. null 이면 언제 떴는지 모른다.
   Duration? backendUptime,
+  // 로봇마다 Nav2 노드가 다 켜졌는가. 로봇 ID → 안 켜진 노드 이름.
+  //
+  // 빈 목록이면 다 켜졌다는 뜻이고, 아예 안 들어 있으면 **아직 안 물어봤다**는
+  // 뜻이다. 둘을 뭉뚱그리면 확인 못 한 것이 정상으로 읽힌다.
+  Map<String, List<String>> nav2Stuck = const {},
 }) {
   final places = waypointNames
       .where((name) => name.trim().isNotEmpty)
@@ -336,6 +342,57 @@ ReadinessReport buildReadinessReport({
             '실행하세요. 로그: <맵>.err.log 의 "Waiting for map"',
       ),
     );
+  }
+
+  // ④-2 로봇마다 Nav2 노드. 어댑터보다 **앞**이라야 한다.
+  //
+  //      노드가 있는 것과 `active` 인 것은 다르다. inactive 인 노드는 명령을
+  //      안 받는데 **오류를 내지 않는다** — 노드 목록에는 그대로 보인다.
+  //      실제로 `controller_server` 가 inactive 인 채로, 작업을 넣으면 어댑터가
+  //      `Nav2 가 거절했습니다` 한 줄만 남기고 끝난 일이 있다. `bt_navigator`
+  //      가 inactive 라 `navigate_to_pose` action 자체가 없었기 때문이다.
+  //
+  //      그때 확인표는 `/fleet_states 가 안 나옵니다` 로만 보였다. 어느 노드가
+  //      막혔는지는 어디에도 안 나와서, `ros2 lifecycle get` 을 여덟 번 쳐서
+  //      알아내야 했다.
+  //
+  //      평소에는 한 줄로 둔다. 로봇이 두 대면 노드 줄이 열여섯 개가 되는데,
+  //      다 켜져 있을 때 그것을 늘어놓으면 정작 막힌 칸이 묻힌다.
+  if (backendRunning) {
+    for (final robot in robots) {
+      if (!robot.isMobile || !robot.dataSource.usesTopics) continue;
+      final stuck = nav2Stuck[robot.robotId];
+      if (stuck == null) {
+        checks.add(
+          ReadinessCheck(
+            title: 'Nav2 노드 (${robot.robotId})',
+            state: ReadinessState.unknown,
+            detail: '아직 확인하지 않았습니다',
+          ),
+        );
+      } else if (stuck.isEmpty) {
+        checks.add(
+          ReadinessCheck(
+            title: 'Nav2 노드 (${robot.robotId})',
+            state: ReadinessState.ready,
+            detail: '${nav2ManagedNodes.length}개 모두 active 입니다',
+          ),
+        );
+      } else {
+        checks.add(
+          ReadinessCheck(
+            title: 'Nav2 노드 (${robot.robotId})',
+            state: ReadinessState.blocked,
+            detail:
+                '${stuck.join(' · ')} 가 active 가 아닙니다.\n'
+                'inactive 인 노드는 명령을 안 받는데 오류도 내지 않습니다 — '
+                '노드 목록에는 그대로 보입니다. '
+                '${stuck.contains('bt_navigator') ? '`bt_navigator` 가 꺼져 있으면 navigate_to_pose action 이 없어 작업이 거절됩니다. ' : ''}'
+                '백엔드를 다시 띄우면 앱이 스스로 켭니다.',
+          ),
+        );
+      }
+    }
   }
 
   // ⑤ 어댑터. 이것이 RMF 안에서 /nav_graphs 와 /fleet_states 를 내는 유일한

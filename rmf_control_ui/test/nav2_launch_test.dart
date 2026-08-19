@@ -146,6 +146,51 @@ void main() {
       expect(manager, contains('name="use_sim_time" value="false"'));
     });
 
+    /// 라즈베리파이에서 실제로 겪은 일이다. `controller_server` 는 costmap 을
+    /// 만드느라 기동이 무거워 `get_state` 응답이 늦었고, 관리자는 그것을 실패로
+    /// 보고 **뒤의 노드를 아예 시도하지 않았다**:
+    ///
+    ///     [lifecycle_manager]: Failed to change state for node:
+    ///       controller_server. Exception: controller_server/get_state
+    ///       service client: async_send_request failed.
+    ///     [lifecycle_manager]: Failed to bring up all requested nodes.
+    ///       Aborting bringup.
+    ///
+    /// 남은 상태는 `amcl` 만 active 고 나머지는 unconfigured 였다. 로봇 위치는
+    /// 지도에 뜨는데 주행만 안 되니, 원인을 라이다와 AMCL 에서 찾게 된다 —
+    /// 정작 그 둘은 멀쩡했다.
+    test('느린 기계에서도 기다려 준다', () {
+      final manager = xml.substring(xml.indexOf('nav2_lifecycle_manager'));
+      expect(manager, contains('name="service_timeout"'));
+      expect(manager, contains('name="bond_timeout"'));
+    });
+
+    test('기다리는 시간은 벤더 기본값보다 넉넉하다', () {
+      final manager = xml.substring(xml.indexOf('nav2_lifecycle_manager'));
+      final service = double.parse(
+        RegExp(
+          r'name="service_timeout" value="([0-9.]+)"',
+        ).firstMatch(manager)!.group(1)!,
+      );
+      final bond = double.parse(
+        RegExp(
+          r'name="bond_timeout" value="([0-9.]+)"',
+        ).firstMatch(manager)!.group(1)!,
+      );
+      // 벤더 bond_timeout 은 4초다. 기동 직후 바쁜 노드가 heartbeat 를 늦게
+      // 보내는 것만으로 죽은 것으로 보면 안 된다.
+      expect(bond, greaterThan(4));
+      expect(service, greaterThanOrEqualTo(20));
+    });
+
+    /// ROS 는 이 둘을 double 로 선언한다. `value="30"` 으로 나가면 정수로 읽혀
+    /// 형식이 안 맞고, 그러면 파라미터가 **조용히 무시된다.**
+    test('소수점을 붙여 내보낸다 — 정수로 나가면 무시된다', () {
+      final manager = xml.substring(xml.indexOf('nav2_lifecycle_manager'));
+      expect(manager, contains(RegExp(r'name="service_timeout" value="\d+\.\d')));
+      expect(manager, contains(RegExp(r'name="bond_timeout" value="\d+\.\d')));
+    });
+
     test('파일 자리를 arg 로 돌려쓰지 않는다', () {
       // 같은 이름의 <arg> 를 여러 include 가 선언하면 launch 안에서 범위가
       // 겹쳐 먼저 읽은 값이 나머지에 쓰인다. 실제로 pinky_02 가 pinky_01 의
@@ -164,6 +209,15 @@ void main() {
     test('건물 지도는 하나만 띄운다', () {
       expect(RegExp('nav2_map_server').allMatches(xml).length, 1);
       expect(xml, contains('value="\$(var map_dir)/nav2_map/gwanghee.yaml"'));
+    });
+
+    /// 지도 파일을 읽는 데 5초가 넘어 `get_state` 응답이 늦는 일이 있었다.
+    /// 그러면 map_server 가 inactive 로 남고, 증상은 세 단계 떨어진 곳에 뜬다 —
+    /// 화면에는 "rmf-nav2 연결 실패" 만 보인다.
+    test('map_server 도 느린 기계를 기다려 준다', () {
+      final manager = xml.substring(xml.indexOf('lifecycle_manager_map'));
+      expect(manager, contains('name="service_timeout"'));
+      expect(manager, contains('name="bond_timeout"'));
     });
 
     test('이동 로봇마다 제 Nav2 를 붙인다', () {

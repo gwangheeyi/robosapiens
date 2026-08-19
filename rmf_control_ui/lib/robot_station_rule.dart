@@ -59,6 +59,72 @@ StationRequirement checkStationRequirement({
 bool canSaveRobot(StationRequirement requirement) =>
     requirement != StationRequirement.missing;
 
+/// 이 자리를 이미 쓰고 있는 다른 로봇. 없으면 null.
+///
+/// 자리 하나에 두 대를 묶으면 **둘의 spawn 좌표가 같아진다.** 그 좌표가 파일에
+/// 그대로 박히므로(`spawn.launch.xml` 의 `-x -y`), Gazebo 에서는 메시 충돌
+/// 도형끼리 파고들어 시뮬레이터가 죽는다 — 자리를 아예 안 고른 로봇 둘로
+/// 겪었던 것과 같은 사고다([robotsMissingStation] 의 주석).
+///
+/// 실물이면 Gazebo 는 안 죽지만 대신 더 조용히 어긋난다. 두 로봇의 AMCL 초기
+/// 자세가 같은 자리로 나가서, 실제로는 떨어져 있는 두 대가 서로 자기가 그
+/// 자리에 있다고 믿는다. 그 상태로 경로를 짜면 둘 다 엉뚱한 데로 간다.
+///
+/// [robotId] 는 지금 고치는 로봇이다. 자기 자신은 겹침으로 세지 않는다 —
+/// 등록을 열어 다른 것만 고치고 저장할 때 제 자리에 걸리면 안 된다.
+///
+/// 설비 로봇도 같다. 팔 둘을 같은 자리에 두면 한 자리에 겹쳐 선다.
+RmfProjectRobot? robotHoldingStation({
+  required List<RmfProjectRobot> robots,
+  required String? station,
+  required String robotId,
+}) {
+  final wanted = (station ?? '').trim();
+  if (wanted.isEmpty) return null;
+  final me = robotId.trim();
+  for (final robot in robots) {
+    if (robot.robotId.trim() == me) continue;
+    if ((robot.chargerWaypoint ?? '').trim() == wanted) return robot;
+  }
+  return null;
+}
+
+/// 자리가 겹친다고 알릴 말. 안 겹치면 null.
+///
+/// 막지는 않는다. 자리를 옮기는 도중에 잠깐 겹치는 일이 있고, 그때 저장을
+/// 막으면 두 로봇의 자리를 서로 바꾸는 것이 불가능해진다. 대신 무슨 일이
+/// 벌어지는지 그 자리에서 밝힌다.
+String? stationConflictMessage({
+  required RmfProjectRobot? holder,
+  required String station,
+}) {
+  if (holder == null) return null;
+  return '$station 은(는) 이미 ${holder.robotId} · ${holder.displayName} 의 '
+      '자리입니다.\n\n'
+      '한 자리에 두 대를 두면 둘의 시작 좌표가 같아집니다 — Gazebo 로봇이면 '
+      '메시가 파고들어 시뮬레이터가 죽고, 실물이면 두 대의 AMCL 이 같은 자리를 '
+      '제 자리로 믿습니다.\n\n'
+      '다른 자리를 고르거나, 맵에 자리를 하나 더 그려 주세요.';
+}
+
+/// 배포를 막아야 할 만큼 자리가 겹치는가. 겹치는 자리 이름 → 그 자리를 쓰는 로봇들.
+///
+/// 등록 창은 막지 않는다(자리를 서로 바꾸는 중일 수 있다). 배포는 다르다 —
+/// 여기까지 왔으면 좌표가 파일에 박히는 순간이다.
+Map<String, List<RmfProjectRobot>> robotsSharingStation(
+  List<RmfProjectRobot> robots,
+) {
+  final byStation = <String, List<RmfProjectRobot>>{};
+  for (final robot in robots) {
+    if (!robot.dataSource.usesTopics) continue;
+    final station = (robot.chargerWaypoint ?? '').trim();
+    if (station.isEmpty) continue;
+    byStation.putIfAbsent(station, () => []).add(robot);
+  }
+  byStation.removeWhere((_, holders) => holders.length < 2);
+  return byStation;
+}
+
 /// 사람에게 보여 줄 한 줄. 필요 없으면 null.
 ///
 /// 흐린 단추만 두면 사람이 다른 칸을 뒤진다. 무엇이 빠졌고 그것이 어디에 쓰이는지
@@ -103,16 +169,33 @@ List<RmfProjectRobot> robotsMissingStation(List<RmfProjectRobot> robots) => [
 /// 배포를 막는 이유. 막을 것이 없으면 null.
 String? deployBlockedMessage(List<RmfProjectRobot> robots) {
   final missing = robotsMissingStation(robots);
-  if (missing.isEmpty) return null;
+  if (missing.isNotEmpty) {
+    final lines = [
+      for (final robot in missing)
+        '  · ${robot.robotId} · ${robot.displayName} — '
+            '${robot.kind.waypointCategory} Waypoint 미지정',
+    ];
+    return '자리를 안 고른 로봇이 있어 내보내지 않았습니다.\n\n'
+        '${lines.join('\n')}\n\n'
+        '자리가 없으면 spawn 좌표가 0,0 이 됩니다. 두 대가 원점에 겹치면 '
+        '메시끼리 파고들어 Gazebo 가 뜨자마자 죽습니다 — 그런데 RMF 와 Nav2 는 '
+        '그대로 남아 토픽 이름만 보이고 값은 하나도 안 옵니다.\n\n'
+        '로봇 등록에서 자리 Waypoint 를 고른 뒤 다시 내보내세요.';
+  }
+  // 자리를 골랐어도 **같은 자리**면 결과가 같다. 두 대의 spawn 좌표가 한 점이
+  // 되어 원점에 겹친 것과 똑같이 부딪힌다. 등록 창은 이것을 막지 않는다 —
+  // 자리를 서로 바꾸는 중일 수 있기 때문이다. 파일을 만들기 전에 여기서 막는다.
+  final shared = robotsSharingStation(robots);
+  if (shared.isEmpty) return null;
   final lines = [
-    for (final robot in missing)
-      '  · ${robot.robotId} · ${robot.displayName} — '
-          '${robot.kind.waypointCategory} Waypoint 미지정',
+    for (final entry in shared.entries)
+      '  · ${entry.key} — '
+          '${entry.value.map((robot) => robot.robotId).join(', ')}',
   ];
-  return '자리를 안 고른 로봇이 있어 내보내지 않았습니다.\n\n'
+  return '한 자리에 두 대 넘게 묶인 로봇이 있어 내보내지 않았습니다.\n\n'
       '${lines.join('\n')}\n\n'
-      '자리가 없으면 spawn 좌표가 0,0 이 됩니다. 두 대가 원점에 겹치면 '
-      '메시끼리 파고들어 Gazebo 가 뜨자마자 죽습니다 — 그런데 RMF 와 Nav2 는 '
-      '그대로 남아 토픽 이름만 보이고 값은 하나도 안 옵니다.\n\n'
-      '로봇 등록에서 자리 Waypoint 를 고른 뒤 다시 내보내세요.';
+      '두 대의 시작 좌표가 같아집니다. Gazebo 로봇이면 메시가 파고들어 '
+      '시뮬레이터가 뜨자마자 죽고, 실물이면 두 대의 AMCL 이 같은 자리를 제 '
+      '자리로 믿어 둘 다 엉뚱한 곳으로 갑니다.\n\n'
+      '맵에 자리를 하나 더 그리거나, 로봇 등록에서 다른 자리를 골라 주세요.';
 }

@@ -8,7 +8,13 @@ library;
 
 import 'dart:math' as math;
 
-import 'nav2_params.dart' show nav2MapTopic, nav2MapTopicName;
+import 'robot_drive_mode.dart';
+import 'nav2_params.dart'
+    show
+        nav2LifecycleBondTimeoutSeconds,
+        nav2LifecycleServiceTimeoutSeconds,
+        nav2MapTopic,
+        nav2MapTopicName;
 import 'rmf_task_request.dart' show rmfArmLoadAction;
 import 'workcell_pairing.dart';
 import 'workcell_policy.dart';
@@ -133,7 +139,37 @@ class RmfProjectRobot {
     this.spawnY,
     this.spawnHeading = 0,
     this.rosDomainId,
+    this.ssh,
+    this.driveMode = RobotDriveMode.normal,
+    this.allowReversing = false,
   });
+
+  /// 후진으로도 갈 수 있는가.
+  ///
+  /// 좁은 곳에서는 앞으로 들어갈 수 없는 자리가 있다. 켜면 경로계획이 후진
+  /// 구간을 만들 수 있게 된다 — 대신 제자리 회전이 꺼진다. 까닭은
+  /// `robot_drive_mode.dart` 의 [reversingSettings] 에 적었다.
+  final bool allowReversing;
+
+  /// 장애물을 얼마나 피하는가.
+  ///
+  /// 실험실처럼 스쳐도 괜찮은 곳에서는 `강제` 로 두어 여유를 줄인다. 까닭은
+  /// `robot_drive_mode.dart` 에 적었다.
+  final RobotDriveMode driveMode;
+
+  /// 실물 로봇에 들어가는 길. 안 적었으면 null.
+  ///
+  /// 실물 로봇은 앱이 도는 PC 가 아니라 제 안에서 하드웨어를 연다. 그래서
+  /// 브링업은 사람이 로봇에 들어가 손으로 쳐야 했고, 그 자리에서 네임스페이스와
+  /// 도메인이 자주 어긋났다 — **어긋나도 오류가 안 나서** 라이다나 AMCL 을
+  /// 의심하며 한참을 헤맸다.
+  ///
+  /// 여기에 주소를 적어 두면 앱이 대신 띄운다. 명령은 등록된 값으로 만들어지므로
+  /// 오타로 어긋날 일이 없다.
+  ///
+  /// 형식은 `RobotSshTarget.toJson` 이다. 그 클래스를 여기서 쓰지 않는 것은
+  /// `robot_ssh.dart` 가 이 파일을 읽기 때문이다 — 서로 읽으면 순환이 된다.
+  final Map<String, dynamic>? ssh;
 
   /// 이 로봇만 다른 ROS 도메인을 쓸 때 그 번호. null 이면 프로젝트 기본값.
   ///
@@ -191,6 +227,9 @@ class RmfProjectRobot {
     spawnY: spawnY,
     spawnHeading: spawnHeading ?? this.spawnHeading,
     rosDomainId: rosDomainId,
+    ssh: ssh,
+    driveMode: driveMode,
+    allowReversing: allowReversing,
   );
 
   /// 설 자리만 바꾼 사본. 좌표는 비운다.
@@ -212,6 +251,9 @@ class RmfProjectRobot {
     spawnY: null,
     spawnHeading: spawnHeading,
     rosDomainId: rosDomainId,
+    ssh: ssh,
+    driveMode: driveMode,
+    allowReversing: allowReversing,
   );
 
   bool get isMobile => kind == RmfRobotKind.mobile;
@@ -235,6 +277,9 @@ class RmfProjectRobot {
     'spawnY': spawnY,
     'spawnHeading': spawnHeading,
     'rosDomainId': rosDomainId,
+    'ssh': ssh,
+    'driveMode': driveMode.storageValue,
+    'allowReversing': allowReversing,
   };
 
   static RmfProjectRobot fromJson(Map<String, dynamic> data) => RmfProjectRobot(
@@ -253,6 +298,9 @@ class RmfProjectRobot {
     spawnY: (data['spawnY'] as num?)?.toDouble(),
     spawnHeading: (data['spawnHeading'] as num?)?.toDouble() ?? 0,
     rosDomainId: (data['rosDomainId'] as num?)?.toInt(),
+    ssh: (data['ssh'] as Map?)?.cast<String, dynamic>(),
+    driveMode: parseRobotDriveMode(data['driveMode'] as String?),
+    allowReversing: data['allowReversing'] as bool? ?? false,
   );
 }
 
@@ -2189,9 +2237,20 @@ ADAPTER_WAIT="\${ADAPTER_WAIT:-90}"
 # launch 의 respawn_delay 보다 넉넉해야 한다. 짧으면 다시 뜨는 중인 것을 두고
 # 죽었다고 알린다.
 ADAPTER_RESPAWN_WAIT="\${ADAPTER_RESPAWN_WAIT:-30}"
-ADAPTER_HEALTH_GRACE="\${ADAPTER_HEALTH_GRACE:-120}"
-ADAPTER_HEALTH_INTERVAL="\${ADAPTER_HEALTH_INTERVAL:-30}"
-ADAPTER_HEALTH_FAILURES="\${ADAPTER_HEALTH_FAILURES:-3}"
+# 어댑터가 로봇을 놓치면 **스스로 다시 붙지 않는다.** 뜰 때 `/fleet_states` 에서
+# 로봇을 찾아 등록하는데, 그때 Nav2·AMCL 이 아직이면 위치를 몰라 등록을 못 하고
+# 그대로 있는다. 재기동해야 붙는다 — 실측으로 재기동 자체는 4초면 끝났다.
+#
+# 그러니 오래 기다릴 이유가 없다. 예전 값(유예 120초 · 주기 30초 · 3회)이면
+# 최악에 210초, 3분 반을 기다린 뒤에야 재기동했다. 그동안 화면에는 어댑터가
+# 연결되는 중으로만 보인다.
+#
+# 유예는 Nav2 가 뜨는 데 걸리는 만큼만 준다. 너무 짧으면 정상 기동 중인 어댑터를
+# 죽여 오히려 느려지므로, 라즈베리파이가 느린 것을 감안해 45초를 둔다.
+# 최악 = 45 + 15*2 = 75초.
+ADAPTER_HEALTH_GRACE="\${ADAPTER_HEALTH_GRACE:-45}"
+ADAPTER_HEALTH_INTERVAL="\${ADAPTER_HEALTH_INTERVAL:-15}"
+ADAPTER_HEALTH_FAILURES="\${ADAPTER_HEALTH_FAILURES:-2}"
 EXPECTED_FLEET_ROBOTS="${navigatingRobots(robots).map((robot) => robot.robotId).join(' ')}"
 
 # ── 지도 서버가 정말 켜졌는지 ──────────────────────────────────────────────
@@ -2424,6 +2483,84 @@ ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:="\$RVIZ_HEADLESS"'''}
 ''';
 
 /// 이 프로젝트로 띄운 것을 내리는 셸 스크립트.
+/// 바꾼 것에 딸린 것만 다시 띄우는 스크립트.
+///
+/// Waypoint 하나를 옮기고 전체를 다시 띄우면 1~2분이 걸린다. Gazebo 가 다시
+/// 서고 로봇이 다시 스폰되고 Nav2 가 처음부터 lifecycle 을 밟는다 — 정작
+/// 바뀐 것은 nav graph 하나인데.
+///
+/// 무엇이 무엇을 읽는지는 정해져 있다. 셋 다 **기동할 때 한 번** 읽고 그 뒤로는
+/// 메모리에 든 것을 쓰므로, 다시 읽히려면 그 프로세스를 다시 띄우는 수밖에 없다.
+String buildProjectRestartScript({
+  required String mapName,
+  required String mapDirectory,
+}) =>
+    '''#!/usr/bin/env bash
+# $mapName 프로젝트의 일부만 다시 띄운다.
+# rmf_control_ui 가 맵 프로젝트에서 생성했다. 손으로 고치면 다음 배포 때
+# 덮어써진다.
+#
+#   $mapName.building.yaml  ->  building_map_server
+#   nav_graphs/0.yaml       ->  fleet_adapter (-n 인자)
+#   nav2_params.yaml        ->  로봇 Nav2 노드들
+#
+#   ./restart_$mapName.sh rmf     지도(Waypoint·레인)가 바뀌었을 때
+#   ./restart_$mapName.sh nav2    로봇 파라미터가 바뀌었을 때
+set -euo pipefail
+
+MAP_DIR="$mapDirectory"
+MODE="\${1:-rmf}"
+
+if [[ -f /opt/ros/jazzy/setup.bash ]]; then
+  set +u
+  . /opt/ros/jazzy/setup.bash
+  set -u
+fi
+
+# 이 프로젝트가 띄운 것만 고른다. 다른 맵으로 띄운 RMF 는 건드리지 않는다.
+stop_launch() {
+  local label="\$1" pattern="\$2" pids
+  mapfile -t pids < <(pgrep -u "\$(id -u)" -f "\$pattern" 2>/dev/null || true)
+  if ((\${#pids[@]} == 0)); then
+    echo "  \$label: 안 떠 있었습니다"
+    return
+  fi
+  kill -TERM "\${pids[@]}" 2>/dev/null || true
+  # 자식까지 내려갈 시간을 준다. ros2 launch 는 TERM 을 받고 제 자식에게 다시
+  # 보낸다 — 바로 KILL 하면 자식이 고아로 남아 다음에 띄운 것과 두 벌이 된다.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    pgrep -u "\$(id -u)" -f "\$pattern" >/dev/null 2>&1 || break
+  done
+  pkill -KILL -u "\$(id -u)" -f "\$pattern" 2>/dev/null || true
+  echo "  \$label: 내렸습니다"
+}
+
+case "\$MODE" in
+  rmf)
+    echo "[1/2] RMF 계층을 내립니다 (Gazebo · 로봇 Nav2 · 브링업은 그대로)"
+    stop_launch "Open-RMF" "ros2 launch \$MAP_DIR/$mapName.launch.xml"
+    # 어댑터는 nav graph 를 -n 인자로 물고 있다. 지도가 바뀌면 이것도 다시
+    # 읽어야 하므로 함께 내린다.
+    stop_launch "Nav2 어댑터" "\$MAP_DIR/${mapName}_nav2_adapter.py"
+    echo "[2/2] 다시 띄웁니다"
+    nohup ros2 launch "\$MAP_DIR/$mapName.launch.xml" headless:=true > "\$MAP_DIR/$mapName.restart.log" 2>&1 &
+    echo "완료. 어댑터가 로봇을 다시 등록하기까지 20초쯤 걸립니다."
+    ;;
+  nav2)
+    echo "[1/2] 로봇 Nav2 를 내립니다 (RMF · Gazebo · 브링업은 그대로)"
+    stop_launch "로봇 Nav2" "ros2 launch \$MAP_DIR/${mapName}_nav2.launch.xml"
+    echo "[2/2] 다시 띄웁니다"
+    nohup ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml" > "\$MAP_DIR/${mapName}_nav2.restart.log" 2>&1 &
+    echo "완료. lifecycle 이 다 켜지기까지 10초쯤 걸립니다."
+    ;;
+  *)
+    echo "쓰는 법: \$0 [rmf|nav2]" >&2
+    exit 2
+    ;;
+esac
+''';
+
 String buildProjectStopScript({
   required String mapName,
   required String mapDirectory,
@@ -2771,6 +2908,20 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     // 켜고 끄는 것뿐이라 벽시계로 재는 것이 맞다.
     ..writeln('      <param name="use_sim_time" value="false"/>')
     ..writeln('      <param name="autostart" value="true"/>')
+    // 라즈베리파이에서 `controller_server` 는 costmap 을 만드느라 기동이
+    // 무겁다. 그 사이 전이 응답이 늦으면 관리자가 실패로 보고 **뒤의 노드는
+    // 시도조차 하지 않는다** — amcl 만 active 고 나머지는 unconfigured 로 남아,
+    // 위치는 뜨는데 주행만 안 되는 상태가 된다.
+    ..writeln(
+      '      <param name="service_timeout" '
+      'value="$nav2LifecycleServiceTimeoutSeconds"/>',
+    )
+    // 기동 직후 바쁜 노드가 heartbeat 를 늦게 보내는 것만으로 죽은 것으로
+    // 보지 않게 한다.
+    ..writeln(
+      '      <param name="bond_timeout" '
+      'value="$nav2LifecycleBondTimeoutSeconds"/>',
+    )
     ..writeln('      <param name="node_names"')
     ..writeln('             value="[amcl, ${managed.join(', ')}]"/>')
     ..writeln('    </node>')
@@ -3719,6 +3870,19 @@ String buildProjectNav2LaunchXml({
     // 관리자는 sim 시간을 쓰지 않는다. 위와 같은 이유다.
     ..writeln('    <param name="use_sim_time" value="false"/>')
     ..writeln('    <param name="autostart" value="true"/>')
+    // 지도 파일을 읽는 데 5초가 넘어 `get_state` 응답이 늦는 일이 실제로
+    // 있었다. 그러면 map_server 가 inactive 로 남고, 증상은 세 단계 떨어진
+    // 곳(로봇이 안 움직인다)에 뜬다. 실행 스크립트의
+    // `ensure_map_server_active` 가 뒤늦게 되살리지만, 애초에 안 넘어가는
+    // 편이 낫다.
+    ..writeln(
+      '    <param name="service_timeout" '
+      'value="$nav2LifecycleServiceTimeoutSeconds"/>',
+    )
+    ..writeln(
+      '    <param name="bond_timeout" '
+      'value="$nav2LifecycleBondTimeoutSeconds"/>',
+    )
     ..writeln('    <param name="node_names" value="[map_server]"/>')
     ..writeln('  </node>');
   if (navigating.isEmpty) {
@@ -3829,20 +3993,57 @@ String buildProjectNav2LaunchXml({
 /// **설비 로봇은 언제나 자리 Waypoint 를 따라온다.** 이동 로봇만 등록해 둔 유효한
 /// 시작 좌표를 지킨다. 까닭은 아래 `hasExplicitSpawn` 자리에 적었다.
 ///
+/// [headingRadiansOf] 는 로봇이 선 자리 Waypoint 에 적힌 방향(라디안)을 돌려준다.
+/// 자리에 방향이 없으면 null 이다.
+///
+/// **등록에 넣은 방향이 이긴다.** 자리 방향은 등록이 비어 있을 때(0)만 채워
+/// 넣는 기본값이다.
+///
+/// 처음에는 반대였다 — 자리가 이기게 했더니, 사람이 로봇 등록에서 90도를
+/// 넣어 저장해도 다음에 열면 늘 자리의 180도로 돌아왔다. 저장이 안 된 것처럼
+/// 보이지만 실제로는 저장된 값을 덮어쓴 것이라, 어디를 고쳐야 할지 알 수 없다.
+///
+/// 로봇마다 방향을 달리 줄 이유도 있다. 같은 충전대라도 로봇이 서는 쪽이
+/// 다르거나, 나가는 길이 달라 미리 돌려 세워 두고 싶을 때다.
+///
+/// 등록이 0 이면 "안 정했다" 로 본다. [RmfProjectRobot.spawnHeading] 이
+/// non-nullable 이라 "0도로 정함" 과 "안 정함" 을 가릴 수 없다. 둘 중에는
+/// 자리 값을 쓰는 편이 낫다 — 0도가 진짜로 필요하면 자리 방향을 0 으로 두면
+/// 되고, 자리에도 없으면 어차피 0 이다.
+///
 /// 바꿀 것이 없으면 받은 목록을 그대로 돌려준다. 부르는 쪽이 `identical` 로
 /// 달라졌는지 가려서 쓸데없이 다시 그리거나 저장하지 않게 한다.
 List<RmfProjectRobot> robotsWithMapSpawnPoints(
   List<RmfProjectRobot> robots,
   ({double dx, double dy})? Function(RmfProjectRobot robot) pixelOf,
-  double metersPerPixel,
-) {
+  double metersPerPixel, {
+  double? Function(RmfProjectRobot robot)? headingRadiansOf,
+}) {
   if (metersPerPixel <= 0) return robots;
   var changed = false;
   final result = <RmfProjectRobot>[];
   for (final robot in robots) {
+    // 자리에 적힌 방향은 좌표와 따로 본다. 좌표는 "따로 고른 시작 자리" 라는
+    // 예외가 있지만(아래 `hasExplicitSpawn`), 방향에는 그런 예외가 없다 —
+    // 시작 자리를 따로 골랐더라도 충전 단자가 보는 쪽은 자리가 정한다.
+    final mapHeading = headingRadiansOf?.call(robot);
+    RmfProjectRobot withHeading(RmfProjectRobot value) {
+      if (mapHeading == null) return value;
+      // 등록에 넣은 값이 이긴다. 자리 방향은 등록이 비어 있을 때만 채운다 —
+      // 안 그러면 사람이 저장한 각도가 다음에 열 때마다 사라진다.
+      if (value.spawnHeading.abs() > 1e-6) return value;
+      if ((value.spawnHeading - mapHeading).abs() < 1e-6) return value;
+      changed = true;
+      return value.withSpawn(
+        spawnX: value.spawnX,
+        spawnY: value.spawnY,
+        spawnHeading: mapHeading,
+      );
+    }
+
     final pixel = pixelOf(robot);
     if (pixel == null) {
-      result.add(robot);
+      result.add(withHeading(robot));
       continue;
     }
     final spawn = rmfWorldFromPixel(pixel.dx, pixel.dy, metersPerPixel);
@@ -3862,18 +4063,18 @@ List<RmfProjectRobot> robotsWithMapSpawnPoints(
         robot.spawnY != null &&
         robot.spawnY! <= 0;
     if (hasExplicitSpawn) {
-      result.add(robot);
+      result.add(withHeading(robot));
       continue;
     }
     if (robot.spawnX != null &&
         robot.spawnY != null &&
         (spawn.x - robot.spawnX!).abs() < 1e-6 &&
         (spawn.y - robot.spawnY!).abs() < 1e-6) {
-      result.add(robot);
+      result.add(withHeading(robot));
       continue;
     }
     changed = true;
-    result.add(robot.withSpawn(spawnX: spawn.x, spawnY: spawn.y));
+    result.add(withHeading(robot.withSpawn(spawnX: spawn.x, spawnY: spawn.y)));
   }
   return changed ? result : robots;
 }
@@ -4611,8 +4812,17 @@ String buildRobotBridgeYaml(RmfProjectRobot robot) =>
         );
 
 /// 로봇 디렉터리에 함께 두는 설명.
-String buildRobotReadme(RmfProjectRobot robot, String mapName) {
+/// [projectDomainId] 는 프로젝트 기본 도메인이다. 실물 로봇을 띄우는 명령에
+/// 그대로 박아 넣는다 — 도메인이 어긋나면 토픽 이름만 보이고 값은 하나도 안
+/// 오는데 **오류가 안 나서**, 라이다나 AMCL 을 의심하며 한참을 헤매게 된다.
+/// 로봇이 제 도메인을 따로 가지면 그것이 이긴다.
+String buildRobotReadme(
+  RmfProjectRobot robot,
+  String mapName, {
+  int projectDomainId = 0,
+}) {
   final station = robot.chargerWaypoint ?? '미지정';
+  final rosDomainId = robot.rosDomainId ?? projectDomainId;
   final buffer = StringBuffer()
     ..writeln('# ${robot.robotId} · ${robot.displayName}')
     ..writeln()
@@ -4645,18 +4855,99 @@ String buildRobotReadme(RmfProjectRobot robot, String mapName) {
       ..writeln('앱 안에서만 도는 로봇입니다.')
       ..writeln('fleet adapter 에도 Gazebo 에도 들어가지 않습니다.');
   }
+  // 실물 이동 로봇은 앱이 대신 띄워 줄 수 없다. 사람이 로봇에 들어가 손으로
+  // 올려야 하고, 그때 **네임스페이스와 도메인이 어긋나면** 토픽 이름만 있고
+  // 값은 하나도 안 온다. 오류는 안 난다 — 그래서 라이다나 AMCL 을 의심하며
+  // 한참을 헤매게 된다. 실제로 그 일이 있었다.
+  //
+  // 그러니 이 로봇을 어떻게 띄우는지 여기에 그대로 적어 둔다. 로봇마다 이름이
+  // 다르므로 명령도 로봇마다 다르다.
+  if (robot.isMobile && robot.dataSource == RobotDataSource.real) {
+    buffer
+      ..writeln()
+      ..writeln('## 로봇에서 띄우기')
+      ..writeln()
+      ..writeln('이 로봇은 앱이 못 띄웁니다. 로봇에 들어가 직접 올립니다.')
+      ..writeln()
+      ..writeln('**네임스페이스와 도메인이 아래와 같아야 합니다.**')
+      ..writeln('어긋나면 토픽 이름만 보이고 값은 하나도 안 옵니다 —')
+      ..writeln('오류가 안 나서 라이다나 AMCL 을 의심하게 됩니다.')
+      ..writeln()
+      ..writeln('```bash')
+      ..writeln('# ① 하드웨어 (라이다 · 모터 · 배터리)')
+      ..writeln('export ROS_DOMAIN_ID=$rosDomainId')
+      ..writeln('source /opt/ros/jazzy/setup.bash')
+      ..writeln('source ~/pinky_pro/install/setup.bash')
+      ..writeln()
+      ..writeln('ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml \\')
+      ..writeln('  namespace:=${robot.gzName}')
+      ..writeln('```')
+      ..writeln()
+      ..writeln('```bash')
+      ..writeln('# ② Nav2 (①이 값을 내기 시작한 뒤에 띄웁니다)')
+      ..writeln('export ROS_DOMAIN_ID=$rosDomainId')
+      ..writeln('ros2 launch \$MAP_DIR/${robotDirectoryName(robot)}/nav2.launch.xml')
+      ..writeln('```')
+      ..writeln()
+      ..writeln('### 잘 떴는지 보기')
+      ..writeln()
+      ..writeln('```bash')
+      ..writeln('export ROS_DOMAIN_ID=$rosDomainId')
+      ..writeln()
+      ..writeln('# 하드웨어가 값을 내는가 (둘 다 나와야 합니다)')
+      ..writeln('ros2 topic echo /${robot.gzName}/scan --once | head -5')
+      ..writeln('ros2 topic echo /${robot.gzName}/odom --once | head -5')
+      ..writeln()
+      ..writeln('# Nav2 가 다 켜졌는가 (전부 active 여야 합니다)')
+      ..writeln('for n in amcl controller_server planner_server bt_navigator; do')
+      ..writeln('  echo -n "\$n: "; ros2 lifecycle get /${robot.gzName}/\$n')
+      ..writeln('done')
+      ..writeln()
+      ..writeln('# 로봇이 지도 위에 섰는가 — 이것이 나오면 다 된 것입니다')
+      ..writeln('ros2 run tf2_ros tf2_echo map ${robot.gzName}/odom')
+      ..writeln('```')
+      ..writeln()
+      ..writeln('`tf2_echo` 는 처음 몇 초 `frame does not exist` 를 냅니다.')
+      ..writeln('TF 버퍼가 차는 동안이라 정상입니다 — 조금 기다립니다.')
+      ..writeln()
+      ..writeln('### 안 될 때')
+      ..writeln()
+      ..writeln('| 증상 | 볼 곳 |')
+      ..writeln('|---|---|')
+      ..writeln('| 토픽이 루트(`/scan`)로 나온다 | `namespace:=` 를 빠뜨렸습니다 |')
+      ..writeln('| 토픽이 아무것도 안 보인다 | `ROS_DOMAIN_ID` 가 $rosDomainId 인지 |')
+      ..writeln('| `scan`·`odom` 이 안 나온다 | 시리얼 포트를 다른 프로세스가 잡고 있는지 |')
+      ..writeln('| `amcl` 만 active 다 | 나머지가 못 켜졌습니다. Nav2 를 다시 띄웁니다 |')
+      ..writeln('| `map` 프레임이 없다 | 관제 PC 의 `map_server` 가 떴는지 |')
+      ..writeln()
+      ..writeln('로봇을 손으로 옮겨 위치를 잃으면, 앱의 로봇 상세에서')
+      ..writeln('`이 자리를 초기 위치로 보내기` 를 누릅니다.');
+  }
   buffer
     ..writeln()
     ..writeln('## 파일')
     ..writeln()
     ..writeln('| 파일 | 용도 |')
     ..writeln('|---|---|')
-    ..writeln('| `robot.yaml` | 이 로봇의 등록 정보 |')
-    ..writeln('| `spawn.launch.xml` | 이 로봇만 Gazebo 에 올리는 launch |')
+    ..writeln('| `robot.yaml` | 이 로봇의 등록 정보 |');
+  // Gazebo 에 안 올리는 로봇에게 `spawn.launch.xml` 을 안내하면, 그것을 돌려
+  // 보고 안 된다고 여긴다. 실물은 이미 그 자리에 있다.
+  if (robot.runsInGazebo) {
+    buffer.writeln('| `spawn.launch.xml` | 이 로봇만 Gazebo 에 올리는 launch |');
+  }
+  if (robot.isMobile && robot.dataSource.usesTopics) {
+    buffer.writeln('| `nav2.launch.xml` | 이 로봇의 Nav2 (AMCL · 경로 · 제어) |');
+    buffer.writeln('| `nav2_params.yaml` | 그 Nav2 의 파라미터 |');
+  }
+  buffer
     ..writeln('| `bridge.yaml` | 이 로봇이 주고받는 토픽 |')
-    ..writeln()
-    ..writeln('프로젝트 bringup 이 `spawn.launch.xml` 을 include 합니다.')
-    ..writeln('이 로봇만 따로 시험하려면 그 파일을 직접 돌리면 됩니다.')
+    ..writeln();
+  if (robot.runsInGazebo) {
+    buffer
+      ..writeln('프로젝트 bringup 이 `spawn.launch.xml` 을 include 합니다.')
+      ..writeln('이 로봇만 따로 시험하려면 그 파일을 직접 돌리면 됩니다.');
+  }
+  buffer
     ..writeln()
     ..writeln('## 고치는 곳')
     ..writeln()

@@ -71,6 +71,9 @@ void main() {
     Duration? backendUptime = const Duration(minutes: 5),
     // 대부분의 시험은 시뮬레이터로 도는 프로젝트를 본다.
     bool usesSimulator = true,
+    // Nav2 노드는 다 켜진 것이 정상이다. 빈 목록이 "다 켜졌다" 이고, 아예
+    // 없으면 "아직 안 물어봤다" 다.
+    Map<String, List<String>> nav2Stuck = const {'PK_01': []},
   }) => buildReadinessReport(
     waypointNames: waypoints,
     robots: robots,
@@ -83,18 +86,19 @@ void main() {
     mapServerState: mapServerState,
     backendUptime: backendUptime,
     usesSimulator: usesSimulator,
+    nav2Stuck: nav2Stuck,
   );
 
   ReadinessCheck find(ReadinessReport r, String title) =>
       r.checks.firstWhere((check) => check.title == title);
 
   group('다 됐을 때', () {
-    test('아홉 단계가 다 초록이다', () {
-      // 여덟에서 아홉이 되었다. `Nav2 지도 서버` 가 늘었다 — 여기가 꺼져 있는
-      // 것을 여태 맨 끝(`어댑터가 죽었습니다`)으로만 봤다.
+    test('열 단계가 다 초록이다', () {
+      // 아홉에서 열이 되었다. `Nav2 노드` 가 늘었다 — 노드가 있는 것과
+      // `active` 인 것은 다른데, 여태 그것을 확인표에서 볼 수 없었다.
       final r = report();
       expect(r.isReady, isTrue);
-      expect(r.checks, hasLength(9));
+      expect(r.checks, hasLength(10));
       expect(r.firstBlocked, isNull);
       expect(r.summary, contains('작업을 낼 수 있습니다'));
     });
@@ -206,6 +210,7 @@ void main() {
       final r = report(
         robots: const [pinky, pinky2],
         attached: const {'PK_01', 'PK_02'},
+        nav2Stuck: const {'PK_01': [], 'PK_02': []},
       );
       expect(find(r, '로봇이 RMF 에 붙음').state, ReadinessState.ready);
       expect(r.isReady, isTrue);
@@ -311,7 +316,8 @@ void main() {
         r.checks.where((check) => check.title == '시뮬레이션 시계'),
         isEmpty,
       );
-      expect(r.checks, hasLength(8));
+      // 시계 칸만 빠진다. Nav2 노드 칸은 그대로 있다.
+      expect(r.checks, hasLength(9));
     });
 
     test('시계 없이도 다 됐다고 말할 수 있다', () {
@@ -356,4 +362,81 @@ void main() {
       expect(find(r, '시뮬레이션 시계').isBlocked, isTrue);
     });
   });
+
+  /// 노드가 있는 것과 `active` 인 것은 다르다. inactive 인 노드는 명령을 안
+  /// 받는데 **오류를 내지 않는다** — 노드 목록에는 그대로 보인다.
+  ///
+  /// 실제로 `controller_server` 가 inactive 인 채로, 작업을 넣으면 어댑터가
+  /// `Nav2 가 거절했습니다` 한 줄만 남기고 끝난 일이 있다. 그때 확인표는
+  /// `/fleet_states 가 안 나옵니다` 로만 보여서, 어느 노드가 막혔는지는
+  /// `ros2 lifecycle get` 을 여덟 번 쳐서 알아내야 했다.
+  group('Nav2 노드', () {
+    test('다 켜졌으면 한 줄로 둔다', () {
+      final check = find(report(), 'Nav2 노드 (PK_01)');
+      expect(check.state, ReadinessState.ready);
+      // 다 켜져 있을 때 여덟 줄을 늘어놓으면 정작 막힌 칸이 묻힌다.
+      expect(check.detail, contains('모두 active'));
+    });
+
+    test('막힌 노드 이름을 짚는다', () {
+      final check = find(
+        report(
+          nav2Stuck: const {
+            'PK_01': ['controller_server', 'bt_navigator'],
+          },
+        ),
+        'Nav2 노드 (PK_01)',
+      );
+      expect(check.state, ReadinessState.blocked);
+      expect(check.detail, contains('controller_server'));
+      expect(check.detail, contains('bt_navigator'));
+    });
+
+    /// 겉으로 멀쩡해 보이는 까닭을 적어야 한다. 안 그러면 노드 목록에 다
+    /// 나오는 것을 보고 확인표가 틀렸다고 여긴다.
+    test('오류가 안 난다는 것을 밝힌다', () {
+      final check = find(
+        report(nav2Stuck: const {'PK_01': ['planner_server']}),
+        'Nav2 노드 (PK_01)',
+      );
+      expect(check.detail, contains('오류'));
+    });
+
+    test('bt_navigator 가 막히면 작업이 거절된다고 적는다', () {
+      final check = find(
+        report(nav2Stuck: const {'PK_01': ['bt_navigator']}),
+        'Nav2 노드 (PK_01)',
+      );
+      expect(check.detail, contains('navigate_to_pose'));
+    });
+
+    /// 모르는 것을 정상으로 보면 안 된다.
+    test('아직 안 물어봤으면 모른다고 한다', () {
+      final check = find(report(nav2Stuck: const {}), 'Nav2 노드 (PK_01)');
+      expect(check.state, ReadinessState.unknown);
+    });
+
+    test('백엔드가 없으면 칸을 안 만든다', () {
+      final r = report(backendRunning: false);
+      expect(
+        r.checks.where((check) => check.title.startsWith('Nav2 노드')),
+        isEmpty,
+      );
+    });
+
+    /// 로봇마다 한 줄이다. 한 대만 막혀도 어느 대인지 보여야 한다.
+    test('로봇마다 따로 본다', () {
+      final r = report(
+        robots: const [pinky, pinky2],
+        attached: const {'PK_01', 'PK_02'},
+        nav2Stuck: const {
+          'PK_01': [],
+          'PK_02': ['controller_server'],
+        },
+      );
+      expect(find(r, 'Nav2 노드 (PK_01)').state, ReadinessState.ready);
+      expect(find(r, 'Nav2 노드 (PK_02)').state, ReadinessState.blocked);
+    });
+  });
+
 }

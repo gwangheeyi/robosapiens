@@ -5,3 +5,11 @@ Future<bool> resetGazeboRobotPose({
   required double yaw,
   required int rosDomainId,
 }) async => false;
+
+Future<bool> publishInitialPose({
+  required String namespace,
+  required double x,
+  required double y,
+  required double yaw,
+  required int rosDomainId,
+}) async => false;

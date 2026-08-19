@@ -101,11 +101,13 @@ class DockHeadingCheck {
   final double? degrees;
 }
 
-/// 적재 방향을 안 정한 픽업·드랍오프 자리. 다 정해 놓았으면 null.
+/// 적재 방향을 안 정한 픽업·드랍오프·충전 자리. 다 정해 놓았으면 null.
 ///
 /// 각도는 **안 정해도 된다** — 비워 두면 RMF 가 들어온 길 방향대로 세운다.
 /// 그러나 그 자리에서 팔이 물건을 집는다면 로봇이 어느 쪽을 보고 서는지가
-/// 결과를 가른다. 그래서 막지는 않고 알리기만 한다.
+/// 결과를 가른다. 충전 자리도 같다 — 충전 단자는 로봇 한쪽에만 있어서, 방향이
+/// 없으면 도착은 했는데 접점이 안 맞는 일이 생긴다. 그래서 막지는 않고
+/// 알리기만 한다.
 ///
 /// 실제로 픽업3 에 180 도를 넣었다고 기억하는데 저장된 프로젝트에도 배포된
 /// building.yaml 에도 `robosapiens_dock_heading` 이 없던 일이 있었다. 각도는
@@ -116,6 +118,11 @@ String? missingDockHeadingMessage(List<DockHeadingCheck> checks) {
   final lines = <String>[];
   for (final check in checks) {
     if (!waypointUsesDockHeading(check.category)) continue;
+    // 대기는 방향을 **쓸 수 있을** 뿐이지 있어야 하는 자리가 아니다. 대부분의
+    // 대기 자리는 그냥 지나가며 서는 곳이라, 없다고 알리면 잔소리가 된다.
+    // 픽업·드랍오프는 팔이 물건을 집어야 하고 충전은 단자가 한쪽에만 있어서,
+    // 그 둘은 없으면 결과가 갈린다.
+    if (check.category == '대기') continue;
     if (check.degrees != null) continue;
     final name = check.name.trim();
     lines.add('${name.isEmpty ? '(이름 없음)' : name} · ${check.category}');
@@ -125,7 +132,8 @@ String? missingDockHeadingMessage(List<DockHeadingCheck> checks) {
       '${lines.join('\n')}\n\n'
       '이대로 배포하면 building.yaml 에 `robosapiens_dock_heading` 이 안 '
       '들어가고, 로봇은 그 자리에서 들어온 길 방향 그대로 섭니다. 팔이 물건을 '
-      '집는 자리라면 매번 다른 쪽을 보고 서게 됩니다.\n\n'
+      '집는 자리라면 매번 다른 쪽을 보고 서게 되고, 충전 자리라면 충전 단자가 '
+      '매번 다른 쪽을 봅니다.\n\n'
       '각도를 넣으려면 Waypoint 를 열어 `적재 방향 (도)` 에 적으세요. '
       '방향을 안 따져도 되는 자리면 그대로 배포하셔도 됩니다.';
 }

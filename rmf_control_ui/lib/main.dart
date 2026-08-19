@@ -14,7 +14,16 @@ import 'deployment_service.dart';
 import 'database_migration.dart';
 import 'deploy_preflight.dart';
 import 'deployed_map_service.dart';
+import 'bringup_precheck.dart';
 import 'gazebo_robot_reset.dart';
+import 'nav2_lifecycle.dart';
+import 'nav2_lifecycle_runner.dart';
+import 'robot_initial_pose.dart';
+import 'robot_last_place.dart';
+import 'robot_nudge.dart';
+import 'robot_nudge_runner.dart';
+import 'robot_ssh.dart';
+import 'robot_ssh_runner.dart';
 import 'map_ai_service.dart';
 import 'map_geometry.dart';
 import 'map_distance_scale.dart';
@@ -33,8 +42,10 @@ import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
 import 'rmf_project_config.dart';
 import 'operations_log.dart';
+import 'order_trigger.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
+import 'robot_drive_mode.dart';
 import 'grid_map_settings.dart';
 import 'readiness_check.dart';
 import 'robot_link_probe.dart';
@@ -59,6 +70,7 @@ import 'scenario_route_planner.dart';
 import 'task_dispatch.dart';
 import 'task_store.dart';
 import 'wall_height.dart';
+import 'waypoint_capture.dart';
 import 'waypoint_table.dart';
 import 'workcell_pairing.dart';
 import 'workcell_reach_check.dart';
@@ -383,17 +395,9 @@ extension on _TaskStepType {
       this == _TaskStepType.navigate || this == _TaskStepType.returnHome;
 }
 
-enum _OrderTrigger { manual, any, ambient, chilled, frozen }
-
-extension on _OrderTrigger {
-  String get label => switch (this) {
-    _OrderTrigger.manual => '수동 실행',
-    _OrderTrigger.any => '모든 주문',
-    _OrderTrigger.ambient => '상온 주문',
-    _OrderTrigger.chilled => '냉장 주문',
-    _OrderTrigger.frozen => '냉동 주문',
-  };
-}
+/// 주문 종류는 `order_trigger.dart` 가 정한다. 낱개 구획만으로는 섞인 주문을
+/// 어느 작업이 받아야 하는지 알 수 없어, 조합까지 하나의 종류로 둔다.
+typedef _OrderTrigger = OrderTrigger;
 
 enum _TaskStepStatus { pending, active, completed, failed, cancelled }
 
@@ -708,8 +712,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
   static const _menuMap = 1;
   static const _menuGrid = 2;
   static const _menuRobots = 3;
-  static const _menuPolicies = 4;
-  static const _menuTasks = 5;
+  // 작업 관리가 로봇 관리 바로 밑이다. 둘을 오가며 쓰는 일이 가장 잦다.
+  static const _menuTasks = 4;
+  static const _menuPolicies = 5;
   static const _menuRobotModels = 6;
   static const _menuRos2 = 7;
   static const _menuFiles = 8;
@@ -989,7 +994,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
   }
 
   bool _triggerMatches(_OrderTrigger trigger, Set<String> zones) =>
-      trigger == _OrderTrigger.any || zones.contains(trigger.name);
+      orderTriggerMatches(trigger, zones);
 
   Future<void> _pollPendingOrders() async {
     // 주문을 태스크로 전개하려면 목적지로 삼을 맵이 있어야 한다. 열린 프로젝트가
@@ -1036,7 +1041,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
           name: '${template.name} · 주문 $orderId',
           description:
               '${template.description}${template.description.isEmpty ? '' : '\n'}'
-              '자동 생성 주문: $orderId · 고객: ${value['customer'] ?? '-'}',
+              '자동 생성 주문: $orderId · 고객: ${value['customer'] ?? '-'}\n'
+              // 이 주문이 어떤 종류였는지 남긴다. 나중에 왜 이 작업이 이
+              // 주문을 받았는지 되짚을 수 있어야 한다 — 구획이 안 맞는데
+              // 받았다면 그것이 바로 원인이다.
+              '주문 종류: ${orderZonesLabel(zones)}',
           type: template.type,
           robotId: robot?.id ?? '__auto__',
           orderId: orderId,
@@ -1157,7 +1166,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       description: data['description'] as String? ?? '',
       type: data['type'] as String? ?? '연속 작업',
       robotId: data['robotId'] as String? ?? '__auto__',
-      trigger: _OrderTrigger.values.byName(
+      trigger: parseOrderTrigger(
         data['trigger'] as String? ?? _OrderTrigger.manual.name,
       ),
       orderId: data['orderId'] as String?,
@@ -4966,8 +4975,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
                   ),
                 ),
                 // 적재 방향은 로봇이 그 자리에 **서는 자세**다. 지나가기만 하는
-                // 자리에는 뜻이 없으므로 물건을 주고받는 자리에만 보여 준다.
-                if (selectedType == '픽업' || selectedType == '드랍오프') ...[
+                // 자리에는 뜻이 없으므로 서는 자리에만 보여 준다 — 픽업·드랍오프와
+                // 충전이다. 판정은 building.yaml 내보내기와 같은 표를 쓴다.
+                if (waypointUsesDockHeading(selectedType)) ...[
                   const Divider(height: 26),
                   TextField(
                     controller: headingController,
@@ -5082,10 +5092,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     setState(() {
       _waypointNames[waypoint] = name;
       _waypointTypes[waypoint] = selectedType;
-      // 물건을 주고받는 자리가 아니게 되면 적재 방향도 뜻을 잃는다. 남겨 두면
-      // 나중에 다시 픽업으로 바꿨을 때 예전 각도가 되살아난다.
-      if (dockHeading == null ||
-          (selectedType != '픽업' && selectedType != '드랍오프')) {
+      // 로봇이 서는 자리가 아니게 되면 적재 방향도 뜻을 잃는다. 남겨 두면
+      // 나중에 다시 픽업·충전으로 바꿨을 때 예전 각도가 되살아난다.
+      if (dockHeading == null || !waypointUsesDockHeading(selectedType)) {
         _waypointDockHeadings.remove(waypoint);
       } else {
         _waypointDockHeadings[waypoint] = dockHeading;
@@ -5567,7 +5576,31 @@ class _ControlDashboardState extends State<ControlDashboard> {
     return robotsWithMapSpawnPoints(robots, (robot) {
       final station = _stationPixelFor(robot);
       return station == null ? null : (dx: station.dx, dy: station.dy);
-    }, scale);
+    }, scale, headingRadiansOf: _stationHeadingRadiansFor);
+  }
+
+  /// 로봇이 선 자리 Waypoint 에 적힌 방향 [라디안]. 안 정해 두었으면 null.
+  ///
+  /// 자리에 방향이 있으면 등록에 저장된 `spawn_heading` 보다 이것이 앞선다.
+  /// 충전 단자가 어느 쪽을 보고 있는지는 로봇이 아니라 자리가 정하기 때문이다.
+  /// 자리를 비워 두면 예전처럼 등록 값을 그대로 쓴다.
+  ///
+  /// 각도는 [_waypointDockHeadings] 처럼 **도**로 들고 있고, `spawn_heading` 은
+  /// 라디안이다. 여기서 한 번만 바꾼다 — 두 단위가 섞이면 90도가 90라디안으로
+  /// 나가고, 그런 로봇은 엉뚱한 쪽을 보고 선다.
+  double? _stationHeadingRadiansFor(RmfProjectRobot robot) {
+    final station = _stationPixelFor(robot);
+    if (station == null) return null;
+    // 자리를 어느 쪽에서 찾았는지에 방향도 맞춘다. `_stationPixelFor` 가
+    // 편집기가 비었을 때 배포 맵을 보므로, 여기서 편집기만 보면 그 픽셀에
+    // 해당하는 각도를 못 찾아 방향만 조용히 빠진다.
+    final headings = _waypointTypes.isNotEmpty
+        ? _waypointDockHeadings
+        : (_robotDeployedMap?.waypointDockHeadings ??
+              const <Offset, double>{});
+    final degrees = headings[station];
+    if (degrees == null) return null;
+    return degrees * math.pi / 180;
   }
 
   /// 로봇이 선 자리 Waypoint 의 지도 픽셀.
@@ -5660,6 +5693,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
         initialX: robot.spawnX,
         initialY: robot.spawnY,
         initialYaw: robot.spawnHeading,
+        // 이 로봇이 장애물에 두는 여유. 실험실이면 `강제` 로 줄인다.
+        driveMode: robot.driveMode,
+        allowReversing: robot.allowReversing,
         // 로봇을 실제로 움직이는 속도. RMF 쪽 한계와 같은 값을 넣는다 —
         // 벤더 파일(0.2m/s)에 맡겨 두면 RMF 가 아는 속도와 어긋나, 멀쩡히
         // 가는 로봇을 늦었다고 보고 경로를 다시 짠다.
@@ -6318,6 +6354,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     ) {
       if (!mounted) return;
       setState(() => _telemetry = status);
+      _placeLiveRobotsOnMap();
     });
     // 라이다는 relay 노드가 파일로 내려 준다. 볼 로봇만 지켜본다.
     RobotSensorFeed.instance.watch([
@@ -6731,7 +6768,55 @@ class _ControlDashboardState extends State<ControlDashboard> {
       backendUptime: _backendUpAt == null
           ? null
           : DateTime.now().difference(_backendUpAt!),
+      nav2Stuck: _nav2Stuck,
     );
+  }
+
+  /// 로봇마다 안 켜진 Nav2 노드. 로봇 ID → 노드 이름.
+  ///
+  /// 빈 목록이면 다 켜진 것이고, 아예 없으면 **아직 안 물어본** 것이다.
+  final Map<String, List<String>> _nav2Stuck = {};
+
+  /// Nav2 노드 상태를 다시 읽는다.
+  ///
+  /// 노드 하나마다 `ros2 lifecycle get` 을 부르므로 여덟 번이 돈다. 확인표가
+  /// 도는 주기(10초)마다 그것을 다 하면 로봇 두 대에 열여섯 번이라 무겁다 —
+  /// 그래서 따로 간격을 두고, 백엔드가 떠 있을 때만 본다.
+  DateTime? _nav2CheckedAt;
+
+  Future<void> _refreshNav2Stuck() async {
+    if (!_backendRunning) {
+      if (_nav2Stuck.isEmpty) return;
+      setState(_nav2Stuck.clear);
+      return;
+    }
+    final last = _nav2CheckedAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 30)) {
+      return;
+    }
+    _nav2CheckedAt = DateTime.now();
+    final found = <String, List<String>>{};
+    for (final robot in navigatingRobots(_fleetRobots)) {
+      final status = await readNav2Status(
+        robotId: robot.robotId,
+        namespace: robot.gzName,
+        rosDomainId: robot.rosDomainId ?? _rosDomainId,
+      );
+      // 하나도 응답이 없으면 Nav2 가 아예 없는 것이다. 그것을 "여덟 개 다
+      // 막혔다" 로 적으면, 백엔드가 뜨는 중인 몇 초 동안 빨간 줄이 여덟 개
+      // 뜬다 — 어댑터 칸이 이미 그 상태를 다루고 있다.
+      if (status.allUnreachable) continue;
+      found[robot.robotId] = [
+        for (final node in status.notActive) node.name,
+      ];
+    }
+    if (!mounted) return;
+    setState(() {
+      _nav2Stuck
+        ..clear()
+        ..addAll(found);
+    });
   }
 
   /// 마지막으로 읽은 정합 결과와 그때 파일들이 어떤 상태였는지.
@@ -6845,6 +6930,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       _clockPublishers = backendRunning ? clocks : null;
       _mapServerState = backendRunning ? mapServer : null;
     });
+    // Nav2 노드는 무거워서 제 간격으로 따로 본다. 기다리지 않는다 — 이 확인이
+    // 늦어도 나머지 칸은 제때 갱신돼야 한다.
+    unawaited(_refreshNav2Stuck());
   }
 
   /// 로봇 하나를 Waypoint 하나로 바로 보낸다.
@@ -6952,8 +7040,485 @@ class _ControlDashboardState extends State<ControlDashboard> {
             .firstOrNull;
         if (robot != null) await _showWorkcellPolicies(robot);
       },
+      initialPoseStation: () => _initialPoseStationFor(robotId),
+      onSendInitialPose: () => _sendInitialPose(robotId),
+      nudgeReadiness: () {
+        final robot = _fleetRobots
+            .where((item) => item.robotId == robotId)
+            .firstOrNull;
+        if (robot == null) return NudgeReadiness.mockRobot;
+        return checkNudgeReadiness(
+          robot: robot,
+          // 백엔드가 떠 있으면 Nav2 도 있다고 본다. 노드마다 물어보면 창을 열
+          // 때마다 여덟 번씩 `ros2 lifecycle get` 이 돈다 — 눌렀을 때 안 되면
+          // 그때 까닭이 나온다.
+          nav2Ready: _backendRunning,
+          hasActiveTask:
+              _mockRobots
+                  .where((mock) => mock.id == robotId)
+                  .firstOrNull
+                  ?.activeTaskId !=
+              null,
+        );
+      },
+      onNudge: (kind, meters, degrees) =>
+          _nudgeRobot(robotId, kind, meters, degrees),
+      onCaptureWaypoint: () => _captureWaypointAtRobot(robotId),
+      sshReadiness: () {
+        final robot = _fleetRobots
+            .where((item) => item.robotId == robotId)
+            .firstOrNull;
+        if (robot == null) return RobotSshReadiness.mockRobot;
+        return checkRobotSshReadiness(
+          robot: robot,
+          target: RobotSshTarget.fromJson(robot.ssh),
+        );
+      },
+      onBringUpRobot: () => _bringUpRobotOverSsh(robotId),
+      onStopRobotBringup: () => _stopRobotBringupOverSsh(robotId),
+      onInstallAutostart: () => _installRobotAutostart(robotId),
+      onRemoveAutostart: () => _removeRobotAutostart(robotId),
+      autostartStatus: () => _readRobotAutostart(robotId),
     ),
   );
+
+  /// 로봇을 켜자마자 브링업이 뜨게 한다.
+  ///
+  /// 유닛은 **앱이 만든다.** 사람이 로봇 안에서 손으로 쓰면 `namespace` 와
+  /// 도메인을 거기에 또 적게 되고, 앱에서 도메인을 바꿔도 그 파일은 그대로 남아
+  /// 조용히 어긋난다.
+  Future<void> _installRobotAutostart(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final target = RobotSshTarget.fromJson(robot.ssh);
+    final readiness = checkRobotSshReadiness(robot: robot, target: target);
+    if (!canBringUpOverSsh(readiness) || target == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: '자동 실행을 걸 수 없습니다',
+        message: robotSshBlockedReason(readiness) ?? '',
+      );
+      return;
+    }
+    final label = '${robot.robotId} · ${robot.displayName}';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$label 에 자동 실행을 설치하는 중입니다…')),
+    );
+    final result = await installRobotBringupService(
+      robot: robot,
+      target: target,
+      projectDomainId: _rosDomainId,
+    );
+    if (!mounted) return;
+    if (result.outcome == RobotSshOutcome.ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '$label 을 켤 때마다 브링업이 뜹니다.\n'
+            'namespace ${robot.gzName} · 도메인 '
+            '${robot.rosDomainId ?? _rosDomainId} 로 박아 넣었습니다.',
+          ),
+          duration: const Duration(seconds: 6),
+          showCloseIcon: true,
+        ),
+      );
+      return;
+    }
+    await showWaypointErrorDialog(
+      context,
+      title: '자동 실행을 걸지 못했습니다',
+      message:
+          '${robotSshOutcomeMessage(outcome: result.outcome, robotLabel: label, authority: target.authority, detail: result.output)}'
+          '\n\n유닛을 올리려면 `sudo` 가 비밀번호 없이 되어야 합니다. '
+          '로봇에서 한 번만 해 두세요:\n\n'
+          '  echo "${target.user.isEmpty ? '\$USER' : target.user} '
+          'ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/bin/install, /bin/rm" '
+          '| sudo tee /etc/sudoers.d/robosapiens',
+    );
+  }
+
+  /// 자동 실행을 끈다.
+  Future<void> _removeRobotAutostart(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final target = RobotSshTarget.fromJson(robot.ssh);
+    if (target == null) return;
+    final result = await removeRobotBringupService(
+      robot: robot,
+      target: target,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.outcome == RobotSshOutcome.ok
+              ? '${robot.displayName} 의 자동 실행을 껐습니다. 브링업도 내렸습니다.'
+              : '${robot.displayName} 의 자동 실행을 못 껐습니다 — ${result.output}',
+        ),
+        duration: const Duration(seconds: 5),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
+  /// 자동 실행이 걸려 있는지 읽는다.
+  Future<RobotServiceStatus> _readRobotAutostart(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    final target = RobotSshTarget.fromJson(robot?.ssh);
+    if (robot == null || target == null) {
+      return const RobotServiceStatus(enabled: false, active: false);
+    }
+    return readRobotServiceStatus(robot: robot, target: target);
+  }
+
+  /// 로봇이 지금 서 있는 자리를 Waypoint 로 만든다.
+  ///
+  /// 도면 위에서 눈으로 찍는 것은 1픽셀 아래로 못 내려가는데, 좁은 자리일수록
+  /// 그 오차가 그대로 남는다. 로봇을 실제로 밀어 넣어 보고 그 자리를 그대로
+  /// 찍으면 그런 일이 없다 — **좌표는 로봇이 말해 준다.**
+  Future<void> _captureWaypointAtRobot(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final pose = _telemetry.isLive(robotId, now: DateTime.now())
+        ? _telemetry.poses[robotId]
+        : null;
+    final pixel = pose == null ? null : _pixelFromMeters(pose.x, pose.y);
+    // 가장 가까운 Waypoint 까지의 거리. 겹쳐 찍는 것을 막는다.
+    double? nearest;
+    if (pixel != null && _metersPerPixel != null) {
+      for (final point in _laneWaypoints) {
+        final gap = (point - pixel).distance * _metersPerPixel!;
+        if (nearest == null || gap < nearest) nearest = gap;
+      }
+    }
+    final readiness = checkWaypointCapture(
+      poseKnown: pose != null,
+      scaleKnown: _metersPerPixel != null && _metersPerPixel! > 0,
+      nearestGapMeters: nearest,
+    );
+    if (!canCaptureWaypoint(readiness) || pixel == null || pose == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: '이 자리를 찍을 수 없습니다',
+        message: waypointCaptureBlockedReason(readiness) ?? '',
+      );
+      return;
+    }
+    // 무엇으로 만들지 사람이 고른다. 이름은 그 카테고리의 다음 번호로
+    // 미리 채워 두되, 고쳐 쓸 수 있게 둔다.
+    final chosen = await showMovableDialog<({String category, String name})>(
+      context: context,
+      builder: (dialogContext) => _WaypointCaptureDialog(
+        existingNames: _waypointNames.values,
+        xMeters: pose.x,
+        yMeters: pose.y,
+        headingDegrees: pose.heading * 180 / math.pi,
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    final heading = captureHeadingFor(
+      category: chosen.category,
+      robotHeadingDegrees: _wrapDegrees(pose.heading * 180 / math.pi),
+    );
+    _recordUndo();
+    setState(() {
+      _laneWaypoints.add(pixel);
+      _waypointTypes[pixel] = chosen.category;
+      _waypointNames[pixel] = chosen.name;
+      if (heading != null) _waypointDockHeadings[pixel] = heading;
+      // 설비가 아니면 얹혀 있는 레인을 이 지점에서 나눠 잇는다. 손으로 찍을
+      // 때와 같은 규칙이다.
+      if (chosen.category != '설비') {
+        _spliceWaypointIntoLanes(pixel, _waypointLaneSnapTolerance);
+      }
+      _isDeployed = false;
+      _vertexLabelRevision++;
+    });
+    await _saveSettingToOpenProject(
+      label: 'Waypoint 추가',
+      detail: '${chosen.category} ${chosen.name} — 로봇 자리에서',
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          waypointCapturedMessage(
+            name: chosen.name,
+            category: chosen.category,
+            xMeters: pose.x,
+            yMeters: pose.y,
+            headingDegrees: heading,
+          ),
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
+  /// 로봇을 몇 cm 만 앞뒤로 밀거나 제자리에서 조금 돌린다.
+  ///
+  /// 자리를 눈으로 맞추는 일에 쓴다 — 작업으로 보내면 도착 반경(0.1m) 안에만
+  /// 들면 끝나므로 그보다 작은 조정은 할 수 없다.
+  Future<void> _nudgeRobot(
+    String robotId,
+    NudgeKind kind,
+    double meters,
+    double degrees,
+  ) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final label = '${robot.robotId} · ${robot.displayName}';
+    final what = nudgeLabel(kind: kind, meters: meters, degrees: degrees);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$label 을 $what 움직이는 중…')),
+    );
+    final result = await nudgeRobot(
+      namespace: robot.gzName,
+      kind: kind,
+      meters: meters,
+      degrees: degrees,
+      rosDomainId: robot.rosDomainId ?? _rosDomainId,
+    );
+    if (!mounted) return;
+    if (result.ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(nudgeSentMessage(robotLabel: label, what: what)),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+    // 실패는 볼 곳이 여럿이라 창으로 띄운다.
+    await showWaypointErrorDialog(
+      context,
+      title: '움직이지 못했습니다',
+      message: nudgeFailedMessage(
+        robotLabel: label,
+        what: what,
+        detail: result.output.isEmpty ? '응답이 없습니다.' : result.output,
+      ),
+    );
+  }
+
+  /// 로봇에 SSH 로 들어가 브링업을 띄운다.
+  ///
+  /// 지금까지는 사람이 로봇에 들어가 손으로 launch 를 쳤고, 그 자리에서
+  /// 네임스페이스와 도메인이 자주 어긋났다 — **어긋나도 오류가 안 나서**
+  /// 라이다나 AMCL 을 의심하며 한참을 헤맸다. 명령은 등록값으로 만들어지므로
+  /// 여기서는 그럴 일이 없다.
+  Future<void> _bringUpRobotOverSsh(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final target = RobotSshTarget.fromJson(robot.ssh);
+    final readiness = checkRobotSshReadiness(robot: robot, target: target);
+    if (!canBringUpOverSsh(readiness) || target == null) {
+      await showWaypointErrorDialog(
+        context,
+        title: '브링업을 띄울 수 없습니다',
+        message: robotSshBlockedReason(readiness) ?? '',
+      );
+      return;
+    }
+    final label = '${robot.robotId} · ${robot.displayName}';
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$label 의 브링업을 띄우는 중입니다…')),
+    );
+    final result = await startRobotBringup(
+      robot: robot,
+      target: target,
+      projectDomainId: _rosDomainId,
+    );
+    if (!mounted) return;
+    if (result.outcome == RobotSshOutcome.ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            robotSshOutcomeMessage(
+              outcome: result.outcome,
+              robotLabel: label,
+              authority: target.authority,
+              detail: result.output,
+            ),
+          ),
+          duration: const Duration(seconds: 6),
+          showCloseIcon: true,
+        ),
+      );
+      return;
+    }
+    // 실패는 볼 곳이 여럿이라 창으로 띄운다. 로봇 안의 로그도 함께 보여 줘야
+    // 다시 로봇에 들어갈 일이 없다.
+    final log = await readRobotBringupLog(robot: robot, target: target);
+    if (!mounted) return;
+    await showWaypointErrorDialog(
+      context,
+      title: '브링업을 띄우지 못했습니다',
+      message:
+          '${robotSshOutcomeMessage(outcome: result.outcome, robotLabel: label, authority: target.authority, detail: result.output)}'
+          '\n\n--- 로봇 안의 로그 ---\n$log',
+    );
+  }
+
+  /// 로봇의 브링업을 내린다.
+  Future<void> _stopRobotBringupOverSsh(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    if (robot == null) return;
+    final target = RobotSshTarget.fromJson(robot.ssh);
+    if (target == null) return;
+    final result = await stopRobotBringup(robot: robot, target: target);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.outcome == RobotSshOutcome.ok
+              ? '${robot.displayName} 의 브링업을 내렸습니다.'
+              : '${robot.displayName} 의 브링업을 못 내렸습니다 — ${result.output}',
+        ),
+        duration: const Duration(seconds: 5),
+        showCloseIcon: true,
+      ),
+    );
+  }
+
+  /// 이 로봇의 초기 위치로 보낼 자리. 화면이 그대로 보여 준다.
+  ///
+  /// 좌표는 자리 Waypoint 에서 나온다 — 등록에 저장된 `spawn_x/spawn_y` 가 아니라
+  /// **지금 지도**를 본다. 자리를 옮겼는데 등록이 안 따라온 채로 보내면, 로봇은
+  /// 옛 자리에 있다고 믿는다.
+  ({
+    InitialPoseReadiness readiness,
+    String stationName,
+    double? x,
+    double? y,
+    double? degrees,
+    String topic,
+  })
+  _initialPoseStationFor(String robotId) {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    final station = (robot?.chargerWaypoint ?? '').trim();
+    final topic = initialPoseTopic(robot?.gzName ?? robotId);
+    if (robot == null) {
+      return (
+        readiness: InitialPoseReadiness.noStation,
+        stationName: station,
+        x: null,
+        y: null,
+        degrees: null,
+        topic: topic,
+      );
+    }
+    final pixel = _stationPixelFor(robot);
+    final world = pixel == null ? null : _rmfMetersFromPixel(pixel);
+    final readiness = checkInitialPoseReadiness(
+      robot: robot,
+      worldKnown: world != null,
+    );
+    // 방향은 자리에 적힌 것이 먼저다. 자리에 없으면 등록에 저장된
+    // `spawn_heading` 을 쓴다 — 배포된 nav2_params 의 initial_pose 와 같은
+    // 값이라야 두 경로가 어긋나지 않는다.
+    final radians = _stationHeadingRadiansFor(robot) ?? robot.spawnHeading;
+    return (
+      readiness: readiness,
+      stationName: station.isEmpty ? '미지정' : station,
+      x: world?.dx,
+      y: world?.dy,
+      degrees: radians * 180 / math.pi,
+      topic: topic,
+    );
+  }
+
+  /// 로봇에게 "너는 지금 자리 Waypoint 에 있다" 고 알린다.
+  ///
+  /// **로봇은 안 움직인다.** 보내는 것은 좌표뿐이라, 실제 로봇이 다른 자리에
+  /// 있으면 그 거짓말을 믿은 채로 경로를 짠다. 그래서 보내기 전에 사람에게
+  /// 로봇을 그 자리에 놓았는지 묻는다.
+  Future<void> _sendInitialPose(String robotId) async {
+    final robot = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    final station = _initialPoseStationFor(robotId);
+    if (robot == null ||
+        !canSendInitialPose(station.readiness) ||
+        station.x == null ||
+        station.y == null) {
+      return;
+    }
+    final label = '${robot.robotId} · ${robot.displayName}';
+    final confirmed = await showMovableDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.my_location_outlined),
+        title: const Text('초기 위치를 보낼까요?'),
+        content: Text(
+          initialPoseConfirmMessage(
+            robotLabel: label,
+            stationName: station.stationName,
+            x: station.x!,
+            y: station.y!,
+            degrees: station.degrees ?? 0,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.my_location_outlined),
+            label: const Text('보내기'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final sent = await publishInitialPose(
+      namespace: robot.gzName,
+      x: station.x!,
+      y: station.y!,
+      yaw: (station.degrees ?? 0) * math.pi / 180,
+      rosDomainId: robot.rosDomainId ?? _rosDomainId,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          sent
+              ? initialPoseSentMessage(
+                  robotLabel: label,
+                  stationName: station.stationName,
+                  topic: station.topic,
+                )
+              : initialPoseFailedMessage(
+                  robotLabel: label,
+                  topic: station.topic,
+                ),
+        ),
+        duration: const Duration(seconds: 6),
+        showCloseIcon: true,
+      ),
+    );
+  }
 
   /// 이 프로젝트가 가진 policy 와 공용 policy 를 합친 목록. 화면 상태도 맞춘다.
   ///
@@ -7932,6 +8497,134 @@ class _ControlDashboardState extends State<ControlDashboard> {
   ///
   /// 설치 로봇은 그대로 매니퓰레이터로 그린다. 이동 로봇은 모델 이름으로 Pinky
   /// 인지만 가른다 — 어느 쪽이든 Lane 을 따라 다니는 것은 같다.
+  /// 토픽이 오는 로봇을 **지금 있는 자리**에 지도에 올린다.
+  ///
+  /// 지도에 올린 로봇(`_mockRobots`)은 앱 안에만 있어서 앱을 다시 켜면 사라진다.
+  /// 그래서 다시 켤 때마다 사람이 `Spawn` 을 눌러야 했고, 그러면 로봇은 **충전
+  /// 자리**에 놓였다 — 실제로는 대기1 에 서 있는데 지도에는 충전1 에 그려지는
+  /// 것이다. 그 상태에서 다른 자리로 보내면 화면과 실제가 어긋난 채로 움직인다.
+  ///
+  /// 실물 로봇은 제가 어디 있는지 토픽으로 말해 준다(AMCL). 그것이 오는 동안은
+  /// 사람에게 물을 것이 없다 — 그 자리에 그대로 올리면 된다.
+  ///
+  /// **값이 살아 있을 때만** 올린다. 끊긴 토픽의 마지막 값으로 올리면, 그새
+  /// 손으로 옮겨 놓은 로봇이 옛 자리에 그려진다.
+  /// 자리를 몰라 이미 알린 로봇. 같은 말을 되풀이하지 않기 위한 것이다.
+  ///
+  /// 이 함수는 토픽이 올 때마다 돈다. 그때마다 창을 띄우면 화면을 덮어 아무
+  /// 일도 못 하게 된다. 한 번만 알리고, 자리를 찾으면 잊는다 — 다시 잃으면
+  /// 다시 알려야 한다.
+  final Set<String> _warnedUnknownPlace = {};
+
+  void _placeLiveRobotsOnMap() {
+    final now = DateTime.now();
+    final added = <_MockRobot>[];
+    final unknown = <String>[];
+    for (final robot in _fleetRobots) {
+      if (!robot.isMobile || !robot.dataSource.usesTopics) continue;
+      if (_mockRobots.any((mock) => mock.id == robot.robotId)) continue;
+      // 토픽이 오면 그것이 가장 정확하다. 없으면 **마지막 작업이 끝난 자리**로
+      // 메운다 — 작업이 끝났다면 로봇은 거기 있다. 그것조차 없어야 등록된
+      // 자리로 떨어진다.
+      //
+      // 예전에는 토픽이 없으면 아예 안 그렸다. 그래서 앱을 다시 켠 뒤 백엔드가
+      // 올라오기 전까지 로봇이 지도에서 사라져 있었고, 사람이 `Spawn` 을 눌러
+      // 충전 자리에 놓으면 실제와 어긋났다.
+      final live = _telemetry.isLive(robot.robotId, now: now)
+          ? _telemetry.poses[robot.robotId]
+          : null;
+      final pixel = live == null
+          ? _lastKnownPixelFor(robot)
+          : _pixelFromMeters(live.x, live.y);
+      if (pixel == null) {
+        // 조용히 넘기지 않는다. 지도에 로봇이 없는 것이 "아직 안 왔다" 인지
+        // "어디 있는지 모른다" 인지 구별되지 않으면 사람은 기다리기만 한다.
+        unknown.add('${robot.robotId} · ${robot.displayName}');
+        continue;
+      }
+      added.add(
+        _MockRobot(
+          id: robot.robotId,
+          position: pixel,
+          // 원위치는 등록된 자리다. 지금 서 있는 자리를 spawnPosition 으로
+          // 두면 `로봇 원위치` 가 아무 데도 안 되돌린다.
+          spawnPosition: _stationPixelFor(robot) ?? pixel,
+          color: _robotColors[_mockRobots.length % _robotColors.length],
+          kind: _kindForRobot(robot),
+        ),
+      );
+    }
+    if (added.isNotEmpty) setState(() => _mockRobots.addAll(added));
+    // 자리를 찾은 로봇은 잊는다. 다시 잃으면 다시 알려야 한다.
+    _warnedUnknownPlace.removeWhere((label) => !unknown.contains(label));
+    // 지도가 아직 없으면 자리를 못 찾는 것이 **당연하다.** 그때 알리면 맵을
+    // 불러오기 전에 로봇부터 등록한 사람에게, 고칠 수 없는 것을 고치라고 하는
+    // 셈이다 — 등록 창에서 고를 자리 자체가 없다.
+    final mapReady =
+        _waypointNames.isNotEmpty ||
+        (_robotDeployedMap?.waypointNames.isNotEmpty ?? false);
+    if (!mapReady) return;
+    final fresh = [
+      for (final label in unknown)
+        if (_warnedUnknownPlace.add(label)) label,
+    ];
+    final message = unknownPlaceMessage(fresh);
+    if (message == null || !mounted) return;
+    unawaited(
+      showWaypointErrorDialog(
+        context,
+        title: '로봇 위치를 모릅니다',
+        message: message,
+      ),
+    );
+  }
+
+  /// 토픽이 없을 때 이 로봇을 그릴 자리의 지도 픽셀.
+  ///
+  /// **마지막 작업이 끝난 자리**를 먼저 본다. 여러 자리를 거치는 작업이면
+  /// 마지막에 선 곳이 지금 자리다. 그것도 없으면 등록된 자리로 떨어진다.
+  ///
+  /// 끝난 작업만 본다 — 중간에 멈춘 작업의 마지막 목적지는 **가지 않은
+  /// 자리**라, 그것을 지금 자리로 보면 실제보다 앞서 그려진다.
+  Offset? _lastKnownPixelFor(RmfProjectRobot robot) {
+    final resolved = resolveRobotPlace(
+      lastPlace: lastVisitedPlace(
+        robotId: robot.robotId,
+        tasks: [
+          for (final task in _mockTasks)
+            RobotTaskTrace(
+              robotId: task.robotId,
+              finishedAt: task.completedAt,
+              completed: task.status == _MockTaskStatus.completed,
+              destinations: [
+                for (final step in task.steps) step.destinationName ?? '',
+              ],
+            ),
+        ],
+      ),
+      registeredPlace: robot.chargerWaypoint,
+    );
+    final place = resolved.place;
+    if (place == null) return null;
+    // 이름으로 지도의 Waypoint 를 찾는다. 자리를 옮겼으면 새 좌표가 나온다.
+    final names = _waypointTypes.isNotEmpty
+        ? _waypointNames
+        : (_robotDeployedMap?.waypointNames ?? const <Offset, String>{});
+    for (final entry in names.entries) {
+      if (entry.value.trim() == place) return entry.key;
+    }
+    return null;
+  }
+
+  /// 지도에 올린 로봇을 서로 구별하는 색.
+  static const List<Color> _robotColors = [
+    Color(0xFFDC2626),
+    Color(0xFF7C3AED),
+    Color(0xFF0891B2),
+    Color(0xFFEA580C),
+    Color(0xFF16A34A),
+  ];
+
   static _RobotKind _kindForRobot(RmfProjectRobot robot) {
     if (!robot.isMobile) return _RobotKind.omxManipulator;
     return robot.model.toUpperCase().contains('PINKY')
@@ -8334,20 +9027,13 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
-    const colors = [
-      Color(0xFFDC2626),
-      Color(0xFF7C3AED),
-      Color(0xFF0891B2),
-      Color(0xFFEA580C),
-      Color(0xFF16A34A),
-    ];
     setState(() {
       _mockRobots.add(
         _MockRobot(
           id: result.name,
           position: result.position,
           spawnPosition: result.position,
-          color: colors[_mockRobots.length % colors.length],
+          color: _robotColors[_mockRobots.length % _robotColors.length],
           kind: result.kind,
           imageBytes: result.imageBytes,
           image: result.image,
@@ -10587,9 +11273,36 @@ class _ControlDashboardState extends State<ControlDashboard> {
           fileName: '${robotDirectoryName(robot)}/README.md',
           kind: 'robot',
           description: '${robot.robotId} 디렉터리 설명. 무엇이고 어디서 고치는지.',
-          content: buildRobotReadme(robot, mapName),
+          content: buildRobotReadme(
+            robot,
+            mapName,
+            projectDomainId: _rosDomainId,
+          ),
           generatedAt: now,
         ),
+        // 로봇을 켤 때마다 브링업이 뜨게 하는 유닛. 실물 이동 로봇만 쓴다.
+        //
+        // 앱이 SSH 로 올려 주지만 파일도 함께 내보낸다 — 무엇이 로봇에
+        // 들어가는지 눌러 보지 않고도 확인할 수 있어야 하고, SSH 를 안 쓰는
+        // 로봇에는 이 파일을 손으로 올리면 된다.
+        if (robot.isMobile && robot.dataSource == RobotDataSource.real)
+          MapProjectFile(
+            fileName: '${robotDirectoryName(robot)}/bringup.service',
+            kind: 'robot',
+            description:
+                '${robot.robotId} 를 켤 때마다 브링업을 띄우는 systemd 유닛. '
+                'namespace ${robot.gzName} · 도메인 '
+                '${robot.rosDomainId ?? _rosDomainId} 가 박혀 있다 — '
+                '등록에서 그 값을 바꾸면 로봇에 다시 설치해야 한다.',
+            content: buildRobotBringupService(
+              robot: robot,
+              target:
+                  RobotSshTarget.fromJson(robot.ssh) ??
+                  const RobotSshTarget(host: ''),
+              projectDomainId: _rosDomainId,
+            ),
+            generatedAt: now,
+          ),
       ],
       MapProjectFile(
         fileName: 'run_$mapName.sh',
@@ -11111,10 +11824,23 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final headingController = TextEditingController(
       text: _degreesText((existing?.spawnHeading ?? 0) * 180 / math.pi),
     );
+    // 실물 로봇에 들어가는 길. 적어 두면 앱이 브링업을 대신 띄운다.
+    final existingSsh = RobotSshTarget.fromJson(existing?.ssh);
+    final sshHostController = TextEditingController(
+      text: existingSsh?.host ?? '',
+    );
+    final sshUserController = TextEditingController(
+      text: existingSsh?.user ?? '',
+    );
+    final sshWorkspaceController = TextEditingController(
+      text: existingSsh?.workspace ?? '~/pinky_pro',
+    );
     String? headingError;
     String? domainError;
     var kind = existing?.kind ?? RmfRobotKind.mobile;
     var dataSource = existing?.dataSource ?? RobotDataSource.mock;
+    var driveMode = existing?.driveMode ?? RobotDriveMode.normal;
+    var allowReversing = existing?.allowReversing ?? false;
     var charger = existing?.chargerWaypoint;
     var zones = {...?existing?.zones};
     if (zones.isEmpty && kind == RmfRobotKind.mobile) {
@@ -11161,6 +11887,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
           final stationMessage = stationRequirementMessage(
             stationRule,
             kind.waypointCategory,
+          );
+          // 이 자리를 이미 쓰는 로봇이 있으면 밝힌다. 막지는 않는다 — 두
+          // 로봇의 자리를 서로 바꾸는 중일 수 있고, 그때 막으면 바꿀 방법이
+          // 없어진다.
+          final stationHolder = robotHoldingStation(
+            robots: _fleetRobots,
+            station: charger,
+            robotId: idController.text,
+          );
+          final stationConflict = stationConflictMessage(
+            holder: stationHolder,
+            station: (charger ?? '').trim(),
           );
           return AlertDialog(
             icon: Icon(
@@ -11348,6 +12086,190 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       onChanged: (_) =>
                           setDialogState(() => domainError = null),
                     ),
+                    // 장애물에 두는 여유. 이동 로봇만 쓴다 — 설비 로봇은
+                    // 자리를 안 옮긴다.
+                    if (kind == RmfRobotKind.mobile) ...[
+                      const SizedBox(height: 12),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '주행 모드',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      SegmentedButton<RobotDriveMode>(
+                        segments: const [
+                          ButtonSegment(
+                            value: RobotDriveMode.normal,
+                            icon: Icon(Icons.shield_outlined, size: 18),
+                            label: Text('일반'),
+                          ),
+                          ButtonSegment(
+                            value: RobotDriveMode.forced,
+                            icon: Icon(Icons.compress, size: 18),
+                            label: Text('강제'),
+                          ),
+                        ],
+                        selected: {driveMode},
+                        onSelectionChanged: (selected) =>
+                            setDialogState(() => driveMode = selected.first),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          driveMode.summary,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF64748B),
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                      // 좁은 곳에서는 앞으로 들어갈 수 없는 자리가 있다.
+                      // 켜면 RMF 가 낸 경로를 Nav2 가 따라가다 필요하면 뒤로
+                      // 간다 — 사람이 시키는 것이 아니다.
+                      SwitchListTile(
+                        value: allowReversing,
+                        onChanged: (value) =>
+                            setDialogState(() => allowReversing = value),
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: const Text(
+                          '후진 허용',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                        subtitle: Text(
+                          allowReversing
+                              ? '좁은 자리에 뒤로 들어갑니다. 제자리 회전은 꺼집니다.'
+                              : '앞으로만 갑니다. 방향이 어긋나면 제자리에서 돕니다.',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      ),
+                      // 두 값이 서로 배타적이라는 것을 고를 때 밝힌다. 모르면
+                      // 제자리 회전이 왜 사라졌는지 알 수 없다.
+                      if (allowReversing)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 2, bottom: 4),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.info_outline,
+                                size: 16,
+                                color: Color(0xFF64748B),
+                              ),
+                              SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'Nav2 컨트롤러가 후진과 제자리 회전을 함께 못 씁니다 — '
+                                  '둘 다 켜면 노드가 안 뜹니다. 자리에 정해 둔 방향은 '
+                                  '그대로 맞춥니다.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF64748B),
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      // 어디에 써도 되는 모드가 아니다. 고를 때 그 말을 해 둔다.
+                      if (driveMode == RobotDriveMode.forced)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                Icons.warning_amber_outlined,
+                                size: 16,
+                                color: Color(0xFFB45309),
+                              ),
+                              SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  '벽이 스티로폼이거나 부딪혀도 상하지 않는 실험실에서만 '
+                                  '쓰세요. 사람이나 다른 로봇이 함께 다니는 곳에서는 '
+                                  '일반 모드를 씁니다.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFFB45309),
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                    // 실물 이동 로봇만 SSH 로 띄운다. Gazebo 는 시뮬레이터가
+                    // 올리고, Mock 은 앱 안에만 있어서 들어갈 곳이 없다.
+                    if (dataSource == RobotDataSource.real &&
+                        kind == RmfRobotKind.mobile) ...[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: sshHostController,
+                        decoration: const InputDecoration(
+                          labelText: '로봇 주소 (SSH)',
+                          hintText: '192.168.0.31 — 비우면 손으로 띄웁니다',
+                          helperText:
+                              '적어 두면 앱이 로봇에 들어가 브링업을 대신 띄웁니다. '
+                              '네임스페이스와 도메인을 등록값으로 채우므로 '
+                              '손으로 칠 때처럼 어긋나지 않습니다.',
+                          helperMaxLines: 3,
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: (_) => setDialogState(() {}),
+                      ),
+                      if (sshHostController.text.trim().isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: sshUserController,
+                                decoration: const InputDecoration(
+                                  labelText: '계정',
+                                  hintText: 'pinky',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              flex: 2,
+                              child: TextField(
+                                controller: sshWorkspaceController,
+                                decoration: const InputDecoration(
+                                  labelText: '로봇 안의 워크스페이스',
+                                  hintText: '~/pinky_pro',
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6),
+                          child: Text(
+                            '비밀번호는 묻지 않습니다 — SSH 키가 등록돼 있어야 합니다.\n'
+                            '한 번만 `ssh-copy-id 계정@주소` 를 해 두세요.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF64748B),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       key: ValueKey(kind),
@@ -11392,6 +12314,34 @@ class _ControlDashboardState extends State<ControlDashboard> {
                       onChanged: (value) =>
                           setDialogState(() => charger = value),
                     ),
+                    // 이 자리를 이미 쓰는 로봇이 있으면 밝힌다. 한 자리에 두
+                    // 대를 두면 둘의 시작 좌표가 같아져, Gazebo 는 죽고 실물은
+                    // 두 대가 같은 자리를 제 자리로 믿는다.
+                    if (stationConflict != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(
+                              Icons.warning_amber_outlined,
+                              size: 16,
+                              color: Color(0xFFB45309),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                stationConflict,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFFB45309),
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     // 단추가 왜 안 눌리는지, 또는 지금 저장하면 무엇이 빈 채로
                     // 남는지 그 자리에서 밝힌다. 흐린 단추만 두면 사람이 다른
                     // 칸을 뒤진다.
@@ -11620,6 +12570,19 @@ class _ControlDashboardState extends State<ControlDashboard> {
                             // 맵 기본값과 같으면 따로 들고 있지 않는다.
                             // 그래야 나중에 기본값을 바꿨을 때 같이 따라온다.
                             rosDomainId: domain == _rosDomainId ? null : domain,
+                            // 주소를 비우면 SSH 를 안 쓴다는 뜻이다. 빈 값을
+                            // 남겨 두면 화면에는 단추가 살아 있는데 눌러도
+                            // 아무 데도 못 붙는다.
+                            driveMode: driveMode,
+                            allowReversing: allowReversing,
+                            ssh: sshHostController.text.trim().isEmpty
+                                ? null
+                                : RobotSshTarget(
+                                    host: sshHostController.text.trim(),
+                                    user: sshUserController.text.trim(),
+                                    workspace:
+                                        sshWorkspaceController.text.trim(),
+                                  ).toJson(),
                             gzName: id,
                             zones: zones.toList()..sort(),
                             chargerWaypoint: charger,
@@ -12433,11 +13396,60 @@ class _ControlDashboardState extends State<ControlDashboard> {
       );
       return;
     }
+    // 로봇이 먼저, 백엔드가 나중이다. 순서가 뒤집히면 Nav2 가 반쯤 죽은 채로
+    // 뜨는데, 그 상태가 겉으로는 정상으로 보인다 — 까닭은
+    // `bringup_precheck.dart` 에 적었다.
+    if (!await _bringupReadyForBackend()) return;
+    if (!mounted) return;
     // 버튼 한 번으로 저장 → 생성 → 내보내기까지 끝낸다. 어느 단계든 실패하면
     // 예전 파일로 백엔드를 띄우지 않는다.
     if (!await _prepareProjectForBackend(project)) return;
     if (!mounted) return;
     await _runProjectScript(project);
+  }
+
+  /// 실물 로봇의 브링업이 서 있는지 보고, 없으면 띄우지 않는다.
+  ///
+  /// 띄워도 되면 true. 막았으면 false.
+  ///
+  /// Gazebo·Mock 로봇만 있는 프로젝트는 볼 것이 없으므로 그냥 지나간다 —
+  /// 시뮬레이터는 백엔드가 띄우므로 먼저 설 수가 없다.
+  Future<bool> _bringupReadyForBackend() async {
+    final robots = robotsNeedingBringup(_fleetRobots);
+    if (robots.isEmpty) return true;
+    final states = <RobotBringupState>[];
+    for (final robot in robots) {
+      final domain = robot.rosDomainId ?? _rosDomainId;
+      // 둘 다 본다. `odom` 은 costmap 이 기다리는 TF 를 내고, `scan` 은 AMCL 이
+      // 자리를 잡는 데 쓴다. 하나만 있으면 반쪽이라 결국 같은 자리에서 막힌다.
+      final hasOdom = await probeTopicHasPublisher(
+        topic: '/${robot.gzName}/odom',
+        rosDomainId: domain,
+      );
+      final hasScan = await probeTopicHasPublisher(
+        topic: '/${robot.gzName}/scan',
+        rosDomainId: domain,
+      );
+      states.add(
+        RobotBringupState(
+          robotId: robot.robotId,
+          displayName: robot.displayName,
+          hasOdom: hasOdom,
+          hasScan: hasScan,
+        ),
+      );
+    }
+    if (checkBringupBeforeBackend(states) != BringupPrecheckResult.missingBringup) {
+      return true;
+    }
+    final message = bringupPrecheckMessage(states);
+    if (message == null || !mounted) return true;
+    await showWaypointErrorDialog(
+      context,
+      title: '로봇 브링업이 먼저입니다',
+      message: message,
+    );
+    return false;
   }
 
   Future<void> _stopProjectScript() async {
@@ -14031,8 +15043,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '맵 관리',
                         '그리드맵',
                         '로봇 관리',
-                        'Policy 관리',
                         '작업 관리',
+                        'Policy 관리',
                         '로봇 모델 관리',
                         'ROS2 확인',
                         '설정 파일',
@@ -15176,6 +16188,19 @@ class _SequentialTaskEditorDialogState
                   ],
                   onChanged: (value) => setState(() => _trigger = value!),
                 ),
+                // 고른 것이 무엇을 뜻하는지 그 자리에서 밝힌다. `상온·냉장` 이
+                // 상온만 있는 주문도 받는지, 둘이 함께 있어야 받는지는 이름만
+                // 봐서는 알 수 없다.
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    _trigger.summary,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 12),
                 Row(
                   children: [
@@ -16206,10 +17231,10 @@ class _TaskManagementPage extends StatelessWidget {
           Expanded(
             child: Row(
               children: [
-                // 작업을 만들 때 Lane과 지점 이름을 눈으로 짚어야 해서
-                // 맵을 목록보다 넓게 준다. 목록은 이름과 단추만 보이면 된다.
+                // 맵과 작업 목록을 반반으로 나눈다. 맵은 Lane 과 지점 이름을
+                // 짚을 만큼만 있으면 되고, 작업이 여러 건 쌓이면 목록 쪽이
+                // 좁아서 읽기 어려웠다.
                 Expanded(
-                  flex: 3,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -19091,7 +20116,10 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     super.initState();
     // 이미 떠 있는 백엔드를 모르고 새로 띄우면 schedule node 와 fleet adapter 가
     // 부딪혀 엉뚱한 오류로 나타난다. 화면에 들어올 때 먼저 확인한다.
-    unawaited(_refreshRmfStatus());
+    //
+    // 방금 본 값이 있으면 그것을 쓴다. 확인 한 번이 3초가 넘어서, 작업 관리에서
+    // 돌아올 때마다 그대로 기다리는 시간이 됐다.
+    unawaited(_refreshRmfStatus(useCache: true));
     unawaited(_refreshDeployedCount());
     unawaited(_refreshSimBackend());
   }
@@ -19119,7 +20147,28 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   /// 프로세스가 하나도 없는데도 화면이 계속 `백엔드가 떠 있습니다` 였다.
   ///
   /// [quiet] 면 `다시 확인` 단추를 막지 않는다. 뒤에서 되풀이해 읽을 때 쓴다.
-  Future<void> _refreshRmfStatus({bool quiet = false}) async {
+  /// 방금 확인한 값을 잠깐 기억해 둔다. 화면을 오갈 때마다 3초를 기다리지
+  /// 않기 위해서다 — 까닭은 [RmfRuntimeCache] 에 적었다.
+  static final RmfRuntimeCache _runtimeCache = RmfRuntimeCache();
+
+  /// [useCache] 가 참이면 방금 본 값을 다시 쓴다.
+  ///
+  /// 화면에 들어올 때만 참이다. 사람이 새로고침을 누르거나 백엔드를 띄우고
+  /// 내린 직후에는 **반드시 다시 본다** — 그때가 값이 바뀌는 순간이다.
+  Future<void> _refreshRmfStatus({
+    bool quiet = false,
+    bool useCache = false,
+  }) async {
+    if (useCache) {
+      final cached = _runtimeCache.valueAt(DateTime.now());
+      if (cached != null) {
+        setState(() {
+          _rmfStatus = cached;
+          _ghostNodes = false;
+        });
+        return;
+      }
+    }
     if (!quiet) {
       setState(() {
         _rmfBusy = true;
@@ -19132,6 +20181,11 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     final processesGone = running.isEmpty;
     final status = await probeRmfRuntime(rosDomainId: widget.rosDomainId);
     if (!mounted) return;
+    // 유령은 기억하지 않는다. 프로세스가 없는데 노드만 보이는 것은 지나가는
+    // 상태라, 그것을 붙들고 있으면 정리가 끝난 뒤에도 계속 그렇게 보인다.
+    if (!processesGone || !status.isRunning) {
+      _runtimeCache.store(status, DateTime.now());
+    }
     setState(() {
       _rmfStatus = status;
       _ghostNodes = processesGone && status.isRunning;
@@ -19146,18 +20200,80 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
   Future<void> _startBackend() async {
     if (_rmfBusy || widget.projectName == null) return;
     setState(() => _rmfBusy = true);
+    // 띄우는 순간 기억해 둔 값은 거짓이 된다.
+    _runtimeCache.invalidate();
     await widget.onStartBackend();
     if (!mounted) return;
     await Future<void>.delayed(const Duration(seconds: 16));
     if (!mounted) return;
     await _refreshUntilClear();
-    if (!mounted || _rmfStatus.isRunning) return;
-    final report = await diagnoseProjectBackendFailure(widget.projectName!);
     if (!mounted) return;
+    if (!_rmfStatus.isRunning) {
+      final report = await diagnoseProjectBackendFailure(widget.projectName!);
+      if (!mounted) return;
+      await showWaypointErrorDialog(
+        context,
+        title: '백엔드 실행 실패 — 원인과 해결 방법',
+        message: report,
+      );
+      return;
+    }
+    // 프로세스가 떴다고 로봇이 움직이는 것은 아니다. Nav2 가 다 켜졌는지까지
+    // 봐야 한다 — 안 켜져 있어도 노드 목록에는 그대로 보이고 오류도 안 난다.
+    await _ensureNav2ForRobots();
+  }
+
+  /// 이동 로봇마다 Nav2 가 다 켜졌는지 보고, 안 켜졌으면 켠다.
+  ///
+  /// **백엔드를 띄운 뒤 가장 자주 어긋나는 자리다.** PC 의 Nav2 가 로봇
+  /// 브링업보다 먼저 뜨면, costmap 이 기다리던 `<로봇>/odom` TF 가 그때는 없다.
+  /// 그러면 `lifecycle_manager` 가 `controller_server` 에서 실패하고 **뒤의
+  /// 노드는 시도조차 하지 않는다.** 로봇이 나중에 올라와 TF 가 생겨도 관리자는
+  /// 이미 포기한 뒤라 다시 시도하지 않는다.
+  ///
+  /// 남는 것은 `amcl` 만 active 인 상태다. 작업을 넣으면 어댑터가 `Nav2 가
+  /// 거절했습니다` 한 줄만 남기고 끝난다 — `bt_navigator` 가 inactive 라
+  /// `navigate_to_pose` action 자체가 없기 때문이다.
+  ///
+  /// 사람이 `ros2 lifecycle get` 을 여덟 번 쳐서 알아낼 일이 아니다.
+  Future<void> _ensureNav2ForRobots() async {
+    final robots = navigatingRobots(widget.registeredRobots);
+    if (robots.isEmpty) return;
+    final lines = <String>[];
+    var anyBlocked = false;
+    for (final robot in robots) {
+      final result = await ensureNav2Active(
+        robotId: robot.robotId,
+        namespace: robot.gzName,
+        rosDomainId: robot.rosDomainId ?? widget.rosDomainId,
+      );
+      if (!mounted) return;
+      if (result.outcome != Nav2RecoveryOutcome.alreadyActive) {
+        lines.add(
+          nav2RecoveryMessage(outcome: result.outcome, after: result.status),
+        );
+      }
+      if (result.outcome == Nav2RecoveryOutcome.stillBlocked ||
+          result.outcome == Nav2RecoveryOutcome.unreachable) {
+        anyBlocked = true;
+      }
+    }
+    if (lines.isEmpty || !mounted) return;
+    // 다 켰으면 짧게 알리고, 못 켰으면 무엇을 봐야 하는지까지 적는다.
+    if (!anyBlocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(lines.join('\n')),
+          duration: const Duration(seconds: 6),
+          showCloseIcon: true,
+        ),
+      );
+      return;
+    }
     await showWaypointErrorDialog(
       context,
-      title: '백엔드 실행 실패 — 원인과 해결 방법',
-      message: report,
+      title: 'Nav2 가 다 안 켜졌습니다',
+      message: lines.join('\n\n'),
     );
   }
 
@@ -19304,6 +20420,8 @@ class _RobotManagementPageState extends State<_RobotManagementPage> {
     // 무엇을 띄웠느냐에 따라 내리는 스크립트가 다르다. 예전에는 무조건 office
     // 데모 스크립트만 돌려서, 맵 프로젝트로 띄운 fleet_manager 가 그대로
     // 남았다.
+    // 내리는 순간 기억해 둔 값은 거짓이 된다.
+    _runtimeCache.invalidate();
     final result = await stopRmfBackend(mapName: widget.projectName);
     if (!mounted) return;
     setState(() => _rmfBusy = false);
@@ -20550,8 +21668,8 @@ class _NavigationRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 주요 운영 메뉴는 로봇 등록 → 작업 관리 → ROS2 확인 → 설정 파일
-    // 순서로 둔다.
+    // 주요 운영 메뉴는 로봇 관리 → 작업 관리 → Policy → ROS2 확인 →
+    // 설정 파일 순서로 둔다. 로봇과 작업을 오가며 쓰는 일이 가장 잦다.
     // 그리드맵은 맵 바로 뒤에 둔다. 도면에서 파생되는 산출물이고, 이것이
     // 없으면 뒤의 로봇·작업이 아예 돌지 않는다.
     const items = [
@@ -20559,8 +21677,11 @@ class _NavigationRail extends StatelessWidget {
       (Icons.map_outlined, '맵 관리'),
       (Icons.grid_on_outlined, '그리드맵'),
       (Icons.smart_toy_outlined, '로봇 관리'),
-      (Icons.model_training_outlined, 'Policy 관리'),
+      // 작업 관리는 로봇 관리 **바로 밑**이다. 둘을 오가며 쓰는 일이 가장
+      // 잦은데(로봇을 띄우고 작업을 내고 다시 로봇 상태를 본다), 사이에
+      // 다른 것이 끼면 그때마다 눈이 건너뛰어야 한다.
       (Icons.assignment_outlined, '작업 관리'),
+      (Icons.model_training_outlined, 'Policy 관리'),
       (Icons.view_in_ar_outlined, '로봇 모델'),
       (Icons.hub_outlined, 'ROS2 확인'),
       (Icons.description_outlined, '설정 파일'),
@@ -27871,6 +28992,17 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.onResubscribe,
     required this.policiesOf,
     required this.onManagePolicies,
+    required this.onSendInitialPose,
+    required this.initialPoseStation,
+    required this.sshReadiness,
+    required this.onBringUpRobot,
+    required this.onStopRobotBringup,
+    required this.onInstallAutostart,
+    required this.onRemoveAutostart,
+    required this.autostartStatus,
+    required this.nudgeReadiness,
+    required this.onNudge,
+    required this.onCaptureWaypoint,
   });
 
   final String robotId;
@@ -27912,6 +29044,57 @@ class _RobotDetailDialog extends StatefulWidget {
   /// Policy 를 붙이고 떼는 창을 연다.
   final Future<void> Function() onManagePolicies;
 
+  /// 로봇에게 "너는 지금 자리 Waypoint 에 있다" 고 알린다.
+  ///
+  /// AMCL 이 그 자리에서 파티클을 다시 뿌린다. 로봇은 **안 움직인다** — 부르는
+  /// 쪽이 사람에게 먼저 확인받는다.
+  final Future<void> Function() onSendInitialPose;
+
+  /// 초기 위치로 보낼 자리. 보낼 수 없으면 왜 못 보내는지 함께 온다.
+  ///
+  /// 화면은 판정을 안 한다. `robot_initial_pose.dart` 가 정한 것을 그대로
+  /// 보여 주기만 한다 — 두 곳에서 따로 따지면 단추는 살아 있는데 눌러도
+  /// 아무 일이 없는 상태가 생긴다.
+  final ({
+    InitialPoseReadiness readiness,
+    String stationName,
+    double? x,
+    double? y,
+    double? degrees,
+    String topic,
+  })
+  Function()
+  initialPoseStation;
+
+  /// SSH 로 브링업을 띄울 수 있는가. 못 하면 왜 못 하는가.
+  final RobotSshReadiness Function() sshReadiness;
+
+  /// 로봇에 들어가 브링업을 띄운다.
+  final Future<void> Function() onBringUpRobot;
+
+  /// 로봇의 브링업을 내린다.
+  final Future<void> Function() onStopRobotBringup;
+
+  /// 로봇을 켤 때마다 브링업이 뜨게 한다.
+  final Future<void> Function() onInstallAutostart;
+
+  /// 자동 실행을 끈다.
+  final Future<void> Function() onRemoveAutostart;
+
+  /// 자동 실행이 걸려 있는지 읽는다.
+  final Future<RobotServiceStatus> Function() autostartStatus;
+
+  /// 미세조종을 할 수 있는가. 못 하면 왜 못 하는가.
+  final NudgeReadiness Function() nudgeReadiness;
+
+  /// 로봇을 조금 움직인다. 거리[m] 와 각도[도] 를 함께 넘긴다 — 무엇을 쓸지는
+  /// [NudgeKind] 가 정한다.
+  final Future<void> Function(NudgeKind kind, double meters, double degrees)
+  onNudge;
+
+  /// 로봇이 지금 서 있는 자리를 Waypoint 로 만든다.
+  final Future<void> Function() onCaptureWaypoint;
+
   @override
   State<_RobotDetailDialog> createState() => _RobotDetailDialogState();
 }
@@ -27939,6 +29122,8 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     if (_registered?.dataSource.usesTopics ?? false) {
       unawaited(_runProbe());
     }
+    // 자동 실행이 걸려 있는지도 함께 읽는다. 단추 글자가 그 값에 따라 갈린다.
+    unawaited(_refreshAutostart());
   }
 
   @override
@@ -28550,6 +29735,325 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     ];
   }
 
+  /// 로봇에 들어가 브링업을 띄우는 자리.
+  ///
+  /// 실물 로봇은 앱이 도는 PC 가 아니라 제 안에서 하드웨어를 연다. 그래서
+  /// 지금까지는 사람이 로봇에 들어가 손으로 launch 를 쳤는데, 네임스페이스를
+  /// 빠뜨리거나 도메인이 다르면 **오류 없이** 값만 안 왔다.
+  List<Widget> _bringupSection() {
+    final readiness = widget.sshReadiness();
+    // 쓸 수 없는 로봇에게는 아예 안 보여 준다. Gazebo·Mock 로봇에 이 칸이
+    // 뜨면 눌러야 하는 것으로 읽는다.
+    if (readiness == RobotSshReadiness.mockRobot ||
+        readiness == RobotSshReadiness.simulated ||
+        readiness == RobotSshReadiness.notMobile) {
+      return const [];
+    }
+    final ready = canBringUpOverSsh(readiness);
+    return [
+      _heading('로봇 브링업'),
+      if (!ready)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            robotSshBlockedReason(readiness) ?? '',
+            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+        )
+      else
+        const Padding(
+          padding: EdgeInsets.only(top: 4),
+          child: Text(
+            '라이다 · 모터 · 배터리를 로봇에서 띄웁니다. 네임스페이스와 도메인은 '
+            '등록값을 그대로 씁니다.',
+            style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 4),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: ready
+                  ? () => unawaited(widget.onBringUpRobot())
+                  : null,
+              icon: const Icon(Icons.play_arrow_outlined, size: 18),
+              label: const Text('브링업 띄우기'),
+            ),
+            OutlinedButton.icon(
+              onPressed: ready
+                  ? () => unawaited(widget.onStopRobotBringup())
+                  : null,
+              icon: const Icon(Icons.stop_outlined, size: 18),
+              label: const Text('내리기'),
+            ),
+          ],
+        ),
+      ),
+      // 로봇을 켤 때마다 스스로 뜨게 해 두면, 사람이 단추를 누르는 것을 잊어도
+      // 브링업이 먼저 서 있다. PC 의 Nav2 가 로봇보다 먼저 뜨면 costmap 이
+      // 기다리던 TF 가 없어 lifecycle 이 통째로 멈추는데, 그 순서가 뒤집힌다.
+      _row('자동 실행', robotServiceStatusLabel(_autostart)),
+      Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 4),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: ready
+                  ? () async {
+                      await widget.onInstallAutostart();
+                      await _refreshAutostart();
+                    }
+                  : null,
+              icon: const Icon(Icons.power_settings_new_outlined, size: 18),
+              label: Text(
+                _autostart.installed ? '자동 실행 다시 설치' : '켤 때 자동 실행',
+              ),
+            ),
+            if (_autostart.installed)
+              TextButton.icon(
+                onPressed: ready
+                    ? () async {
+                        await widget.onRemoveAutostart();
+                        await _refreshAutostart();
+                      }
+                    : null,
+                icon: const Icon(Icons.link_off_outlined, size: 18),
+                label: const Text('자동 실행 끄기'),
+              ),
+          ],
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: Text(
+          '설치하면 namespace 와 도메인이 로봇 안 파일에 박힙니다. '
+          '등록에서 그 값을 바꾸면 다시 설치해 주세요.',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+      ),
+    ];
+  }
+
+  /// 로봇의 자동 실행 상태. 창을 열 때 한 번 읽는다.
+  RobotServiceStatus _autostart = const RobotServiceStatus(
+    enabled: false,
+    active: false,
+  );
+
+  Future<void> _refreshAutostart() async {
+    final status = await widget.autostartStatus();
+    if (!mounted) return;
+    setState(() => _autostart = status);
+  }
+
+  /// 미세조종 입력칸. cm 와 도(度)로 받는다.
+  final TextEditingController _nudgeDistance = TextEditingController(
+    text: '5',
+  );
+  final TextEditingController _nudgeAngle = TextEditingController(text: '15');
+  String? _nudgeError;
+
+  /// 로봇을 몇 cm 만 밀거나 조금 돌리는 자리.
+  ///
+  /// 작업으로 보내면 도착 반경(0.1m) 안에만 들면 끝나므로 그보다 작은 조정은
+  /// 할 수 없다. 충전 단자를 맞추거나 도킹 위치가 몇 cm 모자랄 때 쓴다.
+  List<Widget> _nudgeSection() {
+    final readiness = widget.nudgeReadiness();
+    if (readiness == NudgeReadiness.mockRobot ||
+        readiness == NudgeReadiness.notMobile) {
+      return const [];
+    }
+    final ready = canNudge(readiness);
+    final blocked = nudgeBlockedReason(readiness);
+
+    void run(NudgeKind kind) {
+      final distance = parseNudgeCentimeters(_nudgeDistance.text);
+      final angle = parseNudgeDegrees(_nudgeAngle.text);
+      final turning =
+          kind == NudgeKind.turnLeft || kind == NudgeKind.turnRight;
+      // 쓰는 값만 따진다. 각도 칸이 비었다고 앞으로 가는 것을 막으면 안 된다.
+      final error = turning ? angle.error : distance.error;
+      final value = turning ? angle.degrees : distance.meters;
+      if (error != null || value == null) {
+        setState(
+          () => _nudgeError =
+              error ?? (turning ? '각도를 적어 주세요.' : '거리를 적어 주세요.'),
+        );
+        return;
+      }
+      setState(() => _nudgeError = null);
+      unawaited(
+        widget.onNudge(kind, distance.meters ?? 0, angle.degrees ?? 0),
+      );
+    }
+
+    return [
+      _heading('미세조종'),
+      if (blocked != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            blocked,
+            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _nudgeDistance,
+                enabled: ready,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: '거리 (cm)',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextField(
+                controller: _nudgeAngle,
+                enabled: ready,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: '각도 (도)',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (_nudgeError != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            _nudgeError!,
+            style: const TextStyle(color: Color(0xFFDC2626), fontSize: 12),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8, bottom: 2),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: ready ? () => run(NudgeKind.forward) : null,
+              icon: const Icon(Icons.arrow_upward, size: 18),
+              label: const Text('앞으로'),
+            ),
+            OutlinedButton.icon(
+              onPressed: ready ? () => run(NudgeKind.backward) : null,
+              icon: const Icon(Icons.arrow_downward, size: 18),
+              label: const Text('뒤로'),
+            ),
+            OutlinedButton.icon(
+              onPressed: ready ? () => run(NudgeKind.turnLeft) : null,
+              icon: const Icon(Icons.rotate_left, size: 18),
+              label: const Text('왼쪽'),
+            ),
+            OutlinedButton.icon(
+              onPressed: ready ? () => run(NudgeKind.turnRight) : null,
+              icon: const Icon(Icons.rotate_right, size: 18),
+              label: const Text('오른쪽'),
+            ),
+          ],
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: Text(
+          'Nav2 가 오도메트리로 거리를 재고 앞을 봅니다 — 장애물이 있으면 멈춥니다.',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+      ),
+      // 자리를 맞춘 그 자리에서 바로 찍는다. 생각의 흐름이 끊기지 않는다 —
+      // 옆으로 5cm → 좋다 → 이 자리 저장.
+      Padding(
+        padding: const EdgeInsets.only(top: 2, bottom: 4),
+        child: OutlinedButton.icon(
+          onPressed: () => unawaited(widget.onCaptureWaypoint()),
+          icon: const Icon(Icons.push_pin_outlined, size: 18),
+          label: const Text('지금 자리를 Waypoint 로'),
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: Text(
+          '로봇이 말하는 좌표를 그대로 씁니다. 도면에서 눈으로 찍는 것보다 '
+          '정확합니다 — 좁은 자리일수록 그 차이가 큽니다.',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+      ),
+    ];
+  }
+
+  /// 로봇에게 지금 자리를 알려 주는 자리.
+  ///
+  /// AMCL 은 `map → odom` 을 스스로 못 찾는다. 배포할 때 `nav2_params.yaml` 에
+  /// 박아 넣는 `initial_pose` 는 Nav2 를 **처음 띄울 때만** 듣는다. 로봇을 손으로
+  /// 옮겼거나 위치를 잃으면 여기서 다시 알려 준다.
+  List<Widget> _initialPoseSection() {
+    final station = widget.initialPoseStation();
+    final blocked = initialPoseBlockedReason(station.readiness);
+    final ready = canSendInitialPose(station.readiness);
+    return [
+      _heading('초기 위치'),
+      _row('보낼 자리', ready ? station.stationName : '보낼 수 없음'),
+      if (ready && station.x != null && station.y != null)
+        _row(
+          '좌표',
+          '${station.x!.toStringAsFixed(3)}, '
+              '${station.y!.toStringAsFixed(3)} m'
+              '${station.degrees == null ? '' : ' · 방향 ${station.degrees!.toStringAsFixed(1)}°'}',
+        ),
+      _row('토픽', station.topic),
+      if (blocked != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            blocked,
+            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 2),
+        child: OutlinedButton.icon(
+          onPressed: ready
+              ? () => unawaited(widget.onSendInitialPose())
+              : null,
+          icon: const Icon(Icons.my_location_outlined, size: 18),
+          label: const Text('이 자리를 초기 위치로 보내기'),
+        ),
+      ),
+      // 단추가 무엇을 안 하는지 먼저 적는다. 사람이 이것을 "로봇을 그 자리로
+      // 보내는" 단추로 읽으면, 엉뚱한 곳에 있는 로봇에 좌표만 넣고 움직이기를
+      // 기다린다.
+      const Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: Text(
+          '로봇은 움직이지 않습니다. 실제 로봇을 그 자리에 그 방향으로 놓은 뒤 누르세요.',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+      ),
+    ];
+  }
+
   /// 화면에 뿌리는 것과 같은 내용을 글로 만든다.
   String _asText() {
     final robot = widget.robotOf();
@@ -28659,6 +30163,11 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
               ],
               if (registered != null && !registered.isMobile)
                 ..._policySection(),
+              if (registered != null && registered.isMobile) ...[
+                ..._bringupSection(),
+                ..._initialPoseSection(),
+                ..._nudgeSection(),
+              ],
               _heading('지금 상태'),
               if (robot == null)
                 _row('배치', '지도에 배치되지 않았습니다.')
@@ -29030,4 +30539,135 @@ class _ProjectLogPageState extends State<_ProjectLogPage> {
       '${at.hour.toString().padLeft(2, '0')}:'
       '${at.minute.toString().padLeft(2, '0')}:'
       '${at.second.toString().padLeft(2, '0')}';
+}
+
+/// 로봇 자리를 Waypoint 로 만들 때 무엇으로 만들지 고르는 창.
+///
+/// 이름은 그 카테고리의 다음 번호로 미리 채운다. 사람이 세어서 붙이면
+/// 언젠가 겹치는데, 이름이 곧 RMF 의 `target_guid` 라 겹치면 안 된다.
+class _WaypointCaptureDialog extends StatefulWidget {
+  const _WaypointCaptureDialog({
+    required this.existingNames,
+    required this.xMeters,
+    required this.yMeters,
+    required this.headingDegrees,
+  });
+
+  final Iterable<String> existingNames;
+  final double xMeters;
+  final double yMeters;
+  final double headingDegrees;
+
+  @override
+  State<_WaypointCaptureDialog> createState() => _WaypointCaptureDialogState();
+}
+
+class _WaypointCaptureDialogState extends State<_WaypointCaptureDialog> {
+  String _category = '대기';
+  late final TextEditingController _name = TextEditingController(
+    text: nextWaypointName(
+      category: _category,
+      existingNames: widget.existingNames,
+    ),
+  );
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  /// 카테고리를 바꾸면 이름도 그 카테고리의 다음 번호로 바꾼다.
+  ///
+  /// 사람이 이름을 고쳐 놓았으면 건드리지 않는다 — 고친 것을 되돌리면 왜
+  /// 사라졌는지 알 수 없다.
+  void _pick(String category) {
+    final auto = nextWaypointName(
+      category: _category,
+      existingNames: widget.existingNames,
+    );
+    setState(() {
+      final untouched = _name.text.trim() == auto;
+      _category = category;
+      if (untouched) {
+        _name.text = nextWaypointName(
+          category: category,
+          existingNames: widget.existingNames,
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final heading = captureHeadingFor(
+      category: _category,
+      robotHeadingDegrees: widget.headingDegrees,
+    );
+    return AlertDialog(
+      icon: const Icon(Icons.push_pin_outlined, size: 32),
+      title: const Text('이 자리를 Waypoint 로'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '로봇이 서 있는 자리 '
+              '${widget.xMeters.toStringAsFixed(3)}, '
+              '${widget.yMeters.toStringAsFixed(3)} m',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _category,
+              decoration: const InputDecoration(
+                labelText: '무엇으로 만들까요',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                for (final category in waypointCategories)
+                  DropdownMenuItem(value: category, child: Text(category)),
+              ],
+              onChanged: (value) => value == null ? null : _pick(value),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _name,
+              decoration: const InputDecoration(
+                labelText: '이름',
+                helperText: 'RMF 는 좌표가 아니라 이름으로 자리를 찾습니다.',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              heading == null
+                  ? '$_category 자리는 방향을 안 씁니다.'
+                  : '로봇이 지금 보는 방향 '
+                        '${heading.toStringAsFixed(1)}도를 함께 넣습니다.',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('취소'),
+        ),
+        FilledButton.icon(
+          onPressed: _name.text.trim().isEmpty
+              ? null
+              : () => Navigator.pop(context, (
+                  category: _category,
+                  name: _name.text.trim(),
+                )),
+          icon: const Icon(Icons.push_pin_outlined, size: 18),
+          label: const Text('만들기'),
+        ),
+      ],
+    );
+  }
 }

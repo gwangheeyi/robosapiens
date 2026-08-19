@@ -733,3 +733,31 @@ Future<String?> probeMapServerState({
   ).firstMatch(result.stdout.toString());
   return match?.group(1);
 }
+
+/// 이 로봇의 브링업 토픽이 실제로 나오는가.
+///
+/// **퍼블리셔 수를 본다.** 토픽 이름만 있고 값이 안 오는 상태가 실제로 있다 —
+/// 브링업이 시리얼을 못 잡았거나, 다른 노드가 구독만 하고 있는 경우다. 그때
+/// `ros2 topic list` 에는 이름이 그대로 보여서, 목록만으로는 가릴 수 없다.
+///
+/// 라이다는 `BEST_EFFORT` 로 발행해서 `ros2 topic hz` 로는 값이 안 온다.
+/// `topic info` 의 퍼블리셔 수는 QoS 와 무관하므로 그것을 쓴다.
+Future<bool> probeTopicHasPublisher({
+  required String topic,
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 12),
+}) async {
+  final result = await runRosProbe(
+    _withRosEnvironment(
+      'export ROS_DOMAIN_ID=$rosDomainId; '
+      "ros2 topic info '$topic'",
+    ),
+    timeout: timeout,
+  );
+  if (result == null) return false;
+  final match = RegExp(
+    r'Publisher count:\s*(\d+)',
+  ).firstMatch(result.stdout.toString());
+  final count = match == null ? 0 : int.tryParse(match.group(1)!) ?? 0;
+  return count > 0;
+}

@@ -44,3 +44,11 @@ Future<String?> probeMapServerState({
   required int rosDomainId,
   Duration timeout = const Duration(seconds: 15),
 }) async => null;
+
+/// 웹에서는 못 물어본다. **모르는 것을 있다고 하면 안 된다** — 그러면 브링업이
+/// 없는데도 백엔드를 띄우게 된다.
+Future<bool> probeTopicHasPublisher({
+  required String topic,
+  required int rosDomainId,
+  Duration timeout = const Duration(seconds: 12),
+}) async => false;

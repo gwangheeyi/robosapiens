@@ -134,6 +134,122 @@ void main() {
       expect(fixed.chargerWaypoint, '홈1');
     });
 
+    /// 충전 단자가 어느 쪽을 보고 있는지는 로봇이 아니라 **자리**가 정한다.
+    /// 등록마다 각도를 따로 넣게 두면 같은 자리를 쓰는 두 로봇이 서로 다른
+    /// 쪽을 보고 서고, Gazebo 스폰 자세와 RMF 복귀 자세가 갈린다.
+    group('자리에 적힌 방향', () {
+      /// 등록이 비어 있으면(0) 자리 값을 기본값으로 채운다.
+      test('등록을 안 건드렸으면 자리 방향을 채운다', () {
+        final fixed = robotsWithMapSpawnPoints(
+          [pinky],
+          (_) => (dx: 1537.532, dy: 556.757),
+          metersPerPixel,
+          headingRadiansOf: (_) => math.pi,
+        ).single;
+        expect(fixed.spawnHeading, closeTo(math.pi, 1e-9));
+      });
+
+      /// 처음에는 자리가 이기게 했다. 그랬더니 사람이 로봇 등록에서 90도를
+      /// 넣어 저장해도 다음에 열면 늘 자리의 180도로 돌아왔다. 저장이 안 된
+      /// 것처럼 보이지만 실제로는 저장된 값을 덮어쓴 것이라, 어디를 고쳐야
+      /// 할지 알 수 없다.
+      test('등록에 넣은 방향은 자리 방향이 못 덮는다', () {
+        final registered = pinky.withSpawn(
+          spawnX: pinky.spawnX,
+          spawnY: pinky.spawnY,
+          spawnHeading: math.pi / 2,
+        );
+        final fixed = robotsWithMapSpawnPoints(
+          [registered],
+          (_) => (dx: 1537.532, dy: 556.757),
+          metersPerPixel,
+          headingRadiansOf: (_) => math.pi,
+        ).single;
+        expect(fixed.spawnHeading, closeTo(math.pi / 2, 1e-9));
+      });
+
+      /// 같은 충전대라도 로봇이 서는 쪽이 다를 수 있다.
+      test('같은 자리를 쓰는 두 로봇이 서로 다른 방향을 가질 수 있다', () {
+        final a = pinky.withSpawn(
+          spawnX: pinky.spawnX,
+          spawnY: pinky.spawnY,
+          spawnHeading: math.pi / 2,
+        );
+        const second = RmfProjectRobot(
+          robotId: 'PK-02',
+          displayName: '핑키 2호',
+          model: 'PINKY-GZ',
+          gzName: 'pinky_02',
+          zones: ['ambient'],
+          chargerWaypoint: '홈1',
+          spawnX: 1.642,
+          spawnY: 1.595,
+        );
+        final b = second.withSpawn(
+          spawnX: second.spawnX,
+          spawnY: second.spawnY,
+          spawnHeading: -math.pi / 2,
+        );
+        final fixed = robotsWithMapSpawnPoints(
+          [a, b],
+          (_) => (dx: 1537.532, dy: 556.757),
+          metersPerPixel,
+          headingRadiansOf: (_) => math.pi,
+        );
+        expect(fixed[0].spawnHeading, closeTo(math.pi / 2, 1e-9));
+        expect(fixed[1].spawnHeading, closeTo(-math.pi / 2, 1e-9));
+      });
+
+      test('자리에 방향이 없으면 등록 값을 그대로 둔다', () {
+        final registered = pinky.withSpawn(
+          spawnX: pinky.spawnX,
+          spawnY: pinky.spawnY,
+          spawnHeading: 1.234,
+        );
+        final fixed = robotsWithMapSpawnPoints(
+          [registered],
+          (_) => (dx: 1537.532, dy: 556.757),
+          metersPerPixel,
+          headingRadiansOf: (_) => null,
+        ).single;
+        expect(fixed.spawnHeading, closeTo(1.234, 1e-9));
+      });
+
+      /// 시작 자리를 따로 골랐어도 등록에 방향이 없으면 자리 값을 채운다.
+      test('시작 자리를 따로 고른 로봇도 빈 방향은 자리를 따른다', () {
+        final moved = pinky.withSpawn(spawnX: 9.0, spawnY: -9.0);
+        final fixed = robotsWithMapSpawnPoints(
+          [moved],
+          (_) => (dx: 1537.532, dy: 556.757),
+          metersPerPixel,
+          headingRadiansOf: (_) => math.pi,
+        ).single;
+        // 좌표는 지킨다.
+        expect(fixed.spawnX, closeTo(9.0, 1e-9));
+        expect(fixed.spawnY, closeTo(-9.0, 1e-9));
+        // 방향은 자리 값으로 간다.
+        expect(fixed.spawnHeading, closeTo(math.pi, 1e-9));
+      });
+
+      test('바꿀 것이 없으면 받은 목록을 그대로 돌려준다', () {
+        final settled = pinky.withSpawn(
+          spawnX: 1.760744309942079,
+          spawnY: -0.6375845964639578,
+          spawnHeading: math.pi,
+        );
+        final list = [settled];
+        expect(
+          robotsWithMapSpawnPoints(
+            list,
+            (_) => (dx: 1537.532, dy: 556.757),
+            metersPerPixel,
+            headingRadiansOf: (_) => math.pi,
+          ),
+          same(list),
+        );
+      });
+    });
+
     test('자리를 못 찾은 로봇은 좌표를 잃지 않는다', () {
       // 지도가 아직 안 올라온 사이에 불릴 수 있다. 그때 지워 버리면 멀쩡한
       // 등록이 자리를 잃는다.

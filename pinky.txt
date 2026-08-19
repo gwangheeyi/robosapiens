@@ -25,6 +25,16 @@ sudo nmcli device wifi connect "trihouse" password "trihouse" ifname wlx588694f4
 
 
 pinky2 namespace를 이용해서 브링업 하기
+1
 
 ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml \
   namespace:=pinky_02
+
+OR
+
+ros2 run pinky_bringup bringup_namespaced
+
+현재 내 컴에 연결되어 있는 wifi ssid 구하기
+nmcli dev wifi
+
+pinky_d29d

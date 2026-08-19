@@ -28,6 +28,50 @@ class RmfRuntimeStatus {
   );
 }
 
+/// 방금 확인한 백엔드 상태를 잠깐 기억해 둔다.
+///
+/// 확인 한 번이 `ros2 node list --no-daemon --spin-time 3` 이라 **3초 넘게**
+/// 걸린다. 데몬 캐시가 죽은 노드를 한참 살아 있다고 답해서 일부러 캐시를 끈
+/// 것인데, 그 값이 화면에 들어올 때마다 새로 붙는다.
+///
+/// 작업 관리에서 로봇 관리로 돌아오는 것처럼 금방 다시 들어오는 자리에서는
+/// 그 3초가 그대로 기다리는 시간이 된다. 백엔드가 그 사이에 뜨거나 죽을 일은
+/// 거의 없다 — 뜨고 죽는 것은 사람이 단추를 눌러서 일어나고, 그때는 이 캐시를
+/// 버린다.
+///
+/// **짧게 잡는다.** 길게 두면 다른 창에서 백엔드를 내렸는데 화면은 계속 떠
+/// 있다고 말한다. 새로고침 단추는 언제나 캐시를 건너뛴다.
+class RmfRuntimeCache {
+  RmfRuntimeCache({this.lifetime = const Duration(seconds: 15)});
+
+  /// 기억해 두는 시간.
+  final Duration lifetime;
+
+  RmfRuntimeStatus? _status;
+  DateTime? _at;
+
+  /// 지금 쓸 수 있는 값. 없거나 오래됐으면 null.
+  RmfRuntimeStatus? valueAt(DateTime now) {
+    final status = _status;
+    final at = _at;
+    if (status == null || at == null) return null;
+    return now.difference(at) < lifetime ? status : null;
+  }
+
+  /// 새로 확인한 값을 넣는다.
+  void store(RmfRuntimeStatus status, DateTime now) {
+    _status = status;
+    _at = now;
+  }
+
+  /// 값을 버린다. 백엔드를 띄우거나 내린 직후처럼 **반드시 다시 봐야 하는**
+  /// 자리에서 부른다.
+  void invalidate() {
+    _status = null;
+    _at = null;
+  }
+}
+
 /// 백엔드 중지 스크립트 실행 결과.
 class RmfStopResult {
   const RmfStopResult({required this.success, required this.output});

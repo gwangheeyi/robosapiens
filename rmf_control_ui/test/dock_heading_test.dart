@@ -208,10 +208,12 @@ controller_server:
   /// — 카테고리를 바꾸는 순간 각도가 아무 말 없이 지워진 것이다. 사람의 기억과
   /// 앱의 상태가 갈릴 수 있는 값이라 두 곳에서 잡는다.
   group('사라지는 각도를 밝힌다', () {
-    test('픽업에서 대기로 바꾸면 무슨 값이 사라지는지 적는다', () {
+    /// 대기도 방향을 쓰게 되었으므로 픽업 → 대기 는 각도가 안 사라진다.
+    /// 방향을 안 쓰는 자리(주차·홈·설비)로 바꿀 때만 사라진다.
+    test('방향을 안 쓰는 자리로 바꾸면 무슨 값이 사라지는지 적는다', () {
       final message = dockHeadingDropMessage(
         previousCategory: '픽업',
-        newCategory: '대기',
+        newCategory: '주차',
         waypointName: '픽업3',
         dockHeadingDegrees: 180,
       );
@@ -219,7 +221,21 @@ controller_server:
       expect(message, contains('픽업3'));
       // 사라진 각도를 숫자로 적어야 손으로 다시 넣을 수 있다.
       expect(message, contains('180'));
-      expect(message, contains('대기'));
+      expect(message, contains('주차'));
+    });
+
+    /// 대기 자리에서 -45도로 선 뒤 후진으로 픽업에 들어가는 식으로 쓴다.
+    /// 그 각도가 카테고리를 오갈 때 사라지면 안 된다.
+    test('픽업에서 대기로는 각도가 그대로라 알리지 않는다', () {
+      expect(
+        dockHeadingDropMessage(
+          previousCategory: '픽업',
+          newCategory: '대기',
+          waypointName: '픽업3',
+          dockHeadingDegrees: 180,
+        ),
+        isNull,
+      );
     });
 
     test('소수점 뒤가 0 이면 떼고 적는다', () {
@@ -302,10 +318,24 @@ controller_server:
     test('방향을 안 쓰는 자리는 따지지 않는다', () {
       expect(
         missingDockHeadingMessage([
-          check('충전1', '충전', null),
           check('설비3', '설비', null),
           check('', '대기', null),
         ]),
+        isNull,
+      );
+    });
+
+    /// 충전 단자는 로봇 한쪽에만 있다. 방향이 없으면 도착은 했는데 접점이 안
+    /// 맞고, 그것은 배포하고 로봇을 세워 본 뒤에야 안다.
+    test('각도 없는 충전 자리도 배포 전에 알린다', () {
+      final message = missingDockHeadingMessage([check('충전1', '충전', null)]);
+      expect(message, isNotNull);
+      expect(message, contains('충전1'));
+    });
+
+    test('각도를 정해 둔 충전 자리는 안 따진다', () {
+      expect(
+        missingDockHeadingMessage([check('충전1', '충전', 180)]),
         isNull,
       );
     });
