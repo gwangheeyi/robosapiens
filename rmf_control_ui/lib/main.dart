@@ -37,6 +37,7 @@ import 'nav2_speed_limits.dart';
 import 'nav2_vendor_params.dart';
 import 'occupancy_grid.dart';
 import 'project_log.dart';
+import 'project_bundle_store.dart';
 import 'project_file_store.dart';
 import 'occupancy_grid_export.dart';
 import 'rmf_config_export.dart';
@@ -13833,27 +13834,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
       if (picked == null || !mounted) return;
-      final payload = await loadMapProject(picked);
-      if (!mounted) return;
-      if (payload == null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('`$picked` 프로젝트를 찾지 못했습니다.')));
-        return;
-      }
-      // 이전 버전에서 MySQL에만 저장한 프로젝트도 한 번 열면 고정 project
-      // 디렉터리에 같은 이름으로 복구한다. 이후에는 파일 목록에서도 보인다.
-      final projectFile = projectFileName(picked);
-      await saveProjectFile(picked, Uint8List.fromList(utf8.encode(payload)));
-      _applyProjectData(
-        jsonDecode(payload) as Map<String, dynamic>,
-        sourceName: projectFile,
-        fallbackMapName: picked,
-      );
-      await _loadFleetForProject(picked);
-      if (!mounted) return;
-      await _switchOpenProject(picked);
-      if (!mounted) return;
+      final projectFile = await _openStoredProject(picked);
+      if (projectFile == null || !mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('`$picked` 프로젝트를 불러오고 project/$projectFile에 동기화했습니다.'),
@@ -13866,6 +13848,283 @@ class _ControlDashboardState extends State<ControlDashboard> {
         context,
       ).showSnackBar(SnackBar(content: Text('프로젝트를 열지 못했습니다: $error')));
     }
+  }
+
+  /// MySQL 에 있는 [mapName] 프로젝트를 화면에 연다. 쓴 파일 이름을 돌려준다.
+  ///
+  /// 못 찾으면 그 사실을 알리고 null 을 돌려준다. 프로젝트 목록에서 고르는
+  /// 길과 꾸러미를 가져온 직후에 여는 길이 같은 절차를 타야 한다 — 갈라 두면
+  /// 한쪽만 고쳐져서 "열었는데 로봇이 없다" 같은 것이 생긴다.
+  Future<String?> _openStoredProject(String mapName) async {
+    final payload = await loadMapProject(mapName);
+    if (!mounted) return null;
+    if (payload == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('`$mapName` 프로젝트를 찾지 못했습니다.')));
+      return null;
+    }
+    // 이전 버전에서 MySQL에만 저장한 프로젝트도 한 번 열면 고정 project
+    // 디렉터리에 같은 이름으로 복구한다. 이후에는 파일 목록에서도 보인다.
+    final projectFile = projectFileName(mapName);
+    await saveProjectFile(mapName, Uint8List.fromList(utf8.encode(payload)));
+    _applyProjectData(
+      jsonDecode(payload) as Map<String, dynamic>,
+      sourceName: projectFile,
+      fallbackMapName: mapName,
+    );
+    await _loadFleetForProject(mapName);
+    if (!mounted) return null;
+    await _switchOpenProject(mapName);
+    if (!mounted) return null;
+    return projectFile;
+  }
+
+  /// 지금 열린 프로젝트를 저장소 안 파일 하나로 내보낸다. git 으로 옮기려는 것이다.
+  ///
+  /// 내보내기 전에 **먼저 저장한다.** MySQL 을 읽어 꾸러미를 짜기 때문에, 화면에서
+  /// 방금 고친 것이 아직 저장 전이면 옛 내용이 나간다 — 다른 기계에서 열었을 때
+  /// 고친 것이 사라진 것처럼 보이는, 이 앱에서 이미 한 번 겪은 그 문제다.
+  Future<void> _exportProjectBundle() async {
+    final mapName = _openProjectName;
+    if (mapName == null || mapName.trim().isEmpty) {
+      await showWaypointErrorDialog(
+        context,
+        title: '프로젝트 내보내기',
+        message:
+            '열린 프로젝트가 없습니다.\n\n'
+            '`프로젝트 저장` 으로 이름을 정해 저장하거나 `프로젝트 열기` 로 '
+            '먼저 여세요.',
+      );
+      return;
+    }
+    try {
+      // 화면의 지금 상태를 먼저 원장에 남긴다.
+      await _writeMapProject(mapName);
+      if (!mounted) return;
+      final payload = await loadMapProject(mapName);
+      if (!mounted) return;
+      if (payload == null) {
+        throw StateError('`$mapName` 프로젝트를 MySQL 에서 찾지 못했습니다.');
+      }
+      final buildingYaml = await loadMapProjectYaml(mapName);
+      final fleet = await loadMapProjectFleet(mapName);
+      final simulation = await loadProjectSimulationSettings(mapName);
+      final policies = await loadWorkcellPolicies(mapName);
+      if (!mounted) return;
+      final bundle = ProjectBundle(
+        mapName: mapName,
+        project: jsonDecode(payload) as Map<String, dynamic>,
+        buildingYaml: buildingYaml,
+        buildingYamlName: buildingYaml == null
+            ? null
+            : _yamlFileNameFor(mapName),
+        fleetSettings: (fleet?['settings'] as Map?)?.cast<String, Object?>(),
+        robots: [
+          for (final robot in (fleet?['robots'] as List? ?? const []))
+            if (robot is Map) robot.cast<String, Object?>(),
+        ],
+        simulation: {
+          'backend': simulation.backend.storageValue,
+          'simulatorGui': simulation.simulatorGui,
+          'rviz': simulation.rviz,
+          'gazeboSettings': simulation.gazeboSettings,
+          'isaacSettings': simulation.isaacSettings,
+          'coordinateTransform': simulation.coordinateTransform,
+        },
+        policies: [for (final policy in policies) policy.toJson()],
+      );
+      final path = await writeProjectBundle(bundle);
+      if (!mounted) return;
+      await showMovableDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.outbox_outlined, size: 32),
+          title: const Text('프로젝트를 내보냈습니다'),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                '$path\n\n'
+                '로봇 등록 ${bundle.robots.length}대 · Policy '
+                '${bundle.policies.length}개가 함께 들어갔습니다.\n\n'
+                '이 파일을 커밋해서 올리세요. 다른 기계에서 pull 한 뒤 '
+                '`프로젝트 가져오기` 를 누르면 그대로 살아납니다.\n\n'
+                'Policy ZIP 과 작업·주문 기록은 들어가지 않습니다.',
+              ),
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('확인'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('프로젝트 내보내기', error);
+      await showWaypointErrorDialog(
+        context,
+        title: '프로젝트 내보내기',
+        message: '`$mapName` 을 내보내지 못했습니다.\n\n$error',
+      );
+    }
+  }
+
+  /// 저장소에 있는 꾸러미를 골라 MySQL 로 들여놓고 그 프로젝트를 연다.
+  Future<void> _importProjectBundle() async {
+    try {
+      final bundles = await listProjectBundles();
+      if (!mounted) return;
+      if (bundles.isEmpty) {
+        await showWaypointErrorDialog(
+          context,
+          title: '프로젝트 가져오기',
+          message:
+              '${projectBundleDirectoryPath()} 에 꾸러미가 없습니다.\n\n'
+              '내보낸 기계에서 `프로젝트 내보내기` 를 누르고 그 파일을 '
+              '커밋해 올린 뒤, 여기서 `git pull` 을 하세요.',
+        );
+        return;
+      }
+      final picked = await showMovableDialog<StoredProjectBundle>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.inbox_outlined, size: 34),
+          title: const Text('프로젝트 가져오기'),
+          content: SizedBox(
+            width: 460,
+            height: 360,
+            child: ListView.separated(
+              itemCount: bundles.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (_, index) {
+                final bundle = bundles[index];
+                return ListTile(
+                  leading: const Icon(Icons.inventory_2_outlined),
+                  title: Text(bundle.projectName),
+                  subtitle: Text(
+                    '${bundle.fileName}\n'
+                    '${_projectTimestamp(bundle.modifiedAt)} · '
+                    '${(bundle.size / 1024).toStringAsFixed(1)} KB',
+                  ),
+                  isThreeLine: true,
+                  onTap: () => Navigator.pop(dialogContext, bundle),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+          ],
+        ),
+      );
+      if (picked == null || !mounted) return;
+      final bundle = await readProjectBundle(picked.fileName);
+      if (!mounted) return;
+      final exists = await mapProjectExists(bundle.mapName);
+      if (!mounted) return;
+      final go = await confirmWarningDialog(
+        context,
+        title: '`${bundle.mapName}` 을 가져올까요?',
+        message: describeProjectBundle(bundle, exists: exists),
+        confirmLabel: exists ? '덮어쓰고 가져오기' : '가져오기',
+      );
+      if (!go || !mounted) return;
+      await _applyProjectBundle(bundle);
+    } catch (error) {
+      if (!mounted) return;
+      _showProcessingWarning('프로젝트 가져오기', error);
+      await showWaypointErrorDialog(
+        context,
+        title: '프로젝트 가져오기',
+        message: '꾸러미를 가져오지 못했습니다.\n\n$error',
+      );
+    }
+  }
+
+  /// 꾸러미를 MySQL 에 넣고 그 프로젝트를 연다.
+  ///
+  /// 지도를 먼저 넣는다. 로봇·플릿·시뮬레이션은 전부 `map_projects.id` 를
+  /// 외래 키로 매달기 때문에, 순서를 바꾸면 매달 곳이 없어 조용히 사라진다.
+  Future<void> _applyProjectBundle(ProjectBundle bundle) async {
+    await saveMapProject(
+      mapName: bundle.mapName,
+      payloadJson: jsonEncode(bundle.project),
+      buildingYaml: bundle.buildingYaml,
+      buildingYamlName: bundle.buildingYamlName,
+    );
+    final settings = bundle.fleetSettings;
+    if (settings != null || bundle.robots.isNotEmpty) {
+      await saveMapProjectFleet(
+        bundle.mapName,
+        settings: settings ?? const {},
+        robots: bundle.robots,
+      );
+    }
+    final simulation = bundle.simulation;
+    if (simulation != null) {
+      await saveProjectSimulationSettings(
+        bundle.mapName,
+        ProjectSimulationSettings(
+          backend: SimulationBackend.parse(simulation['backend'] as String?),
+          simulatorGui: simulation['simulatorGui'] as bool? ?? false,
+          rviz: simulation['rviz'] as bool? ?? false,
+          gazeboSettings:
+              (simulation['gazeboSettings'] as Map?)?.cast<String, Object?>() ??
+              const {},
+          isaacSettings:
+              (simulation['isaacSettings'] as Map?)?.cast<String, Object?>() ??
+              const {},
+          coordinateTransform:
+              (simulation['coordinateTransform'] as Map?)
+                  ?.cast<String, Object?>() ??
+              const {},
+        ),
+      );
+    }
+    final missingArchives = await importWorkcellPolicies(bundle.mapName, [
+      for (final policy in bundle.policies)
+        WorkcellPolicy.fromJson(policy.cast<String, dynamic>()),
+    ]);
+    if (!mounted) return;
+    final opened = await _openStoredProject(bundle.mapName);
+    if (opened == null || !mounted) return;
+    await showMovableDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.inbox_outlined, size: 32),
+        title: Text('`${bundle.mapName}` 을 가져왔습니다'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              [
+                '로봇 등록 ${bundle.robots.length}대를 들여놓고 프로젝트를 열었습니다.',
+                if (missingArchives.isNotEmpty) ...[
+                  '',
+                  'Policy ZIP 이 이 기계에 없습니다. 목록에서 다시 받으세요 —',
+                  for (final policy in missingArchives) '  · ${policy.id}',
+                ],
+                '',
+                '작업·주문 기록은 가져오지 않았습니다. 이 기계의 것이 그대로 남아 있습니다.',
+              ].join('\n'),
+            ),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 저장된 카테고리 문자열을 현재 이름 체계로 옮긴다.
@@ -15134,6 +15393,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                               _openProjectFromDatabase,
                                           onNewProject: _createNewProject,
                                           onRmfConfig: _showRmfConfigDialog,
+                                          onExportBundle: _exportProjectBundle,
+                                          onImportBundle: _importProjectBundle,
                                         ),
                                         const SizedBox(height: 14),
                                         _MapFileStatus(
@@ -22312,6 +22573,8 @@ class _PageHeading extends StatelessWidget {
     required this.onOpenFromDatabase,
     required this.onNewProject,
     required this.onRmfConfig,
+    required this.onExportBundle,
+    required this.onImportBundle,
   });
   final VoidCallback onHelp;
   final VoidCallback onUpload;
@@ -22331,6 +22594,12 @@ class _PageHeading extends StatelessWidget {
 
   /// 프로젝트별 RMF 플릿 설정과 생성된 설정 파일을 본다.
   final VoidCallback onRmfConfig;
+
+  /// 프로젝트를 저장소 안 파일 하나로 내보낸다. git 으로 다른 기계에 옮긴다.
+  final VoidCallback onExportBundle;
+
+  /// pull 로 받은 꾸러미를 이 기계의 MySQL 에 들여놓는다.
+  final VoidCallback onImportBundle;
   @override
   Widget build(BuildContext context) => Row(
     crossAxisAlignment: CrossAxisAlignment.center,
@@ -22415,6 +22684,30 @@ class _PageHeading extends StatelessWidget {
               icon: const Icon(Icons.cloud_upload_outlined, size: 18),
               label: const Text('프로젝트 저장'),
               style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            // 저장소를 통해 다른 기계로 옮기는 길. `프로젝트 저장` 은 이 기계의
+            // MySQL 에만 남으므로, git 으로 넘기려면 이 둘을 거쳐야 한다.
+            OutlinedButton.icon(
+              onPressed: exportEnabled ? onExportBundle : null,
+              icon: const Icon(Icons.outbox_outlined, size: 18),
+              label: const Text('프로젝트 내보내기'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                  vertical: 16,
+                ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: onImportBundle,
+              icon: const Icon(Icons.inbox_outlined, size: 18),
+              label: const Text('프로젝트 가져오기'),
+              style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 15,
                   vertical: 16,

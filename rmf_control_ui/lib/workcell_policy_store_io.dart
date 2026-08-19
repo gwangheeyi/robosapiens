@@ -311,6 +311,32 @@ Future<void> saveWorkcellPolicy(
   await _upsert(stored);
 }
 
+/// 꾸러미로 받은 policy 기본 정보를 보관함에 넣는다. ZIP 은 안 받는다.
+///
+/// 다른 기계에서 내보낸 프로젝트를 가져올 때 쓴다. ZIP 은 수백 MB 라 git 에
+/// 안 올라가므로, 여기서는 **어떤 policy 가 어느 설비에 붙어 있었는지**만
+/// 되살린다. 파일이 없는 것은 [WorkcellPolicy.archiveMissing] 으로 표가 나고,
+/// 그 상태로도 목록에 보여야 사람이 다시 받을 수 있다 — 아예 안 넣으면 무엇을
+/// 받아야 하는지조차 알 수 없다.
+///
+/// 이미 있는 policy 는 덮어쓴다. 같은 저장소를 쓰는 두 기계가 같은 policy 를
+/// 가리키는 것이 정상이다.
+///
+/// ZIP 이 없는 것들을 돌려준다. 부르는 쪽이 사람에게 무엇을 받아야 하는지
+/// 알린다.
+Future<List<WorkcellPolicy>> importWorkcellPolicies(
+  String projectName,
+  List<WorkcellPolicy> policies,
+) async {
+  final missing = <WorkcellPolicy>[];
+  for (final policy in policies) {
+    final stored = _withArchiveState(policy.copyWith(projectName: projectName));
+    await _upsert(stored);
+    if (stored.archiveMissing) missing.add(stored);
+  }
+  return missing;
+}
+
 /// 이 프로젝트에서 쓰도록 붙인다. 공용 policy 는 이 프로젝트 것이 된다.
 Future<void> bindWorkcellPolicy(
   String projectName,

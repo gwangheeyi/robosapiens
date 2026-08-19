@@ -40,3 +40,8 @@ Future<HuggingFacePolicyDownload> downloadHuggingFacePolicy({
   void Function(PolicyInstallProgress progress)? onProgress,
   PolicyInstallCancelToken? cancelToken,
 }) => throw UnsupportedError('이 플랫폼에서는 Hugging Face 다운로드를 지원하지 않습니다.');
+
+Future<List<WorkcellPolicy>> importWorkcellPolicies(
+  String projectName,
+  List<WorkcellPolicy> policies,
+) async => const [];
