@@ -26,6 +26,16 @@ void main() {
     zones: [],
     chargerWaypoint: 'OMX1',
   );
+  const realPinky = RmfProjectRobot(
+    robotId: 'PK-R1',
+    displayName: '실물 핑키',
+    model: 'PINKY-GZ',
+    gzName: 'pinky_real',
+    dataSource: RobotDataSource.real,
+    rosDomainId: 12,
+    zones: ['ambient'],
+    chargerWaypoint: '충전1',
+  );
 
   group('출처 구분', () {
     test('Mock 만 토픽을 쓰지 않는다', () {
@@ -97,6 +107,17 @@ void main() {
   });
 
   group('토픽 이름', () {
+    test('실물 로봇도 등록 이름의 공개 토픽을 쓴다', () {
+      final topics = robotTopics(realPinky);
+      expect(topics.incoming, [
+        '/pinky_real/odom',
+        '/pinky_real/scan',
+        '/pinky_real/imu_raw',
+        '/pinky_real/joint_states',
+      ]);
+      expect(topics.outgoing, ['/pinky_real/cmd_vel']);
+    });
+
     test('이동 로봇은 주행에 필요한 것을 모두 주고받는다', () {
       final topics = robotTopics(pinky);
       expect(topics.incoming, [

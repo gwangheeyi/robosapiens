@@ -45,7 +45,12 @@ String _withRosEnvironment(String command, {int? rosDomainId}) {
 /// 그런데도 `/odom` 을 읽으러 가서, 등록도 Gazebo 도 멀쩡한 OpenMANIPULATOR 가
 /// 앱에서는 영영 Mock 으로만 보였다. 팔이 내는 것은 관절 상태다.
 String _liveTopicFor(RmfProjectRobot robot) =>
-    robot.isMobile ? '/${robot.gzName}/odom' : '/${robot.gzName}/joint_states';
+    robot.dataSource == RobotDataSource.real
+    ? '/${robot.gzName}'
+          '${robot.isMobile ? '/odom' : '/joint_states'}'
+    : (robot.isMobile
+          ? '/${robot.gzName}/odom'
+          : '/${robot.gzName}/joint_states');
 
 /// 로봇 한 대의 위치 토픽을 읽는 자식 프로세스.
 class _RobotFeed {

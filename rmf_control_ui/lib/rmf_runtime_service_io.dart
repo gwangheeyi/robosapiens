@@ -750,7 +750,10 @@ Future<bool> probeTopicHasPublisher({
   final result = await runRosProbe(
     _withRosEnvironment(
       'export ROS_DOMAIN_ID=$rosDomainId; '
-      "ros2 topic info '$topic'",
+      'ros2 daemon stop >/dev/null 2>&1 || true; '
+      "output=\$(ros2 topic info '$topic' 2>&1); status=\$?; "
+      'ros2 daemon stop >/dev/null 2>&1 || true; '
+      'printf "%s\\n" "\$output"; exit \$status',
     ),
     timeout: timeout,
   );

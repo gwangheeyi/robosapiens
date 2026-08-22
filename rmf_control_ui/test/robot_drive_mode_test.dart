@@ -34,7 +34,10 @@ void main() {
     /// 뽑는데, 그러면 제어 오차만큼 그대로 박는다. 한 칸(0.05m)은 남긴다.
     test('강제는 여유를 줄이되 0 으로 두지 않는다', () {
       final forced = costmapForDriveMode(RobotDriveMode.forced);
-      expect(forced.inflationRadius, lessThan(normalDriveCostmap.inflationRadius));
+      expect(
+        forced.inflationRadius,
+        lessThan(normalDriveCostmap.inflationRadius),
+      );
       expect(forced.inflationRadius, greaterThan(0));
       // 코스트맵 한 칸이 0.05m 다. 그보다 작게 두면 뜻이 없다.
       expect(forced.inflationRadius, greaterThanOrEqualTo(0.05));
@@ -86,8 +89,20 @@ local_costmap:
         cost_scaling_factor: 3.0
         inflation_radius: 0.15
       obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
         observation_sources: scan
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+      footprint: '[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]'
+controller_server:
+  ros__parameters:
+    FollowPath:
+      inflation_cost_scaling_factor: 3.0
+      use_collision_detection: true
+    progress_checker:
+      movement_time_allowance: 10.0
+      required_movement_radius: 0.5
 ''';
 
     String yamlFor(RobotDriveMode mode) => rewriteNav2Params(
@@ -106,15 +121,25 @@ local_costmap:
       final yaml = yamlFor(RobotDriveMode.forced);
       expect(yaml, contains('inflation_radius: 0.050'));
       expect(yaml, contains('cost_scaling_factor: 10.000'));
+      expect(yaml, contains('inflation_cost_scaling_factor: 10.000'));
       expect(yaml, contains('footprint_padding: 0.000'));
+      expect(yaml, contains('[[0.045, 0.045], [0.045, -0.045]'));
+      expect(yaml, contains('movement_time_allowance: 20.000'));
+      expect(yaml, contains('required_movement_radius: 0.050'));
     });
 
-    /// **장애물을 무시하는 것이 아니다.** 라이다로 보는 설정을 끄면 정말
-    /// 부딪히면 안 되는 것도 안 보인다.
-    test('강제도 라이다는 그대로 본다', () {
+    test('일반 모드는 실측 footprint와 진행 판정을 유지한다', () {
+      final yaml = yamlFor(RobotDriveMode.normal);
+      expect(yaml, contains('[[0.06, 0.06], [0.06, -0.06]'));
+      expect(yaml, contains('movement_time_allowance: 10.0'));
+      expect(yaml, contains('required_movement_radius: 0.5'));
+    });
+
+    test('강제는 장애물과 충돌 예측을 끈다', () {
       final yaml = yamlFor(RobotDriveMode.forced);
       expect(yaml, contains('observation_sources: scan'));
-      expect(yaml, contains('enabled: True'));
+      expect(yaml, contains('enabled: false'));
+      expect(yaml, contains('use_collision_detection: false'));
     });
 
     test('무엇을 바꿨는지 남긴다', () {
@@ -123,10 +148,7 @@ local_costmap:
         namespace: 'pinky_02',
         driveMode: RobotDriveMode.forced,
       );
-      expect(
-        result.changes.where((line) => line.contains('강제')),
-        isNotEmpty,
-      );
+      expect(result.changes.where((line) => line.contains('강제')), isNotEmpty);
     });
   });
 
@@ -180,10 +202,7 @@ local_costmap:
         zones: ['ambient'],
         allowReversing: true,
       );
-      expect(
-        RmfProjectRobot.fromJson(robot.toJson()).allowReversing,
-        isTrue,
-      );
+      expect(RmfProjectRobot.fromJson(robot.toJson()).allowReversing, isTrue);
       expect(robot.withStation('충전2').allowReversing, isTrue);
     });
 
@@ -235,8 +254,7 @@ controller_server:
       final warning = forcedDriveModeWarning(RobotDriveMode.forced)!;
       expect(warning, contains('사람'));
       expect(warning, contains('실험실'));
-      // 장애물을 무시하는 것이 아니라는 것도 밝힌다.
-      expect(warning, contains('멈춥니다'));
+      expect(warning, contains('자동으로 멈추지 않습니다'));
     });
 
     test('두 모드 다 설명이 있다', () {

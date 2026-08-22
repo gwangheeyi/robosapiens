@@ -1477,8 +1477,19 @@ void main() {
         lessThan(script.indexOf('gwanghee_nav2.launch.xml')),
       );
       expect(script, contains('flock -n 9'));
+      expect(script, contains(r'NAV2_LOCK_FILE="$MAP_DIR/.gwanghee.nav2.lock"'));
+      expect(script, contains('flock -n 8'));
       // 로그는 수집기를 거쳐 파일로 간다. 접는 규칙은 그쪽에 있다.
       expect(script, contains('log_collector.py'));
+    });
+
+    test('Nav2 재시작도 공용 잠금을 잡는다', () {
+      final script = buildProjectRestartScript(
+        mapName: 'gwanghee',
+        mapDirectory: '/maps/gwanghee',
+      );
+      expect(script, contains('.gwanghee.nav2.lock'));
+      expect(script, contains('flock -n 8'));
     });
 
     test('기본으로는 rmf-web 주소를 안 넘긴다', () {

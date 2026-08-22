@@ -132,14 +132,14 @@ void main() {
 
   /// 손으로 칠 때 어긋나던 것이 바로 이 두 가지다.
   group('브링업 명령', () {
-    test('등록된 네임스페이스를 그대로 넣는다', () {
+    test('등록 이름으로 namespaced bringup을 띄운다', () {
       final command = buildRobotBringupCommand(
         robot: robotWith(),
         target: target,
         projectDomainId: 12,
       );
-      expect(command, contains('namespace:=pinky_03'));
       expect(command, contains('bringup_robot_namespaced.launch.xml'));
+      expect(command, contains('namespace:=pinky_03'));
     });
 
     test('프로젝트 도메인을 넣는다', () {
@@ -222,7 +222,7 @@ void main() {
     /// 노드들의 명령줄에는 launch 파일 이름이 안 들어 있고 `__ns:=/<로봇>` 만
     /// 있다. 부모만 죽이면 자식이 고아로 남아 시리얼 포트를 계속 잡고, 그 뒤에
     /// 다시 띄우면 새 브링업이 조용히 실패해 두 벌이 뜬 것처럼 보인다.
-    test('자식 노드까지 잡는다', () {
+    test('직접 실행된 bringup 프로세스를 잡는다', () {
       for (final command in [
         buildRobotBringupCommand(
           robot: robotWith(),
@@ -232,13 +232,7 @@ void main() {
         buildRobotBringupStopCommand(robotWith()),
         buildRobotBringupProbeCommand(robotWith()),
       ]) {
-        // 패턴은 `[_]_ns:=` 로 쪼개 쓴다(제 명령줄을 제가 못 찾게).
-        expect(
-          command,
-          contains('_ns:=/pinky_03'),
-          reason: '네임스페이스로 안 잡으면 자식이 남는다: $command',
-        );
-        expect(command, contains('[_]_ns:='));
+        expect(command, contains('[_]_ns:=/pinky_03'));
       }
     });
 
@@ -328,10 +322,13 @@ void main() {
       }
     });
 
-    test('내리는 명령은 이 로봇 것만 고른다', () {
+    test('내리는 명령은 직접 실행된 bringup을 고른다', () {
       final stop = buildRobotBringupStopCommand(robotWith());
       expect(stop, contains('pinky_03'));
-      expect(buildRobotBringupProbeCommand(robotWith()), contains('pinky_03'));
+      expect(
+        buildRobotBringupProbeCommand(robotWith()),
+        contains('pinky_03'),
+      );
     });
   });
 
@@ -375,10 +372,19 @@ void main() {
 
     /// 사람이 로봇 안에서 손으로 쓰면 이 두 값을 거기에 또 적게 되고, 앱에서
     /// 바꿔도 그 파일은 그대로 남아 조용히 어긋난다.
-    test('namespace 와 도메인을 등록값으로 박는다', () {
+    test('네임스페이스 없이 직접 실행하고 도메인을 등록값으로 박는다', () {
       final unit = unitFor();
+      expect(unit, contains('bringup_robot_namespaced.launch.xml'));
       expect(unit, contains('namespace:=pinky_03'));
       expect(unit, contains('Environment=ROS_DOMAIN_ID=12'));
+      expect(
+        unit,
+        contains('Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4'),
+      );
+      expect(
+        unit,
+        contains('Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET'),
+      );
     });
 
     test('로봇이 제 도메인을 가지면 그것이 이긴다', () {

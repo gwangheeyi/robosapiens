@@ -139,11 +139,14 @@ void main() {
       expect(xml, contains('name="use_sim_time"'));
     });
 
-    test('lifecycle_manager 만은 벽시계로 잰다', () {
-      // 전이 응답을 기다리는 시간 제한이 sim 시계에 걸리면 `Configuring` 에서
-      // 영영 멈춘다. 실제로 map_server 가 거기서 멈춰 있었다.
+    test('lifecycle_manager 도 프로젝트 시계를 쓴다', () {
+      // Nav2 노드와 lifecycle manager가 다른 시계를 쓰면 전이와 TF의 시간이
+      // 어긋난다. 프로젝트가 Gazebo면 sim 시계, 실물이면 벽시계를 쓴다.
       final manager = xml.substring(xml.indexOf('nav2_lifecycle_manager'));
-      expect(manager, contains('name="use_sim_time" value="false"'));
+      expect(
+        manager,
+        contains('name="use_sim_time" value="\$(var use_sim_time)"'),
+      );
     });
 
     /// 라즈베리파이에서 실제로 겪은 일이다. `controller_server` 는 costmap 을

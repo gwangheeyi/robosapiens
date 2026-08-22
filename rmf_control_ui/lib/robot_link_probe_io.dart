@@ -54,6 +54,7 @@ class RobotLinkProbe {
 /// 것처럼 보인다.
 Future<RobotLinkProbe> probeRobotLinks({
   required String namespace,
+  String? topicNamespace,
   Duration flowTimeout = const Duration(seconds: 4),
 }) async {
   // 위젯 테스트에서는 ROS 에 묻지 않는다. 판정 규칙은 robot_link_check 에서
@@ -65,10 +66,18 @@ Future<RobotLinkProbe> probeRobotLinks({
   bool? topicSeen;
   bool? topicFlowing;
   try {
+    // 이전 ROS_DOMAIN_ID나 DDS 설정으로 떠 있던 daemon의 그래프를 재사용하면
+    // 실제 /odom이 있어도 없다고 보일 수 있다. 로컬 그래프를 찾기 전에 끊고,
+    // 이어지는 node/topic 명령이 현재 환경으로 새 daemon을 만들게 한다.
     // DDS 가 어긋나면 이 물음은 영영 안 끝난다. 시한을 넘기면 프로세스까지
     // 끊어야 매달린 `ros2` 가 쌓이지 않는다.
     final graph = await runRosProbe(
-      _withRosEnvironment('ros2 node list; echo "---"; ros2 topic list'),
+      _withRosEnvironment(
+        'ros2 daemon stop >/dev/null 2>&1 || true; '
+        'output=\$(ros2 node list; echo "---"; ros2 topic list); '
+        'status=\$?; ros2 daemon stop >/dev/null 2>&1 || true; '
+        'printf "%s\\n" "\$output"; exit \$status',
+      ),
       timeout: const Duration(seconds: 12),
     );
     final text = '${graph?.stdout ?? ''}';
@@ -83,14 +92,20 @@ Future<RobotLinkProbe> probeRobotLinks({
       //
       // robot_state_publisher 는 spawn.launch.xml 이 띄운다. 이동 로봇이든
       // 설치 로봇이든 마찬가지다. 이것이 있으면 그 launch 가 돌았다는 뜻이다.
+      final effectiveNamespace = topicNamespace ?? namespace;
       nodesUp = nodes
           .split('\n')
           .map((line) => line.trim())
-          .contains('/$namespace/robot_state_publisher');
+          .contains(
+            topicNamespace != null
+                ? '/pinky_bringup'
+                : '/$effectiveNamespace/robot_state_publisher',
+          );
+      final odomTopic = '/$effectiveNamespace/odom';
       topicSeen = topics
           .split('\n')
           .map((line) => line.trim())
-          .contains('/$namespace/odom');
+          .contains(odomTopic);
     }
   } catch (_) {
     // 못 물어봤으면 null 그대로 둔다.
@@ -108,7 +123,7 @@ Future<RobotLinkProbe> probeRobotLinks({
     final echo = await Process.run('bash', [
       '-lc',
       _withRosEnvironment(
-        'timeout $seconds ros2 topic echo /$namespace/odom '
+        'timeout $seconds ros2 topic echo /${topicNamespace ?? namespace}/odom '
         '--field pose.pose.position.x --once',
       ),
     ]).timeout(flowTimeout + const Duration(seconds: 3));

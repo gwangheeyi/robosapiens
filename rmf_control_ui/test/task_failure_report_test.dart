@@ -37,6 +37,13 @@ void main() {
       expect(progress.category, 'armLoad');
     });
 
+    test('Nav2 실패 status를 원인 기록까지 보존한다', () {
+      final progress = RmfTaskProgress.parse(
+        '{"robot":"pinky_01","event":"navigate_failed","status":6}',
+      );
+      expect(progress?.status, 6);
+    });
+
     test('끝난 소식으로 친다', () {
       RmfTaskProgress of(String event) =>
           RmfTaskProgress(robotId: 'pinky_01', event: event);

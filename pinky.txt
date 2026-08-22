@@ -38,3 +38,124 @@ ros2 run pinky_bringup bringup_namespaced
 nmcli dev wifi
 
 pinky_d29d
+
+
+왜 토픽이 안 왔나
+브링업은 정상이었습니다. 문제는 이 무선 AP 가 멀티캐스트를 막는 것이었습니다.
+
+측정한 결과입니다:
+
+시험	결과
+로봇 → PC 유니캐스트	통함
+로봇 → PC 멀티캐스트	막힘
+PC → 로봇 멀티캐스트	막힘
+
+DDS 디스커버리는 기본이 멀티캐스트입니다. 그게 막히니 양쪽 다 멀쩡히 돌면서도 서로를 영영 못 찾습니다. 오류가 하나도 안 나서 라이다나 네임스페이스를 의심하게 되는 유형입니다.
+
+로봇 쪽은 완전히 정상이었습니다 — 로봇 로컬에서 보면 11개 토픽이 다 나오고, odom 30 Hz, scan 10 Hz 로 발행 중입니다. 네임스페이스도 /pinky_02, 도메인도 12로 정확합니다.
+
+해결
+ROS_STATIC_PEERS 로 디스커버리를 유니캐스트로 돌렸습니다. 유니캐스트는 통하니까요.
+
+적용 후 관제 PC에서 확인한 결과:
+
+
+/pinky_02/scan   → 10.05 Hz  수신
+/pinky_02/odom   → 29.92 Hz  수신
+그 외 11개 토픽 전부 도달
+터미널에서 바로 쓰시려면:
+
+
+export ROS_DOMAIN_ID=12
+export ROS_STATIC_PEERS="192.168.0.22"
+로봇 쪽에는 ~/.bashrc 에 넣었지만 위에 적은 따옴표 문제가 있으니 고쳐 주세요.
+
+짚어야 할 것 두 가지
+1. 무선 어댑터 2개가 같은 망에 있습니다
+
+
+wlo1              192.168.0.2    trihouse
+wlx588694f485ac   192.168.0.12   trihouse 1
+같은 192.168.0.0/24 에 경로가 둘이라 DDS 가 어느 쪽으로 나갈지 흔들립니다. 지금은 static peer 로 우회했지만, 한쪽을 내리거나 pinky.txt 메모대로 wlo1 을 FASTCAMPUS_10F 로 되돌리는 편이 깔끔합니다.
+
+2. run_PinkyTest.sh 에는 이 설정이 없습니다
+
+지금 고친 건 터미널 환경뿐입니다. 백엔드를 앱에서 띄우면 비대화형 셸이라 ~/.bashrc 를 안 읽습니다 — 복원한 스크립트 주석에도 그 이유로 ROS_DOMAIN_ID 를 스크립트에 직접 박아 뒀다고 적혀 있습니다. 같은 이유로 ROS_STATIC_PEERS 도 run_PinkyTest.sh 에 박아야 앱에서 띄울 때도 통합니다.
+
+다만 이건 앱이 생성하는 파일이라 손으로 고치면 다음 내보내기 때 덮어써집니다. 제대로 하려면 rmf_project_config.dart 의 생성기에 넣어야 합니다. 그쪽까지 진행할까요?
+
+#방화벽 끄기
+# 방법 A: 테스트를 위해 방화벽을 아예 끄기
+sudo ufw disable
+
+# 방법 B: 방화벽은 켜두고 내부 네트워크(예: 192.168.0.x) 전체 허용하기
+sudo ufw allow from 192.168.0.0/24
+
+
+pinky2 bringup 죽이기
+
+pkill -f "ros2 launch pinky_bringup|bringup_namespaced|sllidar_node|battery_publisher"
+
+
+sleep 3
+setsid env ROS_DOMAIN_ID=12 ROS_STATIC_PEERS=192.168.0.2 \
+  FASTRTPS_DEFAULT_PROFILES_FILE=/home/pinky/fastdds_wlan0.xml \
+  bash -c "source /opt/ros/jazzy/setup.bash; source ~/pinky_pro/install/setup.bash; \
+  exec ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml namespace:=pinky_02" \
+  > ~/bringup.log 2>&1 < /dev/null &
+d
+
+pkill -TERM -u "$USER" -f 'pinky_bringup|robot_state_publisher|sllidar_node|battery_publisher|joint_state_publisher'
+
+ssh 정보를 로컬에 저장하기
+
+1. 공개키를 pinky_01 에 올리기
+ssh-copy-id 는 비밀번호를 한 번 물으므로 터미널에서 직접 치셔야 합니다. 앱은 못 합니다.
+
+
+ssh-copy-id -i ~/.ssh/id_ed25519.pub pinky@192.168.0.21
+계정이 pinky 가 맞는지 확인이 필요합니다. pinky_02 의 bringup.service 가 워크스페이스를 ~/pinky_pro 로 쓰는 걸 보면 로봇 계정 홈 아래인데, 계정 이름 자체는 파일에 안 남아 있습니다.
+
+2. BatchMode 로 되는지 확인
+앱과 똑같은 조건으로 시험해야 의미가 있습니다. 그냥 ssh 로 되는 건 증명이 안 됩니다 — 비밀번호를 물어서 통과했을 수 있으니까요.
+
+
+ssh -o BatchMode=yes -o ConnectTimeout=8 pinky@192.168.0.21 'echo OK'
+OK 가 나와야 앱도 붙습니다.
+
+3. ~/.ssh/config 는 안 만드셔도 됩니다
+앱이 -p, BatchMode, StrictHostKeyChecking 을 명령줄로 직접 넘기고, 주소는 등록에서 user@host 를 만들어 씁니다. config 파일을 안 읽어도 동작합니다. 손으로 ssh pinky01 처럼 짧게 치고 싶으실 때만 편의로 두는 겁니다.
+
+4. known_hosts 도 미리 넣을 필요 없습니다
+StrictHostKeyChecking=accept-new 라 처음 보는 로봇 키를 자동으로 받습니다.
+
+주의할 점 하나
+buildRobotServiceInstallCommand 는 sudo 를 씁니다 — 부팅 자동 시작(systemd 유닛 설치)을 앱에서 하실 거라면, 로봇 계정에 비밀번호 없는 sudo 가 필요합니다. robot_ssh_io.dart:88 주석에도 "비밀번호를 물으면 BatchMode 때문에 바로 끝난다" 고 적혀 있습니다. 로봇에서:
+
+
+echo "pinky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/robosapiens
+SSH 브링업 버튼만 쓰실 거면 이건 필요 없습니다 — sudo 는 서비스 설치에만 씁니다.
+
+192.168.0.21 이 pinky_01 이 맞는지, 계정 이름이 무엇인지 확인되면 1~2번을 바로 짚어드리겠습니다. 참고로 pinky.txt 에 적힌 static peer 는 192.168.0.22 인데, 이게 pinky_02 주소인지 확인해두시면 두 로봇 주소가 정리됩니다.
+
+
+wifi 리스캔
+sudo nmcli device wifi rescan
+
+새 터미널에 **ros2 topic echo /pinky_01/amcl_pose --pose**를 입력했을 때, 좌표 데이터가 정상적으로 찍히기 시작하나요? 데이터 출력이 없다면 초기 위치 입력 단계에서 막힌 것입니다.
+
+현상: RMF가 5초마다 'pickup1' 계획을 반복하며 Nav2 Goal을 전송하지 못함.
+- 원인 분석 결과:
+  1. [DDS 통신 차단]: FastDDS의 Shared Memory(SHM) 락 파일 충돌로 인해 내부 노드 간 통신 불능 상태 직면.
+  2. [센서 부재]: /pinky_01/scan 토픽이 발행되지 않음 확인. 이로 인해 Nav2 위치 추정 불능 및 RMF로의 로봇 위치 피드백 단절 발생.
+- 조치 계획: /dev/shm/ 찌꺼기 삭제 및 데몬 리셋 후, 라이다 센서 하드웨어 단독 기동 테스트 진행 예정.
+
+ros2 run pinky_bringup bringup \
+  --ros-args \
+  -r __ns:=/pinky_01 \
+  -r /odom:=/pinky_01/odom \
+  -r /cmd_vel:=/pinky_01/cmd_vel \
+  -r /joint_states:=/pinky_01/joint_states \
+  -r /battery/voltage:=/pinky_01/battery/voltage
+
+  

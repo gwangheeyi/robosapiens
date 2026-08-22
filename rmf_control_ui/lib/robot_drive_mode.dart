@@ -22,8 +22,7 @@ enum RobotDriveMode {
 
   /// 강제. 여유를 최소로 줄여 지정한 자리까지 밀고 간다.
   ///
-  /// **장애물을 무시하는 것이 아니다.** 라이다는 그대로 보고, 정말 앞을 막고
-  /// 있으면 멈춘다. 다만 "닿을 것 같다" 는 이유로 길을 포기하지 않는다.
+  /// 벽·라이다 장애물·경로 충돌 판정보다 지정 웨이포인트를 우선한다.
   forced,
 }
 
@@ -38,11 +37,10 @@ extension RobotDriveModeStorage on RobotDriveMode {
 
   /// 이 모드가 무엇을 하는지 한 줄로.
   String get summary => switch (this) {
-    RobotDriveMode.normal =>
-      '장애물을 넉넉히 피합니다. 사람이나 다른 로봇이 함께 다니는 곳에 씁니다.',
+    RobotDriveMode.normal => '장애물을 넉넉히 피합니다. 사람이나 다른 로봇이 함께 다니는 곳에 씁니다.',
     RobotDriveMode.forced =>
-      '여유를 줄여 지정한 자리까지 밀고 갑니다. 스치듯 지나도 괜찮은 '
-          '실험실에 씁니다 — 라이다는 그대로 보므로 앞을 막고 있으면 멈춥니다.',
+      '벽·라이다 장애물·충돌 영역을 주행 판단에서 빼고 웨이포인트를 우선합니다. '
+          '충돌해도 손상이 없는 통제된 실험실에서만 씁니다.',
   };
 }
 
@@ -51,16 +49,19 @@ RobotDriveMode parseRobotDriveMode(String? value) =>
     ? RobotDriveMode.forced
     : RobotDriveMode.normal;
 
-/// 이 모드에서 쓸 costmap 값.
+/// 이 모드에서 쓸 Nav2 주행 값.
 ///
-/// 바꾸는 것은 **여유뿐이다.** 라이다로 장애물을 보는 설정(`obstacle_layer` ·
-/// `voxel_layer`)은 건드리지 않는다 — 그것을 끄면 정말 부딪히면 안 되는 것도
-/// 안 보인다.
+/// 라이다로 장애물을 보는 설정(`obstacle_layer` · `voxel_layer`)은 건드리지
+/// 않는다. 강제 모드는 대신 안전 여유와 가상 footprint, 진행 실패 판정을 함께
+/// 줄여 좁은 곳에서도 웨이포인트까지 계획을 이어 간다.
 class DriveModeCostmap {
   const DriveModeCostmap({
     required this.inflationRadius,
     required this.costScalingFactor,
     required this.footprintPadding,
+    required this.footprintScale,
+    required this.movementTimeAllowance,
+    required this.requiredMovementRadius,
   });
 
   /// 장애물 둘레에 비용을 퍼뜨리는 반경 [m].
@@ -75,6 +76,18 @@ class DriveModeCostmap {
 
   /// 발자국에 덧대는 여유 [m].
   final double footprintPadding;
+
+  /// 충돌 판정에 쓰는 가상 footprint 배율.
+  ///
+  /// 일반 모드는 실측 크기 그대로다. 강제 모드는 부딪혀도 괜찮은 시험 환경에서
+  /// 좁은 통로를 planner 가 통과 불가로 잘라 버리지 않도록 조금 줄인다.
+  final double footprintScale;
+
+  /// 이 시간 동안 [requiredMovementRadius]만큼 움직이면 진행 중으로 본다 [s].
+  final double movementTimeAllowance;
+
+  /// 진행 중이라고 판정할 최소 이동 거리 [m].
+  final double requiredMovementRadius;
 }
 
 /// 일반 모드의 값. 벤더 기본값을 그대로 쓴다.
@@ -82,6 +95,9 @@ const DriveModeCostmap normalDriveCostmap = DriveModeCostmap(
   inflationRadius: 0.15,
   costScalingFactor: 3.0,
   footprintPadding: 0.03,
+  footprintScale: 1.0,
+  movementTimeAllowance: 10.0,
+  requiredMovementRadius: 0.5,
 );
 
 /// 강제 모드의 값.
@@ -93,11 +109,17 @@ const DriveModeCostmap normalDriveCostmap = DriveModeCostmap(
 /// `cost_scaling_factor` 를 크게 잡아 비용이 가파르게 떨어지게 한다 — 장애물
 /// 바로 옆만 비싸고 그 밖은 평지처럼 보인다.
 ///
-/// 발자국 여유는 0 이다. 실측한 몸 크기 그대로 판단한다.
+/// 발자국 여유는 0 이고 가상 footprint는 실측의 75%로 줄인다. 실제 충돌 여유가
+/// 거의 없어지므로 부딪혀도 괜찮은 실험 환경에서만 쓴다.
 const DriveModeCostmap forcedDriveCostmap = DriveModeCostmap(
   inflationRadius: 0.05,
   costScalingFactor: 10.0,
   footprintPadding: 0.0,
+  // 12cm 정사각형을 9cm로 본다. 0으로 만들거나 장애물 레이어를 끄지는 않는다.
+  footprintScale: 0.75,
+  // 좁은 곳의 미세 전진·후진을 실패로 오인하지 않는다.
+  movementTimeAllowance: 20.0,
+  requiredMovementRadius: 0.05,
 );
 
 DriveModeCostmap costmapForDriveMode(RobotDriveMode mode) =>
@@ -161,9 +183,9 @@ String? reversingWarning({required bool allowReversing}) {
 /// 로봇이 사람 쪽으로 더 붙는다. 고를 때 그 말을 해 둔다.
 String? forcedDriveModeWarning(RobotDriveMode mode) {
   if (mode != RobotDriveMode.forced) return null;
-  return '강제 모드는 장애물에 스치듯 지나갑니다.\n\n'
-      '벽이 스티로폼이거나 부딪혀도 상하지 않는 실험실에서만 쓰세요. '
+  return '강제 모드는 지도 벽, 라이다 장애물과 Nav2 충돌 예측을 끕니다.\n\n'
+      '로봇이 장애물 앞에서도 자동으로 멈추지 않습니다. 벽이 스티로폼이거나 '
+      '부딪혀도 상하지 않는 통제된 실험실에서만 쓰세요. '
       '사람이나 다른 로봇이 함께 다니는 곳에서는 일반 모드를 씁니다.\n\n'
-      '라이다는 그대로 보므로 앞을 막고 있으면 멈춥니다 — 장애물을 무시하는 '
-      '것이 아니라 여유를 줄이는 것입니다.';
+      '비상정지를 바로 누를 수 있는 상태에서 운행하세요.';
 }

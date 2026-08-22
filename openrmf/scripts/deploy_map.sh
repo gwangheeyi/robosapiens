@@ -200,22 +200,61 @@ ros2 run rmf_building_map_tools building_map_generator gazebo \
 apply_wall_height "$STAGING_DIR/$MAP_NAME.building.yaml" "$STAGING_DIR/generated_models"
 
 log_step 4 "RMF 맵 디렉터리에 설치"
+# 지도 산출물만 덮어쓴다. 나머지는 손대지 않는다.
+#
+# 예전에는 `mv "$TARGET_DIR" "$BACKUP_PATH"` 로 맵 디렉터리를 통째로 치우고
+# staging 을 그 자리에 놓았다. staging 에는 지도 산출물밖에 없으므로, 그
+# 디렉터리에 있던 **다른 모든 것이 배포 한 번에 사라졌다** — run_<맵>.sh 와
+# stop_<맵>.sh, fleet.yaml, robots/, launch 파일, 브리지, nav2_map/ 까지.
+# 백엔드를 띄우는 스크립트 자체가 없어지니 배포 직후 아무것도 안 떴다.
+#
+# 그때 살아남은 것은 아래에 손으로 적어 둔 policies/ 와 policy_bindings.json
+# 둘뿐이었다. 이 방식은 앱이 산출물을 하나 더 만들 때마다 여기에 같이 적어야
+# 하고, 적는 것을 잊으면 조용히 지워진다. 실제로 그렇게 잊혔다.
+#
+# 그래서 반대로 뒤집는다. **지우는 목록이 아니라 덮어쓰는 목록을 적는다.**
+# 배포가 만드는 것은 staging 에 있는 것이 전부이고 그 이름을 우리가 안다.
+# 그 이름만 갈아 끼우면, 나머지는 우리가 알든 모르든 그대로 남는다. 앱이
+# 새 산출물을 추가해도 이 파일을 고칠 필요가 없다.
+#
+# nav2_map/ 은 여기서 만들지 않는다. 앱이 점유격자를 내보내거나 실물 건물에서
+# SLAM 으로 뜬 지도를 넣는 곳이다. 통째로 교체하던 시절엔 이것도 같이 날아갔다
+# — 실물 SLAM 지도는 다시 뜨기 전에는 되살릴 수 없다.
 if [[ -d "$TARGET_DIR" ]]; then
+  # 백업은 그대로 남긴다. 덮어쓰기 전 상태를 되돌릴 수단이 필요하다.
+  # 다만 이제는 옮기는 것이 아니라 복사다 — 원본은 제자리에 둔다.
   BACKUP_PATH="$BACKUP_DIR/${MAP_NAME}-$(date +%Y%m%d-%H%M%S)"
-  mv "$TARGET_DIR" "$BACKUP_PATH"
+  cp -a "$TARGET_DIR" "$BACKUP_PATH"
   echo "기존 맵 백업: $BACKUP_PATH"
+else
+  mkdir -p "$TARGET_DIR"
 fi
-mv "$STAGING_DIR" "$TARGET_DIR"
-# WorkCell policy는 지도 생성물이 아니라 사용자가 등록한 운영 자산이다.
-# 맵 재배포 때 staging 디렉터리로 통째로 교체하더라도 함께 보존한다.
-if [[ -n "${BACKUP_PATH:-}" && -d "$BACKUP_PATH/policies" ]]; then
-  cp -a "$BACKUP_PATH/policies" "$TARGET_DIR/policies"
-  echo "WorkCell policy 보존: $TARGET_DIR/policies"
-fi
-if [[ -n "${BACKUP_PATH:-}" && -f "$BACKUP_PATH/policy_bindings.json" ]]; then
-  cp -a "$BACKUP_PATH/policy_bindings.json" "$TARGET_DIR/policy_bindings.json"
-  echo "WorkCell policy 연결 보존: $TARGET_DIR/policy_bindings.json"
-fi
+
+# staging 이 만든 것만 옮긴다. 이름을 훑어 그대로 쓰므로, 생성 단계가 산출물을
+# 하나 더 만들면 여기도 자동으로 따라간다.
+shopt -s dotglob
+for artifact in "$STAGING_DIR"/*; do
+  [[ -e "$artifact" ]] || continue
+  name="$(basename "$artifact")"
+  # 디렉터리 산출물(generated_models/, nav_graphs/)은 먼저 비운다. 덮어쓰기만
+  # 하면 지난 배포에서 남은 벽 메시가 섞인다 — 벽을 지운 것이 반영되지 않는다.
+  rm -rf "$TARGET_DIR/$name"
+  mv "$artifact" "$TARGET_DIR/$name"
+  echo "지도 산출물 갱신: $name"
+done
+shopt -u dotglob
+rmdir "$STAGING_DIR" 2>/dev/null || true
+
+# 도면 이미지는 이름이 바뀔 수 있다(앱에서 다른 그림을 올리면 그 파일 이름이
+# 그대로 온다). 옛 이름의 그림이 남으면 어느 것이 지금 도면인지 알 수 없으므로
+# 방금 깐 것만 남기고 지운다. 지도 산출물이라 이 정리는 우리 몫이다.
+for stale in "$TARGET_DIR"/*.png "$TARGET_DIR"/*.jpg "$TARGET_DIR"/*.jpeg; do
+  [[ -f "$stale" ]] || continue
+  [[ "$(basename "$stale")" == "$IMAGE_NAME" ]] && continue
+  rm -f "$stale"
+  echo "옛 도면 이미지 삭제: $(basename "$stale")"
+done
+
 STAGING_DIR="$(mktemp -d "$ROOT_DIR/rmf_maps/.${MAP_NAME}.cleanup.XXXXXX")"
 
 stop_pid_file() {

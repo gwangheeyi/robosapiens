@@ -175,6 +175,26 @@ String _requote(String original, String replacement) =>
     ? '"$replacement"'
     : replacement;
 
+/// Nav2의 `[[x, y], ...]` footprint 좌표를 중심 기준으로 줄인다.
+///
+/// 따옴표와 공백 모양은 유지하고 숫자만 바꾼다. 예상한 다각형 모양이 아니면
+/// null을 돌려 원본을 보존한다.
+String? _scaledFootprint(String value, double scale) {
+  final bare = _unquote(value);
+  if (!bare.startsWith('[[') || !bare.endsWith(']]')) return null;
+  final number = RegExp(r'-?(?:\d+(?:\.\d*)?|\.\d+)');
+  var count = 0;
+  final scaled = bare.replaceAllMapped(number, (match) {
+    count++;
+    final parsed = double.tryParse(match.group(0)!);
+    if (parsed == null) return match.group(0)!;
+    return (parsed * scale).toStringAsFixed(3);
+  });
+  // 다각형은 최소 세 점, 즉 x/y 좌표 여섯 개가 있어야 한다.
+  if (count < 6 || count.isOdd) return null;
+  return _requote(value, scaled);
+}
+
 /// [source] 를 [namespace] 로봇 한 대에 맞춰 다시 쓴다.
 ///
 /// [initialX]·[initialY]·[initialYaw] 는 AMCL 이 처음 찍는 자리다. 로봇을 올린
@@ -254,6 +274,8 @@ double recommendedGoalTolerance({
 Nav2ParamsRewrite rewriteNav2Params({
   required String source,
   required String namespace,
+  bool useNamespace = true,
+  bool namespaceFrames = true,
   double? initialX,
   double? initialY,
   double? initialYaw,
@@ -280,10 +302,11 @@ Nav2ParamsRewrite rewriteNav2Params({
   /// 상대 이름이든 절대 이름이든 이 로봇 것으로 만든다.
   String namespaced(String name) {
     final bare = name.startsWith('/') ? name.substring(1) : name;
-    return '/$ns/$bare';
+    return useNamespace ? '/$ns/$bare' : '/$bare';
   }
 
   final lines = source.split('\n');
+  var disableNextObstacleEnabled = false;
   for (var i = 0; i < lines.length; i++) {
     final line = lines[i];
 
@@ -292,8 +315,9 @@ Nav2ParamsRewrite rewriteNav2Params({
     final top = _topLevelKey.firstMatch(line);
     if (top != null) {
       final name = top.group(1)!;
-      out.add('/$ns/$name:');
-      changes.add('$name → /$ns/$name');
+      final nodeName = useNamespace ? '/$ns/$name' : '/$name';
+      out.add('$nodeName:');
+      changes.add('$name → $nodeName');
       continue;
     }
 
@@ -314,8 +338,19 @@ Nav2ParamsRewrite rewriteNav2Params({
       // 형제 키와 같은 칸에 둔다. 한 칸이라도 어긋나면 다른 항목이 된다.
       out
         ..add(line)
-        ..add('${indent}map_topic: $nav2MapTopic');
+        ..add('${indent}map_topic: $nav2MapTopic')
+        ..add('${indent}enabled: ${driveMode != RobotDriveMode.forced}');
       changes.add('static_layer 에 map_topic: $nav2MapTopic 을 넣었습니다');
+      if (driveMode == RobotDriveMode.forced) {
+        changes.add('static_layer 비활성화 (강제 모드: 지도 벽 통과)');
+      }
+      continue;
+    }
+    if (key == 'plugin') {
+      final plugin = _unquote(_split(rest).value);
+      disableNextObstacleEnabled =
+          plugin.endsWith('ObstacleLayer') || plugin.endsWith('VoxelLayer');
+      out.add(line);
       continue;
     }
     if (rest.isEmpty) {
@@ -324,6 +359,25 @@ Nav2ParamsRewrite rewriteNav2Params({
     }
     final parts = _split(rest);
     final bare = _unquote(parts.value);
+
+    if (key == 'enabled' && disableNextObstacleEnabled) {
+      final enabled = driveMode != RobotDriveMode.forced;
+      out.add(
+        '$indent$key: $enabled${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (!enabled) changes.add('장애물 레이어 비활성화 (강제 모드)');
+      disableNextObstacleEnabled = false;
+      continue;
+    }
+
+    if (key == 'use_collision_detection') {
+      final enabled = driveMode != RobotDriveMode.forced;
+      out.add(
+        '$indent$key: $enabled${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      if (!enabled) changes.add('주행 충돌 예측 비활성화 (강제 모드)');
+      continue;
+    }
 
     // ② AMCL 이 처음 찍는 자리. 벤더 파일은 `initial_pose: [0, 0, 0]` 이라고
     //    적어 두었는데, AMCL 은 `initial_pose.x/.y/.z/.yaw` 로 선언한다. 리스트는
@@ -402,12 +456,15 @@ Nav2ParamsRewrite rewriteNav2Params({
     // 핑키의 발자국은 한 변 0.12m 라 반지름이 0.06m 인데 벤더 기본값은
     // 0.15m 였다. 벽에서 15cm 안쪽을 통째로 막힌 것으로 본 셈이라, 좁은
     // 실험실에서는 갈 수 있는 길이 아예 없어진다.
-    if (key == 'inflation_radius' || key == 'cost_scaling_factor' ||
+    if (key == 'inflation_radius' ||
+        key == 'cost_scaling_factor' ||
+        key == 'inflation_cost_scaling_factor' ||
         key == 'footprint_padding') {
       final costmap = costmapForDriveMode(driveMode);
       final wanted = switch (key) {
         'inflation_radius' => costmap.inflationRadius,
-        'cost_scaling_factor' => costmap.costScalingFactor,
+        'cost_scaling_factor' ||
+        'inflation_cost_scaling_factor' => costmap.costScalingFactor,
         _ => costmap.footprintPadding,
       };
       final before = double.tryParse(parts.value.trim());
@@ -422,6 +479,48 @@ Nav2ParamsRewrite rewriteNav2Params({
           '(${driveMode.label} 모드)',
         );
       }
+      continue;
+    }
+
+    // 강제 모드는 실제 크기보다 작은 가상 footprint로 좁은 통로를 계획한다.
+    // 장애물 레이어와 충돌 검사는 그대로 두므로 장애물을 완전히 무시하지는 않는다.
+    if (key == 'footprint' && driveMode == RobotDriveMode.forced) {
+      final costmap = costmapForDriveMode(driveMode);
+      final scaled = _scaledFootprint(parts.value, costmap.footprintScale);
+      if (scaled == null) {
+        out.add(line);
+        warnings.add(
+          'footprint가 `[[x, y], ...]` 모양이 아니어서 강제 모드 폭을 적용하지 못했습니다.',
+        );
+      } else {
+        out.add(
+          '$indent$key: $scaled'
+          '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+        );
+        changes.add(
+          'footprint × ${costmap.footprintScale.toStringAsFixed(2)} '
+          '(강제 모드: 좁은 통로의 웨이포인트 우선)',
+        );
+      }
+      continue;
+    }
+
+    // 좁은 곳에서는 조금씩 자세를 고치는 정상 동작을 stuck으로 판정하면
+    // 복구 행동이 목표 접근을 계속 끊는다. 강제 모드에서는 판정 거리와 시간을
+    // 함께 완화한다.
+    if (driveMode == RobotDriveMode.forced &&
+        (key == 'movement_time_allowance' ||
+            key == 'required_movement_radius')) {
+      final costmap = costmapForDriveMode(driveMode);
+      final wanted = key == 'movement_time_allowance'
+          ? costmap.movementTimeAllowance
+          : costmap.requiredMovementRadius;
+      final after = wanted.toStringAsFixed(3);
+      out.add(
+        '$indent$key: $after'
+        '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
+      );
+      changes.add('$key: ${parts.value.trim()} → $after (강제 모드)');
       continue;
     }
 
@@ -582,7 +681,7 @@ Nav2ParamsRewrite rewriteNav2Params({
         out.add(line);
         continue;
       }
-      final replaced = '$ns/$bare';
+      final replaced = namespaceFrames ? '$ns/$bare' : bare;
       out.add(
         '$indent$key: ${_requote(parts.value, replaced)}'
         '${parts.comment.isEmpty ? '' : ' ${parts.comment}'}',
@@ -626,7 +725,7 @@ Nav2ParamsRewrite rewriteNav2Params({
     // ⑤ 손대지 않은 절대 이름. 벤더 파일이 바뀌면 여기 걸린다.
     if (bare.startsWith('/') &&
         !_sharedTopics.contains(bare) &&
-        !bare.startsWith('/$ns/')) {
+        !(useNamespace && bare.startsWith('/$ns/'))) {
       warnings.add('${i + 1}번째 줄 `$key: $bare` 는 손대지 않았습니다.');
     }
     out.add(line);

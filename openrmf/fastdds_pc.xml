@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- 관제 PC 의 FastDDS 설정.
+
+     문제: 백엔드(노드 42개, DDS 소켓 105개)를 띄우면 로봇의 pinky_bringup
+     참가자만 조용히 사라졌다. 다른 로봇 노드 4개(sllidar · battery ·
+     robot_state · joint_state)는 그대로 보이는데 그것 하나만 빠져서,
+     odom 과 odom->base_footprint TF 가 끊기고 Nav2 local_costmap 이
+     활성화에 실패했다.
+
+     실측: 백엔드를 내리면 20초에 base_footprint 572건, 띄우면 0건.
+
+     원인은 공유메모리 전송이다. 참가자가 많아지면 SHM 세그먼트/포트 락이
+     동나면서 (RTPS_TRANSPORT_SHM open_and_lock_file failed) 일부 참가자가
+     매칭에서 밀려난다. 어차피 로봇은 UDP 로만 닿으므로 SHM 을 끄고 UDP 만
+     쓴다. 같은 기계 안의 노드끼리도 UDP 루프백으로 붙어 문제없다. -->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="udp_only_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

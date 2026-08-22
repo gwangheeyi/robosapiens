@@ -75,6 +75,7 @@ class RmfTaskProgress {
     this.y,
     this.category,
     this.seconds,
+    this.status,
   });
 
   final String robotId;
@@ -103,6 +104,9 @@ class RmfTaskProgress {
   final String? category;
   final double? seconds;
 
+  /// Nav2 action 결과 상태 코드. 실패 원인 분류와 원문 로그 검색에 쓴다.
+  final int? status;
+
   bool get isArrival => event == 'navigate_done' || event == 'action_done';
   bool get isStart => event == 'navigate_start' || event == 'action_start';
 
@@ -121,6 +125,7 @@ class RmfTaskProgress {
         y: (body['y'] as num?)?.toDouble(),
         category: body['category'] as String?,
         seconds: (body['seconds'] as num?)?.toDouble(),
+        status: (body['status'] as num?)?.toInt(),
       );
     } catch (_) {
       return null;

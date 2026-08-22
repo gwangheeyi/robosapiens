@@ -256,6 +256,25 @@ class RmfProjectRobot {
     allowReversing: allowReversing,
   );
 
+  /// 주행 모드만 바꾼 사본.
+  RmfProjectRobot withDriveMode(RobotDriveMode mode) => RmfProjectRobot(
+    robotId: robotId,
+    displayName: displayName,
+    model: model,
+    gzName: gzName,
+    zones: zones,
+    kind: kind,
+    dataSource: dataSource,
+    chargerWaypoint: chargerWaypoint,
+    spawnX: spawnX,
+    spawnY: spawnY,
+    spawnHeading: spawnHeading,
+    rosDomainId: rosDomainId,
+    ssh: ssh,
+    driveMode: mode,
+    allowReversing: allowReversing,
+  );
+
   bool get isMobile => kind == RmfRobotKind.mobile;
 
   /// Gazebo 에 올릴 로봇인가. Mock 은 앱 안에만 있고, 실물은 이미 있다.
@@ -1322,7 +1341,9 @@ String buildDomainBridgeScript({
         '>> "$mapName.log" 2>&1 &',
       )
       ..writeln('echo \$! >> "\$PID_FILE"')
-      ..writeln('echo "  ${robot.robotId}: 도메인 ${robot.rosDomainId} → $projectDomainId"')
+      ..writeln(
+        'echo "  ${robot.robotId}: 도메인 ${robot.rosDomainId} → $projectDomainId"',
+      )
       ..writeln();
   }
   buffer.writeln('echo "도메인 다리를 띄웠습니다. 내리려면 stop 을 붙여 실행합니다."');
@@ -1692,8 +1713,20 @@ else
 fi
 export ROS_DOMAIN_ID="\${ROS_DOMAIN_ID:-$rosDomainId}"
 
+# 고정 peer 없이 같은 서브넷의 DDS 멀티캐스트로만 서로를 찾는다.
+unset ROS_STATIC_PEERS ROS_LOCALHOST_ONLY
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
 MAP_DIR="\${MAP_DIR:-$mapDirectory}"
 APP_ROOT="\${ROBOSAPIENS_ROOT:-\$(cd "\$MAP_DIR/../.." && pwd)}"
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+# 관제 PC에서는 Fast DDS 공유메모리 포트가 노드 수만큼 쌓여 adapter가
+# SIGSEGV로 죽을 수 있다. 로봇과의 통신도 어차피 UDP이므로 UDP 전용 프로필을
+# 기본으로 쓴다. 외부에서 값을 주면 그 선택을 존중한다.
+if [[ -z "\${FASTRTPS_DEFAULT_PROFILES_FILE:-}" && \\
+      -f "\$APP_ROOT/openrmf/fastdds_pc.xml" ]]; then
+  export FASTRTPS_DEFAULT_PROFILES_FILE="\$APP_ROOT/openrmf/fastdds_pc.xml"
+fi
 ROS_SETUP="\${ROS_SETUP:-$rosSetup}"
 RMF_WS="\${RMF_WS:-$rmfWorkspace}"
 PINKY_WS="\${PINKY_WS:-$pinkyWorkspace}"
@@ -1880,6 +1913,7 @@ LOG_MAX_MB="\${LOG_MAX_MB:-200}"
 # 비우거나 같은 월드를 한 벌 더 띄우지 못하게 한다. 잠금 FD는 이 셸이 끝날
 # 때까지 유지된다.
 LOCK_FILE="\$MAP_DIR/.$mapName.run.lock"
+NAV2_LOCK_FILE="\$MAP_DIR/.$mapName.nav2.lock"
 exec 9>"\$LOCK_FILE"
 if ! flock -n 9; then
   echo "$mapName 프로젝트가 이미 실행 중입니다." >&2
@@ -2464,6 +2498,11 @@ echo "[3/3] Nav2 와 RMF 어댑터"
 # 실패하는 첫 이유가 지도가 없어서이기 때문이다.
 watch_map_server &
 watch_fleet_adapter &
+exec 8>"\$NAV2_LOCK_FILE"
+while pgrep -u "\$(id -u)" -f "ros2 launch \$MAP_DIR/${mapName}_nav2.launch.xml" >/dev/null 2>&1 || ! flock -n 8; do
+  echo "Nav2가 이미 실행 중입니다. 중복 실행하지 않고 종료를 기다립니다."
+  sleep 2
+done
 ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml"''' : '''
 sweep_stale_dds_segments
 echo "[1/2] 시뮬레이션 백엔드"
@@ -2551,7 +2590,7 @@ case "\$MODE" in
     echo "[1/2] 로봇 Nav2 를 내립니다 (RMF · Gazebo · 브링업은 그대로)"
     stop_launch "로봇 Nav2" "ros2 launch \$MAP_DIR/${mapName}_nav2.launch.xml"
     echo "[2/2] 다시 띄웁니다"
-    nohup ros2 launch "\$MAP_DIR/${mapName}_nav2.launch.xml" > "\$MAP_DIR/${mapName}_nav2.restart.log" 2>&1 &
+    nohup bash -lc 'exec 8>"\$1"; flock -n 8 || exit 0; exec ros2 launch "\$2"' nav2-restart "\$MAP_DIR/.$mapName.nav2.lock" "\$MAP_DIR/${mapName}_nav2.launch.xml" > "\$MAP_DIR/${mapName}_nav2.restart.log" 2>&1 &
     echo "완료. lifecycle 이 다 켜지기까지 10초쯤 걸립니다."
     ;;
   *)
@@ -2811,7 +2850,14 @@ echo "$mapName 프로젝트 프로세스를 정리했습니다."
 /// 되어 파라미터가 하나도 안 붙는다(`docs/MULTI_ROBOT_NAMESPACES.md` 함정 1).
 ///
 /// `map_server` 는 여기 없다. 같은 건물이므로 **월드에 하나만** 띄운다.
-String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
+String buildRobotNav2LaunchXml(
+  RmfProjectRobot robot,
+  String mapName, {
+  int projectDomainId = defaultRosDomainId,
+}) {
+  final namespace = robot.gzName;
+  final odomFrame = '${robot.gzName}/odom';
+  final baseFrame = '${robot.gzName}/base_footprint';
   // lifecycle_manager 가 이 차례로 켠다. costmap 을 쓰는 것보다 그것을 만드는
   // 쪽이 먼저 서야 한다.
   const managed = [
@@ -2847,9 +2893,11 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('  <arg name="use_sim_time" default="${robot.runsInGazebo}"/>')
     ..writeln('  <group>')
     // 한 번만 건다. 아래 노드에는 네임스페이스를 따로 걸지 않는다.
-    ..writeln('    <push-ros-namespace namespace="${robot.gzName}"/>')
+    ..write(
+      '    <push-ros-namespace namespace="$namespace"/>\n',
+    )
     ..writeln('')
-    ..writeln('    <!-- 라이다로 제 위치를 잡는다. map → ${robot.gzName}/odom -->')
+    ..writeln('    <!-- 라이다로 제 위치를 잡는다. map → $odomFrame -->')
     ..writeln('    <node pkg="nav2_amcl" exec="amcl" name="amcl"')
     ..writeln('          output="screen">')
     ..writeln('      <param from="\$(dirname)/nav2_params.yaml"/>')
@@ -2881,7 +2929,7 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
       // 붙는 일이 있어 여기서도 못 박는다.
       buffer.writeln(
         '      <param name="robot_base_frame" '
-        'value="${robot.gzName}/base_footprint"/>',
+        'value="$baseFrame"/>',
       );
     }
     // controller와 recovery behavior의 원시 속도는 smoother 입력으로 보낸다.
@@ -2903,10 +2951,9 @@ String buildRobotNav2LaunchXml(RmfProjectRobot robot, String mapName) {
     ..writeln('    <!-- 위 노드들을 차례로 켜고 끈다. -->')
     ..writeln('    <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"')
     ..writeln('          name="lifecycle_manager_navigation" output="screen">')
-    // 관리자는 sim 시간을 쓰지 않는다. 전이 응답을 기다리는 시간 제한이 sim
-    // 시계에 걸리면 `Configuring` 에서 영영 멈춘다. 관리자가 하는 일은 순서대로
-    // 켜고 끄는 것뿐이라 벽시계로 재는 것이 맞다.
-    ..writeln('      <param name="use_sim_time" value="false"/>')
+    // Nav2 노드와 같은 clock을 써야 lifecycle 전이와 costmap의 TF 시간이
+    // 어긋나지 않는다. 실물은 launch 인자가 false라 벽시계를 계속 쓴다.
+    ..writeln('      <param name="use_sim_time" value="\$(var use_sim_time)"/>')
     ..writeln('      <param name="autostart" value="true"/>')
     // 라즈베리파이에서 `controller_server` 는 costmap 을 만드느라 기동이
     // 무겁다. 그 사이 전이 응답이 늦으면 관리자가 실패로 보고 **뒤의 노드는
@@ -3241,11 +3288,15 @@ String buildNav2FleetAdapterScript({
   required String mapName,
   required String fleetName,
   required List<RmfProjectRobot> robots,
+  int projectDomainId = defaultRosDomainId,
 }) {
   final navigating = navigatingRobots(robots);
   // RMF 가 아는 이름(로봇 ID)과 ROS 네임스페이스(Gazebo 이름)는 다르다.
   final mapping = navigating
-      .map((robot) => "    '${robot.robotId}': '${robot.gzName}',")
+      .map(
+        (robot) =>
+            "    '${robot.robotId}': '${robot.gzName}',",
+      )
       .join('\n');
   return '''#!/usr/bin/env python3
 """$mapName 프로젝트의 RMF ↔ Nav2 어댑터.
@@ -3351,8 +3402,9 @@ class RobotAdapter:
         self.goal_generation = 0
         self.warned = False
         self.lock = threading.Lock()
+        self.prefix = f'/{namespace}' if namespace else ''
         self.nav = ActionClient(
-            node, NavigateToPose, f'/{namespace}/navigate_to_pose')
+            node, NavigateToPose, f'{self.prefix}/navigate_to_pose')
         request_qos = QoSProfile(
             depth=10,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -3413,7 +3465,7 @@ class RobotAdapter:
         if not self.nav.wait_for_server(timeout_sec=5.0):
             self.node.get_logger().error(
                 f'[{self.name}] Nav2 가 없습니다. '
-                f'/{self.namespace}/navigate_to_pose 를 확인하세요.')
+                f'{self.prefix}/navigate_to_pose 를 확인하세요.')
             self.finish(generation, execution)
             return
 
@@ -3658,8 +3710,9 @@ class RobotAdapter:
     def read_state(self):
         """TF 에서 지금 자리를 읽는다. AMCL 이 map -> odom 을 낸다."""
         try:
+            base_frame = f'{self.namespace}/base_footprint'
             tf = self.tf_buffer.lookup_transform(
-                'map', f'{self.namespace}/base_footprint',
+                'map', base_frame,
                 rclpy.time.Time(), timeout=Duration(seconds=0.2))
         except Exception:
             return None
@@ -4879,14 +4932,18 @@ String buildRobotReadme(
       ..writeln('source /opt/ros/jazzy/setup.bash')
       ..writeln('source ~/pinky_pro/install/setup.bash')
       ..writeln()
-      ..writeln('ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml \\')
+      ..writeln(
+        'ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml \\',
+      )
       ..writeln('  namespace:=${robot.gzName}')
       ..writeln('```')
       ..writeln()
       ..writeln('```bash')
       ..writeln('# ② Nav2 (①이 값을 내기 시작한 뒤에 띄웁니다)')
       ..writeln('export ROS_DOMAIN_ID=$rosDomainId')
-      ..writeln('ros2 launch \$MAP_DIR/${robotDirectoryName(robot)}/nav2.launch.xml')
+      ..writeln(
+        'ros2 launch \$MAP_DIR/${robotDirectoryName(robot)}/nav2.launch.xml',
+      )
       ..writeln('```')
       ..writeln()
       ..writeln('### 잘 떴는지 보기')
@@ -4899,7 +4956,9 @@ String buildRobotReadme(
       ..writeln('ros2 topic echo /${robot.gzName}/odom --once | head -5')
       ..writeln()
       ..writeln('# Nav2 가 다 켜졌는가 (전부 active 여야 합니다)')
-      ..writeln('for n in amcl controller_server planner_server bt_navigator; do')
+      ..writeln(
+        'for n in amcl controller_server planner_server bt_navigator; do',
+      )
       ..writeln('  echo -n "\$n: "; ros2 lifecycle get /${robot.gzName}/\$n')
       ..writeln('done')
       ..writeln()

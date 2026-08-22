@@ -1,16 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform, ProcessSignal, exit;
+import 'dart:io' show File, Platform, ProcessSignal, RandomAccessFile, exit;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart' show listEquals, kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'deployment_service.dart';
+import 'drive_learning_page.dart';
+import 'drive_learning_store.dart';
 import 'database_migration.dart';
 import 'deploy_preflight.dart';
 import 'deployed_map_service.dart';
@@ -47,6 +49,7 @@ import 'order_trigger.dart';
 import 'operations_log_models.dart';
 import 'robot_data_source.dart';
 import 'robot_drive_mode.dart';
+import 'robot_drive_mode_runner.dart';
 import 'grid_map_settings.dart';
 import 'readiness_check.dart';
 import 'robot_link_probe.dart';
@@ -55,6 +58,8 @@ import 'robot_model_store.dart';
 import 'robot_sensor_feed.dart';
 import 'robot_sensor_models.dart';
 import 'robot_spawn_check.dart';
+import 'robot_stop.dart';
+import 'robot_stop_runner.dart';
 import 'robot_telemetry_bridge.dart';
 import 'robot_telemetry_models.dart';
 import 'ros2_inspect_page.dart';
@@ -715,13 +720,14 @@ class _ControlDashboardState extends State<ControlDashboard> {
   static const _menuRobots = 3;
   // 작업 관리가 로봇 관리 바로 밑이다. 둘을 오가며 쓰는 일이 가장 잦다.
   static const _menuTasks = 4;
-  static const _menuPolicies = 5;
-  static const _menuRobotModels = 6;
-  static const _menuRos2 = 7;
-  static const _menuFiles = 8;
-  static const _menuLog = 9;
-  static const _menuAnalytics = 10;
-  static const _menuProjectAnalytics = 11;
+  static const _menuDriveLearning = 5;
+  static const _menuPolicies = 6;
+  static const _menuRobotModels = 7;
+  static const _menuRos2 = 8;
+  static const _menuFiles = 9;
+  static const _menuLog = 10;
+  static const _menuAnalytics = 11;
+  static const _menuProjectAnalytics = 12;
 
   int _selectedMenu = _menuDashboard;
 
@@ -799,7 +805,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     _exitListener = AppLifecycleListener(onExitRequested: _handleExitRequest);
     // 터미널 Ctrl+C는 SIGINT다. 화면의 복사 단축키는 건드리지 않고 OS 신호만
     // 받아 창 X와 Ctrl+X가 쓰는 것과 같은 백엔드 정리를 수행한다.
-    if (Platform.isLinux || Platform.isMacOS) {
+    if (!kIsWeb && (Platform.isLinux || Platform.isMacOS)) {
       _interruptSubscription = ProcessSignal.sigint.watch().listen(
         (_) => unawaited(_handleInterruptSignal()),
       );
@@ -5574,10 +5580,15 @@ class _ControlDashboardState extends State<ControlDashboard> {
   List<RmfProjectRobot> _withMapSpawnPoints(List<RmfProjectRobot> robots) {
     final scale = _metersPerPixel;
     if (scale == null) return robots;
-    return robotsWithMapSpawnPoints(robots, (robot) {
-      final station = _stationPixelFor(robot);
-      return station == null ? null : (dx: station.dx, dy: station.dy);
-    }, scale, headingRadiansOf: _stationHeadingRadiansFor);
+    return robotsWithMapSpawnPoints(
+      robots,
+      (robot) {
+        final station = _stationPixelFor(robot);
+        return station == null ? null : (dx: station.dx, dy: station.dy);
+      },
+      scale,
+      headingRadiansOf: _stationHeadingRadiansFor,
+    );
   }
 
   /// 로봇이 선 자리 Waypoint 에 적힌 방향 [라디안]. 안 정해 두었으면 null.
@@ -5597,8 +5608,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     // 해당하는 각도를 못 찾아 방향만 조용히 빠진다.
     final headings = _waypointTypes.isNotEmpty
         ? _waypointDockHeadings
-        : (_robotDeployedMap?.waypointDockHeadings ??
-              const <Offset, double>{});
+        : (_robotDeployedMap?.waypointDockHeadings ?? const <Offset, double>{});
     final degrees = headings[station];
     if (degrees == null) return null;
     return degrees * math.pi / 180;
@@ -6348,6 +6358,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
 
   /// 어댑터가 내는 작업 진행 소식. RMF 가 모는 작업의 단계를 이것이 넘긴다.
   StreamSubscription<RmfTaskProgress>? _rmfProgressSubscription;
+  final Map<String, DateTime> _driveLearningStarts = {};
+  final Map<String, Map<String, int>> _driveLearningLogOffsets = {};
 
   Future<void> _syncTelemetry() async {
     _telemetrySubscription ??= RobotTelemetryBridge.instance.updates.listen((
@@ -6808,9 +6820,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
       // 막혔다" 로 적으면, 백엔드가 뜨는 중인 몇 초 동안 빨간 줄이 여덟 개
       // 뜬다 — 어댑터 칸이 이미 그 상태를 다루고 있다.
       if (status.allUnreachable) continue;
-      found[robot.robotId] = [
-        for (final node in status.notActive) node.name,
-      ];
+      found[robot.robotId] = [for (final node in status.notActive) node.name];
     }
     if (!mounted) return;
     setState(() {
@@ -7041,8 +7051,10 @@ class _ControlDashboardState extends State<ControlDashboard> {
             .firstOrNull;
         if (robot != null) await _showWorkcellPolicies(robot);
       },
-      initialPoseStation: () => _initialPoseStationFor(robotId),
-      onSendInitialPose: () => _sendInitialPose(robotId),
+      initialPoseWaypoints: _initialPoseWaypointNames,
+      initialPoseStation: (name) =>
+          _initialPoseStationFor(robotId, stationName: name),
+      onSendInitialPose: (name) => _sendInitialPose(robotId, stationName: name),
       nudgeReadiness: () {
         final robot = _fleetRobots
             .where((item) => item.robotId == robotId)
@@ -7064,6 +7076,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
       },
       onNudge: (kind, meters, degrees) =>
           _nudgeRobot(robotId, kind, meters, degrees),
+      onStopRobot: () => _stopRobot(robotId),
+      onDriveModeChanged: (mode) => _changeRobotDriveMode(robotId, mode),
       onCaptureWaypoint: () => _captureWaypointAtRobot(robotId),
       sshReadiness: () {
         final robot = _fleetRobots
@@ -7082,6 +7096,79 @@ class _ControlDashboardState extends State<ControlDashboard> {
       autostartStatus: () => _readRobotAutostart(robotId),
     ),
   );
+
+  /// 상세 화면에서 주행 모드만 바꾸고 그 로봇의 Nav2에 즉시 반영한다.
+  Future<bool> _changeRobotDriveMode(
+    String robotId,
+    RobotDriveMode mode,
+  ) async {
+    final index = _fleetRobots.indexWhere((robot) => robot.robotId == robotId);
+    if (index < 0) return false;
+    final before = _fleetRobots[index];
+    if (before.driveMode == mode) return true;
+    if (mode == RobotDriveMode.forced) {
+      final warning = forcedDriveModeWarning(mode);
+      final confirmed = await confirmWarningDialog(
+        context,
+        title: '강제모드로 바꿀까요?',
+        message: '$warning\n\n해당 로봇의 Nav2에만 즉시 반영합니다. 브링업과 전체 백엔드는 재시작하지 않습니다.',
+        confirmLabel: '강제모드 적용',
+      );
+      if (!confirmed || !mounted) return false;
+    }
+    final updated = before.withDriveMode(mode);
+    setState(() {
+      final robots = [..._fleetRobots];
+      robots[index] = updated;
+      _fleetRobots = robots;
+    });
+    await _saveSettingToOpenProject(
+      label: '로봇 주행 모드',
+      detail: '$robotId · ${mode.label}',
+    );
+    final directory = _deployedMapDirectory;
+    if (directory == null) {
+      setState(() {
+        final robots = [..._fleetRobots];
+        robots[index] = before;
+        _fleetRobots = robots;
+      });
+      return false;
+    }
+    final yaml = _rewriteNav2ParamsForRobots().params[robotId];
+    if (yaml == null) {
+      setState(() {
+        final robots = [..._fleetRobots];
+        robots[index] = before;
+        _fleetRobots = robots;
+      });
+      return false;
+    }
+    final result = await applyRobotDriveMode(
+      mapDirectory: directory,
+      robotDirectory: robotDirectoryName(updated),
+      namespace: updated.gzName,
+      nav2Params: yaml,
+    );
+    if (!result.ok) {
+      setState(() {
+        final robots = [..._fleetRobots];
+        robots[index] = before;
+        _fleetRobots = robots;
+      });
+      await _saveSettingToOpenProject(
+        label: '로봇 주행 모드 복구',
+        detail: '$robotId · ${before.driveMode.label}',
+      );
+    }
+    if (!mounted) return result.ok;
+    await showWaypointErrorDialog(
+      context,
+      title: result.ok ? '${mode.label}모드 적용 완료' : '주행 모드 적용 실패',
+      message: result.output,
+    );
+    return result.ok;
+  }
 
   /// 로봇을 켜자마자 브링업이 뜨게 한다.
   ///
@@ -7104,9 +7191,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
       return;
     }
     final label = '${robot.robotId} · ${robot.displayName}';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$label 에 자동 실행을 설치하는 중입니다…')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$label 에 자동 실행을 설치하는 중입니다…')));
     final result = await installRobotBringupService(
       robot: robot,
       target: target,
@@ -7282,9 +7369,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final label = '${robot.robotId} · ${robot.displayName}';
     final what = nudgeLabel(kind: kind, meters: meters, degrees: degrees);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$label 을 $what 움직이는 중…')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$label 을 $what 움직이는 중…')));
     final result = await nudgeRobot(
       namespace: robot.gzName,
       kind: kind,
@@ -7314,6 +7401,85 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 진행 중인 작업과 Nav2 목표를 끊고 속도를 0으로 만든다.
+  Future<void> _stopRobot(String robotId) async {
+    final registered = _fleetRobots
+        .where((item) => item.robotId == robotId)
+        .firstOrNull;
+    final robot = _mockRobots.where((item) => item.id == robotId).firstOrNull;
+    final label = registered == null
+        ? robotId
+        : '${registered.robotId} · ${registered.displayName}';
+
+    // RMF 작업을 먼저 취소한다. 이것을 남기면 0 속도를 보낸 직후 adapter가
+    // 같은 목적지를 다시 Nav2에 넣어 로봇이 재출발한다.
+    final rmfTaskId = robot?.rmfTaskId;
+    if (rmfTaskId != null) {
+      final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+      await RmfTaskBridge.instance.submit(
+        mapDirectory: _mapDirectoryFor(mapName),
+        mapName: mapName,
+        requestJson: buildCancelTaskRequest(rmfTaskId),
+        rosDomainId: registered?.rosDomainId ?? _rosDomainId,
+      );
+    }
+
+    final result = registered == null || !registered.dataSource.usesTopics
+        ? (ok: true, output: '')
+        : await stopRobotMotion(
+            namespace: registered.gzName,
+            rosDomainId: registered.rosDomainId ?? _rosDomainId,
+          );
+    if (!mounted) return;
+
+    setState(() {
+      if (robot != null) {
+        robot
+          ..moving = false
+          ..returningToSpawn = false
+          ..activeTaskId = null
+          ..rmfTaskId = null
+          ..rmfGoalX = null
+          ..rmfGoalY = null
+          ..targetWaypoint = null
+          ..previousWaypoint = null
+          ..assignedRoute.clear();
+      }
+      for (final task in _mockTasks.where(
+        (item) =>
+            item.robotId == robotId &&
+            (item.status == _MockTaskStatus.active ||
+                item.status == _MockTaskStatus.queued),
+      )) {
+        task
+          ..status = _MockTaskStatus.cancelled
+          ..completedAt = DateTime.now();
+        for (final step in task.steps.where(
+          (item) =>
+              item.status == _TaskStepStatus.active ||
+              item.status == _TaskStepStatus.pending,
+        )) {
+          step
+            ..status = _TaskStepStatus.cancelled
+            ..remainingSeconds = 0;
+        }
+      }
+    });
+    unawaited(_saveMockTasks());
+
+    if (result.ok) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(robotStoppedMessage(label))));
+    } else {
+      await showWaypointErrorDialog(
+        context,
+        title: '정지 명령을 보내지 못했습니다',
+        message: robotStopFailedMessage(label, result.output),
+      );
+    }
+  }
+
   /// 로봇에 SSH 로 들어가 브링업을 띄운다.
   ///
   /// 지금까지는 사람이 로봇에 들어가 손으로 launch 를 쳤고, 그 자리에서
@@ -7337,9 +7503,9 @@ class _ControlDashboardState extends State<ControlDashboard> {
     }
     final label = '${robot.robotId} · ${robot.displayName}';
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$label 의 브링업을 띄우는 중입니다…')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$label 의 브링업을 띄우는 중입니다…')));
     final result = await startRobotBringup(
       robot: robot,
       target: target,
@@ -7412,11 +7578,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
     double? degrees,
     String topic,
   })
-  _initialPoseStationFor(String robotId) {
+  _initialPoseStationFor(String robotId, {String? stationName}) {
     final robot = _fleetRobots
         .where((item) => item.robotId == robotId)
         .firstOrNull;
-    final station = (robot?.chargerWaypoint ?? '').trim();
+    final station = (stationName ?? robot?.chargerWaypoint ?? '').trim();
     final topic = initialPoseTopic(robot?.gzName ?? robotId);
     if (robot == null) {
       return (
@@ -7428,16 +7594,28 @@ class _ControlDashboardState extends State<ControlDashboard> {
         topic: topic,
       );
     }
-    final pixel = _stationPixelFor(robot);
+    final names = _waypointTypes.isNotEmpty
+        ? _waypointNames
+        : (_robotDeployedMap?.waypointNames ?? const <Offset, String>{});
+    final pixel = names.entries
+        .where((entry) => entry.value.trim() == station)
+        .map((entry) => entry.key)
+        .firstOrNull;
     final world = pixel == null ? null : _rmfMetersFromPixel(pixel);
     final readiness = checkInitialPoseReadiness(
       robot: robot,
       worldKnown: world != null,
+      stationName: station,
     );
     // 방향은 자리에 적힌 것이 먼저다. 자리에 없으면 등록에 저장된
     // `spawn_heading` 을 쓴다 — 배포된 nav2_params 의 initial_pose 와 같은
     // 값이라야 두 경로가 어긋나지 않는다.
-    final radians = _stationHeadingRadiansFor(robot) ?? robot.spawnHeading;
+    final headings = _waypointTypes.isNotEmpty
+        ? _waypointDockHeadings
+        : (_robotDeployedMap?.waypointDockHeadings ?? const <Offset, double>{});
+    final radians = pixel == null
+        ? 0.0
+        : (headings[pixel] ?? 0.0) * math.pi / 180;
     return (
       readiness: readiness,
       stationName: station.isEmpty ? '미지정' : station,
@@ -7448,16 +7626,28 @@ class _ControlDashboardState extends State<ControlDashboard> {
     );
   }
 
+  /// 초기 위치로 선택할 수 있는 이름 있는 Waypoint.
+  List<String> _initialPoseWaypointNames() {
+    final names = _waypointTypes.isNotEmpty
+        ? _waypointNames
+        : (_robotDeployedMap?.waypointNames ?? const <Offset, String>{});
+    final result = {
+      for (final name in names.values)
+        if (name.trim().isNotEmpty) name.trim(),
+    }.toList()..sort();
+    return result;
+  }
+
   /// 로봇에게 "너는 지금 자리 Waypoint 에 있다" 고 알린다.
   ///
   /// **로봇은 안 움직인다.** 보내는 것은 좌표뿐이라, 실제 로봇이 다른 자리에
   /// 있으면 그 거짓말을 믿은 채로 경로를 짠다. 그래서 보내기 전에 사람에게
   /// 로봇을 그 자리에 놓았는지 묻는다.
-  Future<void> _sendInitialPose(String robotId) async {
+  Future<void> _sendInitialPose(String robotId, {String? stationName}) async {
     final robot = _fleetRobots
         .where((item) => item.robotId == robotId)
         .firstOrNull;
-    final station = _initialPoseStationFor(robotId);
+    final station = _initialPoseStationFor(robotId, stationName: stationName);
     if (robot == null ||
         !canSendInitialPose(station.readiness) ||
         station.x == null ||
@@ -8208,6 +8398,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
           ..rmfGoalY = event.y
           ..moving = true;
       });
+      _driveLearningStarts['${event.robotId}/${task.id}'] = DateTime.now();
+      _rememberDriveLogOffsets(event.robotId, task.id);
       return;
     }
     if (event.event == 'action_start') {
@@ -8238,6 +8430,18 @@ class _ControlDashboardState extends State<ControlDashboard> {
       final what = event.event == 'action_failed'
           ? '${step.label} 을(를) 설비가 끝내지 못했습니다'
           : '${step.label} 목적지로 가지 못했습니다';
+      if (event.event == 'navigate_failed') {
+        unawaited(
+          _recordDriveLearning(
+            robot,
+            task,
+            task.currentStepIndex,
+            success: false,
+            nav2Status: event.status,
+            failureReason: what,
+          ),
+        );
+      }
       setState(
         () => _failRobotTask(
           robot,
@@ -8262,7 +8466,200 @@ class _ControlDashboardState extends State<ControlDashboard> {
       goalY: robot.rmfGoalY,
     );
     if (matched == null) return;
+    unawaited(_recordDriveLearning(robot, task, matched, success: true));
     setState(() => _completeTaskStepsThrough(robot, task, matched));
+  }
+
+  Future<void> _recordDriveLearning(
+    _MockRobot robot,
+    _MockTask task,
+    int stepIndex, {
+    required bool success,
+    int? nav2Status,
+    String? failureReason,
+  }) async {
+    final goalX = robot.rmfGoalX;
+    final goalY = robot.rmfGoalY;
+    if (goalX == null || goalY == null) return;
+    final registered = _fleetRobots
+        .where((r) => r.robotId == robot.id)
+        .firstOrNull;
+    if (registered == null) return;
+    final actual = _rmfMetersFromPixel(robot.position);
+    if (actual == null) return;
+    final pose = _telemetry.poses[robot.id];
+    final step = stepIndex >= 0 && stepIndex < task.steps.length
+        ? task.steps[stepIndex]
+        : null;
+    final destination = step?.destination;
+    final goalHeadingDegrees = destination == null
+        ? null
+        : (_robotDeployedMap?.waypointDockHeadings[destination] ??
+              _waypointDockHeadings[destination]);
+    final goalHeading = goalHeadingDegrees == null
+        ? null
+        : goalHeadingDegrees * math.pi / 180;
+    final finished = DateTime.now();
+    final key = '${robot.id}/${task.id}';
+    final started = _driveLearningStarts.remove(key) ?? task.createdAt;
+    final tolerance = _goalTolerance;
+    final errorLog = success ? null : await _driveFailureLog(robot.id, key);
+    if (success) _driveLearningLogOffsets.remove(key);
+    final diagnosedReason = success
+        ? null
+        : _diagnoseDriveFailure(
+            errorLog!,
+            fallback: failureReason ?? 'Nav2 주행 실패',
+            status: nav2Status,
+          );
+    final sample = DriveLearningSample(
+      mapName: _robotDeployedMap?.summary.name ?? _mapName,
+      taskId: task.id,
+      taskName: task.name,
+      robotId: robot.id,
+      waypointName: step?.destinationName ?? '',
+      driveMode: registered.driveMode.storageValue,
+      startedAt: started,
+      finishedAt: finished,
+      linearVelocity: _fleetSettings.linearVelocity,
+      linearAcceleration: _fleetSettings.linearAcceleration,
+      angularVelocity: _fleetSettings.angularVelocity,
+      angularAcceleration: _fleetSettings.angularAcceleration,
+      goalTolerance: tolerance,
+      goalX: goalX,
+      goalY: goalY,
+      actualX: actual.dx,
+      actualY: actual.dy,
+      positionError: math.sqrt(
+        math.pow(actual.dx - goalX, 2) + math.pow(actual.dy - goalY, 2),
+      ),
+      goalHeading: goalHeading,
+      actualHeading: pose?.heading,
+      headingError: goalHeading == null || pose == null
+          ? null
+          : angularError(pose.heading, goalHeading),
+      success: success,
+      nav2Status: nav2Status,
+      failureReason: diagnosedReason,
+      errorLog: errorLog,
+    );
+    try {
+      await saveDriveLearningSample(sample);
+    } catch (error) {
+      if (mounted) setState(() => _processingWarning = '주행학습 기록 저장 실패: $error');
+    }
+  }
+
+  void _rememberDriveLogOffsets(String robotId, String taskId) {
+    final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+    final directory = _mapDirectoryFor(mapName);
+    _driveLearningLogOffsets['$robotId/$taskId'] = {
+      for (final suffix in ['err.log', 'log'])
+        suffix: File('$directory/$mapName.$suffix').existsSync()
+            ? File('$directory/$mapName.$suffix').lengthSync()
+            : 0,
+    };
+  }
+
+  Future<String> _driveFailureLog(String robotId, String key) async {
+    final mapName = _robotDeployedMap?.summary.name ?? _mapName;
+    final directory = _mapDirectoryFor(mapName);
+    final collected = <String>[];
+    for (final suffix in ['err.log', 'log']) {
+      final file = File('$directory/$mapName.$suffix');
+      if (!await file.exists()) continue;
+      RandomAccessFile? handle;
+      try {
+        handle = await file.open();
+        final length = await handle.length();
+        const maxBytes = 128 * 1024;
+        final remembered = _driveLearningLogOffsets[key]?[suffix] ?? length;
+        final start = math.max(
+          0,
+          math.min(length, math.max(remembered, length - maxBytes)),
+        );
+        await handle.setPosition(start);
+        final text = utf8.decode(
+          await handle.read(length - start),
+          allowMalformed: true,
+        );
+        final relevant = text.split('\n').where((line) {
+          final lower = line.toLowerCase();
+          final isProblem =
+              lower.contains('error') ||
+              lower.contains('failed') ||
+              lower.contains('abort') ||
+              lower.contains('timeout') ||
+              lower.contains('cannot') ||
+              lower.contains('invalid frame') ||
+              lower.contains('목적지에 닿지 못');
+          return isProblem &&
+              (line.contains(robotId) ||
+                  lower.contains('nav2') ||
+                  lower.contains('lifecycle') ||
+                  lower.contains('controller_server') ||
+                  lower.contains('bt_navigator'));
+        }).toList();
+        collected.addAll(
+          relevant.length > 40
+              ? relevant.sublist(relevant.length - 40)
+              : relevant,
+        );
+      } catch (error) {
+        collected.add('로그 읽기 실패 ($suffix): $error');
+      } finally {
+        await handle?.close();
+      }
+    }
+    _driveLearningLogOffsets.remove(key);
+    return collected.toSet().join('\n');
+  }
+
+  String _diagnoseDriveFailure(
+    String log, {
+    required String fallback,
+    int? status,
+  }) {
+    final lower = log.toLowerCase();
+    if (lower.contains('transform') &&
+        (lower.contains('does not exist') || lower.contains('invalid frame'))) {
+      return 'TF가 없어 Nav2가 로봇 위치를 계산하지 못했습니다.';
+    }
+    if (lower.contains('failed to activate') ||
+        lower.contains('failed to bring up')) {
+      return 'Nav2 lifecycle 노드 활성화에 실패했습니다.';
+    }
+    if (lower.contains('collision') || lower.contains('costmap')) {
+      return '코스트맵 또는 충돌 판정으로 경로 실행이 중단됐습니다.';
+    }
+    if (lower.contains('timeout') || lower.contains('timed out')) {
+      return 'Nav2 응답 또는 센서/TF 대기 시간이 초과됐습니다.';
+    }
+    final code = status == null ? '' : ' (Nav2 status $status)';
+    return '$fallback$code';
+  }
+
+  Future<void> _applyDriveLearningRecommendation(
+    DriveLearningRecommendation value,
+  ) async {
+    setState(() {
+      _fleetSettings = _fleetSettings.copyWith(
+        linearVelocity: value.linearVelocity,
+        linearAcceleration: value.linearAcceleration,
+        angularVelocity: value.angularVelocity,
+        angularAcceleration: value.angularAcceleration,
+      );
+    });
+    await _saveSettingToOpenProject(
+      label: '주행학습 추천값 적용',
+      detail:
+          '선속도 ${value.linearVelocity}, 선가속도 ${value.linearAcceleration}, '
+          '각속도 ${value.angularVelocity}, 각가속도 ${value.angularAcceleration}',
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('추천값을 프로젝트에 저장했습니다. 다시 배포하면 Nav2에 반영됩니다.')),
+    );
   }
 
   /// 이 작업의 단계를 진행 소식과 맞춰 볼 수 있는 꼴로 옮긴다.
@@ -8572,11 +8969,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
     final message = unknownPlaceMessage(fresh);
     if (message == null || !mounted) return;
     unawaited(
-      showWaypointErrorDialog(
-        context,
-        title: '로봇 위치를 모릅니다',
-        message: message,
-      ),
+      showWaypointErrorDialog(context, title: '로봇 위치를 모릅니다', message: message),
     );
   }
 
@@ -11255,7 +11648,11 @@ class _ControlDashboardState extends State<ControlDashboard> {
             description:
                 '${robot.robotId} 의 Nav2. 이 로봇의 라이다로 제 위치를 잡고'
                 ' 길을 만들어 간다. map_server 는 월드에 하나뿐이라 여기 없다.',
-            content: buildRobotNav2LaunchXml(robot, mapName),
+            content: buildRobotNav2LaunchXml(
+              robot,
+              mapName,
+              projectDomainId: _rosDomainId,
+            ),
             generatedAt: now,
           ),
           if (nav2.params[robot.robotId] != null)
@@ -12581,8 +12978,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                 : RobotSshTarget(
                                     host: sshHostController.text.trim(),
                                     user: sshUserController.text.trim(),
-                                    workspace:
-                                        sshWorkspaceController.text.trim(),
+                                    workspace: sshWorkspaceController.text
+                                        .trim(),
                                   ).toJson(),
                             gzName: id,
                             zones: zones.toList()..sort(),
@@ -13440,7 +13837,8 @@ class _ControlDashboardState extends State<ControlDashboard> {
         ),
       );
     }
-    if (checkBringupBeforeBackend(states) != BringupPrecheckResult.missingBringup) {
+    if (checkBringupBeforeBackend(states) !=
+        BringupPrecheckResult.missingBringup) {
       return true;
     }
     final message = bringupPrecheckMessage(states);
@@ -15303,6 +15701,7 @@ class _ControlDashboardState extends State<ControlDashboard> {
                         '그리드맵',
                         '로봇 관리',
                         '작업 관리',
+                        '주행학습',
                         'Policy 관리',
                         '로봇 모델 관리',
                         'ROS2 확인',
@@ -16028,6 +16427,12 @@ class _ControlDashboardState extends State<ControlDashboard> {
                                 onCancel: _cancelMockTask,
                                 readiness: _readiness,
                                 onRefreshReadiness: _refreshReadiness,
+                              )
+                            : _selectedMenu == _menuDriveLearning
+                            ? DriveLearningPage(
+                                mapName:
+                                    _robotDeployedMap?.summary.name ?? _mapName,
+                                onApply: _applyDriveLearningRecommendation,
                               )
                             : _selectedMenu == _menuRobotModels
                             ? const _RobotModelManagementPage()
@@ -21942,6 +22347,7 @@ class _NavigationRail extends StatelessWidget {
       // 잦은데(로봇을 띄우고 작업을 내고 다시 로봇 상태를 본다), 사이에
       // 다른 것이 끼면 그때마다 눈이 건너뛰어야 한다.
       (Icons.assignment_outlined, '작업 관리'),
+      (Icons.route_outlined, '주행학습'),
       (Icons.model_training_outlined, 'Policy 관리'),
       (Icons.view_in_ar_outlined, '로봇 모델'),
       (Icons.hub_outlined, 'ROS2 확인'),
@@ -29285,6 +29691,7 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.onResubscribe,
     required this.policiesOf,
     required this.onManagePolicies,
+    required this.initialPoseWaypoints,
     required this.onSendInitialPose,
     required this.initialPoseStation,
     required this.sshReadiness,
@@ -29295,6 +29702,8 @@ class _RobotDetailDialog extends StatefulWidget {
     required this.autostartStatus,
     required this.nudgeReadiness,
     required this.onNudge,
+    required this.onStopRobot,
+    required this.onDriveModeChanged,
     required this.onCaptureWaypoint,
   });
 
@@ -29341,7 +29750,10 @@ class _RobotDetailDialog extends StatefulWidget {
   ///
   /// AMCL 이 그 자리에서 파티클을 다시 뿌린다. 로봇은 **안 움직인다** — 부르는
   /// 쪽이 사람에게 먼저 확인받는다.
-  final Future<void> Function() onSendInitialPose;
+  /// 위치 재조정에 사용할 수 있는 Waypoint 이름.
+  final List<String> Function() initialPoseWaypoints;
+
+  final Future<void> Function(String stationName) onSendInitialPose;
 
   /// 초기 위치로 보낼 자리. 보낼 수 없으면 왜 못 보내는지 함께 온다.
   ///
@@ -29356,7 +29768,7 @@ class _RobotDetailDialog extends StatefulWidget {
     double? degrees,
     String topic,
   })
-  Function()
+  Function(String stationName)
   initialPoseStation;
 
   /// SSH 로 브링업을 띄울 수 있는가. 못 하면 왜 못 하는가.
@@ -29385,6 +29797,12 @@ class _RobotDetailDialog extends StatefulWidget {
   final Future<void> Function(NudgeKind kind, double meters, double degrees)
   onNudge;
 
+  /// 진행 중인 작업과 주행 명령을 취소하고 즉시 0 속도를 보낸다.
+  final Future<void> Function() onStopRobot;
+
+  /// 이 로봇의 Nav2 주행 모드만 바꾼다.
+  final Future<bool> Function(RobotDriveMode mode) onDriveModeChanged;
+
   /// 로봇이 지금 서 있는 자리를 Waypoint 로 만든다.
   final Future<void> Function() onCaptureWaypoint;
 
@@ -29401,10 +29819,15 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   bool _probing = false;
   String? _fixMessage;
   bool _fixOk = true;
+  String? _selectedInitialPoseWaypoint;
+  late RobotDriveMode _driveMode;
+  bool _changingDriveMode = false;
 
   @override
   void initState() {
     super.initState();
+    _selectedInitialPoseWaypoint = widget.registered?.chargerWaypoint;
+    _driveMode = widget.registered?.driveMode ?? RobotDriveMode.normal;
     // 위치와 배터리가 계속 바뀐다. 작업 상세와 같은 주기로 읽는다.
     _timer = Timer.periodic(
       const Duration(milliseconds: 200),
@@ -29432,7 +29855,12 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     setState(() => _probing = true);
     RobotLinkProbe probe;
     try {
-      probe = await probeRobotLinks(namespace: namespace);
+      probe = await probeRobotLinks(
+        namespace: namespace,
+        topicNamespace: _registered?.dataSource == RobotDataSource.real
+            ? _registered?.gzName
+            : null,
+      );
     } catch (_) {
       probe = RobotLinkProbe.unknown;
     }
@@ -30103,9 +30531,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
                     }
                   : null,
               icon: const Icon(Icons.power_settings_new_outlined, size: 18),
-              label: Text(
-                _autostart.installed ? '자동 실행 다시 설치' : '켤 때 자동 실행',
-              ),
+              label: Text(_autostart.installed ? '자동 실행 다시 설치' : '켤 때 자동 실행'),
             ),
             if (_autostart.installed)
               TextButton.icon(
@@ -30145,9 +30571,7 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   }
 
   /// 미세조종 입력칸. cm 와 도(度)로 받는다.
-  final TextEditingController _nudgeDistance = TextEditingController(
-    text: '5',
-  );
+  final TextEditingController _nudgeDistance = TextEditingController(text: '5');
   final TextEditingController _nudgeAngle = TextEditingController(text: '15');
   String? _nudgeError;
 
@@ -30167,22 +30591,19 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
     void run(NudgeKind kind) {
       final distance = parseNudgeCentimeters(_nudgeDistance.text);
       final angle = parseNudgeDegrees(_nudgeAngle.text);
-      final turning =
-          kind == NudgeKind.turnLeft || kind == NudgeKind.turnRight;
+      final turning = kind == NudgeKind.turnLeft || kind == NudgeKind.turnRight;
       // 쓰는 값만 따진다. 각도 칸이 비었다고 앞으로 가는 것을 막으면 안 된다.
       final error = turning ? angle.error : distance.error;
       final value = turning ? angle.degrees : distance.meters;
       if (error != null || value == null) {
         setState(
-          () => _nudgeError =
-              error ?? (turning ? '각도를 적어 주세요.' : '거리를 적어 주세요.'),
+          () =>
+              _nudgeError = error ?? (turning ? '각도를 적어 주세요.' : '거리를 적어 주세요.'),
         );
         return;
       }
       setState(() => _nudgeError = null);
-      unawaited(
-        widget.onNudge(kind, distance.meters ?? 0, angle.degrees ?? 0),
-      );
+      unawaited(widget.onNudge(kind, distance.meters ?? 0, angle.degrees ?? 0));
     }
 
     return [
@@ -30302,12 +30723,31 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
   /// 박아 넣는 `initial_pose` 는 Nav2 를 **처음 띄울 때만** 듣는다. 로봇을 손으로
   /// 옮겼거나 위치를 잃으면 여기서 다시 알려 준다.
   List<Widget> _initialPoseSection() {
-    final station = widget.initialPoseStation();
+    final choices = widget.initialPoseWaypoints();
+    final selected = choices.contains(_selectedInitialPoseWaypoint)
+        ? _selectedInitialPoseWaypoint
+        : choices.firstOrNull;
+    _selectedInitialPoseWaypoint = selected;
+    final station = widget.initialPoseStation(selected ?? '');
     final blocked = initialPoseBlockedReason(station.readiness);
     final ready = canSendInitialPose(station.readiness);
     return [
       _heading('초기 위치'),
-      _row('보낼 자리', ready ? station.stationName : '보낼 수 없음'),
+      DropdownButtonFormField<String>(
+        initialValue: selected,
+        decoration: const InputDecoration(
+          labelText: '실제로 놓은 Waypoint',
+          isDense: true,
+          border: OutlineInputBorder(),
+        ),
+        items: [
+          for (final name in choices)
+            DropdownMenuItem(value: name, child: Text(name)),
+        ],
+        onChanged: choices.isEmpty
+            ? null
+            : (value) => setState(() => _selectedInitialPoseWaypoint = value),
+      ),
       if (ready && station.x != null && station.y != null)
         _row(
           '좌표',
@@ -30327,11 +30767,11 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       Padding(
         padding: const EdgeInsets.only(top: 6, bottom: 2),
         child: OutlinedButton.icon(
-          onPressed: ready
-              ? () => unawaited(widget.onSendInitialPose())
+          onPressed: ready && selected != null
+              ? () => unawaited(widget.onSendInitialPose(selected))
               : null,
           icon: const Icon(Icons.my_location_outlined, size: 18),
-          label: const Text('이 자리를 초기 위치로 보내기'),
+          label: const Text('위치 재조정'),
         ),
       ),
       // 단추가 무엇을 안 하는지 먼저 적는다. 사람이 이것을 "로봇을 그 자리로
@@ -30346,6 +30786,60 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
       ),
     ];
   }
+
+  List<Widget> _driveModeSection() => [
+    const SizedBox(height: 8),
+    SegmentedButton<RobotDriveMode>(
+      segments: const [
+        ButtonSegment(
+          value: RobotDriveMode.normal,
+          icon: Icon(Icons.shield_outlined, size: 18),
+          label: Text('일반모드'),
+        ),
+        ButtonSegment(
+          value: RobotDriveMode.forced,
+          icon: Icon(Icons.compress, size: 18),
+          label: Text('강제모드'),
+        ),
+      ],
+      selected: {_driveMode},
+      onSelectionChanged: _changingDriveMode
+          ? null
+          : (selected) async {
+              final next = selected.first;
+              if (next == _driveMode) return;
+              setState(() => _changingDriveMode = true);
+              var applied = false;
+              try {
+                applied = await widget.onDriveModeChanged(next);
+              } catch (_) {
+                applied = false;
+              }
+              if (!mounted) return;
+              setState(() {
+                if (applied) _driveMode = next;
+                _changingDriveMode = false;
+              });
+            },
+    ),
+    Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 4),
+      child: Text(
+        _changingDriveMode ? '해당 로봇 Nav2에 적용 중…' : _driveMode.summary,
+        style: TextStyle(
+          color: _driveMode == RobotDriveMode.forced
+              ? const Color(0xFFB45309)
+              : const Color(0xFF64748B),
+          fontSize: 12,
+          height: 1.4,
+        ),
+      ),
+    ),
+    const Text(
+      '이 로봇의 Nav2 파라미터만 바뀝니다. 전체 백엔드와 로봇 브링업은 재시작하지 않습니다.',
+      style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
+    ),
+  ];
 
   /// 화면에 뿌리는 것과 같은 내용을 글로 만든다.
   String _asText() {
@@ -30457,6 +30951,19 @@ class _RobotDetailDialogState extends State<_RobotDetailDialog> {
               if (registered != null && !registered.isMobile)
                 ..._policySection(),
               if (registered != null && registered.isMobile) ...[
+                _heading('주행 제어'),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, bottom: 4),
+                  child: FilledButton.icon(
+                    onPressed: () => unawaited(widget.onStopRobot()),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFDC2626),
+                    ),
+                    icon: const Icon(Icons.stop_circle_outlined, size: 20),
+                    label: const Text('정지'),
+                  ),
+                ),
+                ..._driveModeSection(),
                 ..._bringupSection(),
                 ..._initialPoseSection(),
                 ..._nudgeSection(),

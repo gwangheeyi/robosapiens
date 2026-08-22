@@ -98,6 +98,17 @@ void main() {
       );
     });
 
+    test('화면에서 고른 Waypoint는 충전 자리 대신 사용할 수 있다', () {
+      expect(
+        checkInitialPoseReadiness(
+          robot: pinky(charger: ''),
+          worldKnown: true,
+          stationName: '대기3',
+        ),
+        InitialPoseReadiness.ready,
+      );
+    });
+
     /// 여기서 0,0 을 보내면 로봇은 자기가 지도 원점에 있다고 믿는다. 그 상태로
     /// 경로를 짜면 벽을 뚫고 가려 든다. 모르면 안 보내는 것이 맞다.
     test('지도에서 자리를 못 찾으면 안 보낸다', () {

@@ -23,6 +23,7 @@ class RobotLinkProbe {
 
 Future<RobotLinkProbe> probeRobotLinks({
   required String namespace,
+  String? topicNamespace,
   Duration flowTimeout = const Duration(seconds: 4),
 }) async => RobotLinkProbe.unknown;
 

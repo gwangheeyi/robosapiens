@@ -32,6 +32,35 @@ CREATE TABLE IF NOT EXISTS `schema_version` (
 -- 마스터 데이터
 -- ---------------------------------------------------------------------------
 
+-- 상품 마스터. OMX dispenser와 배송 작업이 같은 SKU 및 보관 온도 정보를
+-- 사용한다. 재고 수량은 음수가 될 수 없으며, 비활성 상품은 이력을 보존한다.
+CREATE TABLE IF NOT EXISTS `products` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `sku`          VARCHAR(64)     NOT NULL,
+  `name`         VARCHAR(160)    NOT NULL,
+  `category`     VARCHAR(80)     NOT NULL DEFAULT '',
+  -- Robot scheduling code: ambient | chilled | frozen
+  `storage_type` VARCHAR(16)     NOT NULL,
+  `unit`         VARCHAR(24)     NOT NULL DEFAULT '개',
+  `price`        DECIMAL(12,2)   NOT NULL DEFAULT 0,
+  `stock_qty`    INT             NOT NULL DEFAULT 0,
+  `safety_stock` INT             NOT NULL DEFAULT 0,
+  `active`       TINYINT(1)      NOT NULL DEFAULT 1,
+  `notes`        VARCHAR(500)    NOT NULL DEFAULT '',
+  `created_at`   DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at`   DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                                  ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_products_sku` (`sku`),
+  KEY `idx_products_storage_active` (`storage_type`, `active`),
+  KEY `idx_products_name` (`name`),
+  CONSTRAINT `chk_products_storage_type`
+    CHECK (`storage_type` IN ('ambient', 'chilled', 'frozen')),
+  CONSTRAINT `chk_products_price` CHECK (`price` >= 0),
+  CONSTRAINT `chk_products_stock` CHECK (`stock_qty` >= 0),
+  CONSTRAINT `chk_products_safety_stock` CHECK (`safety_stock` >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 로봇 등록 정보. 텔레메트리와 분리된 마스터 데이터.
 -- 등록 해제는 삭제가 아니라 active = 0 + retired_at 기록(이력 보존).
 CREATE TABLE IF NOT EXISTS `robots` (
@@ -564,6 +593,37 @@ CREATE TABLE IF NOT EXISTS `workcell_policies` (
   KEY `idx_workcell_policies_project` (`project_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- RMF 이동 한 단계가 끝날 때 목표와 실제 위치, 당시 주행 설정을 함께 남긴다.
+CREATE TABLE IF NOT EXISTS `drive_learning_samples` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `map_name` VARCHAR(255) NOT NULL,
+  `task_id` VARCHAR(64) NOT NULL,
+  `task_name` VARCHAR(255) NOT NULL,
+  `robot_id` VARCHAR(64) NOT NULL,
+  `waypoint_name` VARCHAR(255) NOT NULL,
+  `drive_mode` VARCHAR(16) NOT NULL,
+  `started_at` DATETIME(6) NOT NULL,
+  `finished_at` DATETIME(6) NOT NULL,
+  `linear_velocity` DOUBLE NOT NULL,
+  `linear_acceleration` DOUBLE NOT NULL,
+  `angular_velocity` DOUBLE NOT NULL,
+  `angular_acceleration` DOUBLE NOT NULL,
+  `goal_tolerance` DOUBLE NOT NULL,
+  `goal_x` DOUBLE NOT NULL, `goal_y` DOUBLE NOT NULL,
+  `actual_x` DOUBLE NOT NULL, `actual_y` DOUBLE NOT NULL,
+  `position_error` DOUBLE NOT NULL,
+  `goal_heading` DOUBLE NULL, `actual_heading` DOUBLE NULL,
+  `heading_error` DOUBLE NULL,
+  `success` TINYINT(1) NOT NULL DEFAULT 1,
+  `nav2_status` INT NULL,
+  `failure_reason` TEXT NULL,
+  `error_log` MEDIUMTEXT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_drive_learning_map_waypoint` (`map_name`, `waypoint_name`),
+  KEY `idx_drive_learning_robot_finished` (`robot_id`, `finished_at`),
+  CONSTRAINT `chk_drive_learning_mode` CHECK (`drive_mode` IN ('normal', 'forced'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 
 -- v3: 맵 프로젝트 테이블(map_projects / map_project_waypoints /
 --     map_project_lanes) 추가. 여러 창고 맵을 지도 이름으로 구분해 담는다.
@@ -589,6 +649,12 @@ CREATE TABLE IF NOT EXISTS `workcell_policies` (
 -- v13: WorkCell Policy 목록(workcell_policies)을 DB 로 옮긴다. 이름과 소속
 --      프로젝트를 고칠 수 있고, ZIP 이 없는 자리에서는 Hugging Face 에서 다시
 --      받는다. v12 는 db/migrate_v12_to_v13.sql 을 적용한다.
+-- v14: 상품 마스터(products)를 추가한다.
+--      v13 은 db/migrate_v13_to_v14.sql 을 적용한다.
+-- v15: 작업별 Waypoint 주행 결과(drive_learning_samples)를 저장한다.
+--      v14 는 db/migrate_v14_to_v15.sql 을 적용한다.
+-- v16: 실패한 주행의 Nav2 상태와 관련 오류 로그를 함께 저장한다.
+--      v15 는 db/migrate_v15_to_v16.sql 을 적용한다.
 INSERT INTO `schema_version` (`id`, `version`, `applied_at`)
-VALUES (1, 13, NOW(6))
+VALUES (1, 16, NOW(6))
 ON DUPLICATE KEY UPDATE `version` = VALUES(`version`), `applied_at` = NOW(6);

@@ -129,6 +129,7 @@ String buildRobotBringupCommand({
   required int projectDomainId,
 }) {
   final domain = robot.rosDomainId ?? projectDomainId;
+  final namespace = robot.gzName;
   final workspace = target.workspace.trim().isEmpty
       ? '~/pinky_pro'
       : target.workspace.trim();
@@ -151,7 +152,7 @@ String buildRobotBringupCommand({
   return '$prepare; '
       'setsid nohup ros2 launch pinky_bringup '
       'bringup_robot_namespaced.launch.xml '
-      'namespace:=${robot.gzName} > $log 2>&1 & '
+      'namespace:=$namespace > $log 2>&1 & '
       'echo STARTED';
 }
 
@@ -188,26 +189,9 @@ String _killBringup(RmfProjectRobot robot) {
 
 /// 이 로봇의 브링업에 딸린 PID 를 모으는 조각.
 ///
-/// **launch 이름만으로는 자식을 못 잡는다.** `ros2 launch` 가 띄우는 노드들의
-/// 명령줄에는 launch 파일 이름이 안 들어 있다:
-///
-///     ros2 launch ... bringup_robot_namespaced.launch.xml   ← 이름 있음
-///     sllidar_node --ros-args -r __ns:=/pinky_02            ← 없음
-///     bringup_namespaced --ros-args ... __ns:=/pinky_02     ← 없음
-///     battery_publisher --ros-args ... __ns:=/pinky_02      ← 없음
-///
-/// 부모만 죽이면 자식이 고아로 살아남아 시리얼 포트를 계속 잡는다. 그 뒤에
-/// 다시 띄우면 새 브링업이 포트를 못 열어 **조용히** 실패하고, 노드 두 벌이
-/// 뜬 것처럼 보인다. 실제로 그 일이 있었다.
-///
-/// 그래서 네임스페이스로도 잡는다 — `__ns:=/<로봇>` 은 모든 자식의 명령줄에
-/// 들어 있다. 이 로봇의 것만 골라내므로 다른 로봇은 안 건드린다.
-///
-/// 패턴을 쪼개 쓰는 까닭은 [_killBringup] 에 적었다.
-/// 이름 뒤는 낱말 경계로 끊는다. 끝(`$`) 으로 묶으면 안 된다 — 네임스페이스
-/// 뒤에 `--params-file ...` 이 더 붙는 것이 보통이라, 앵커를 달면 열 개 중
-/// 여덟 개를 놓친다(실측). 대신 경계가 없으면 `pinky_0` 이 `pinky_02` 까지
-/// 잡으므로, 이름 다음 글자가 이름의 일부가 아님을 확인한다.
+/// `ros2 run` 중인 짧은 구간과 실행 파일로 교체된 뒤를 모두 찾는다. 한 SSH
+/// 대상은 한 로봇이므로 네임스페이스로 구분하지 않는다. 패턴을 쪼개 쓰는
+/// 까닭은 [_killBringup] 에 적었다.
 String _bringupPids(RmfProjectRobot robot) =>
     "\$(pgrep -f '[b]ringup_robot_namespaced.*${robot.gzName}'; "
     "pgrep -f '[_]_ns:=/${robot.gzName}([^A-Za-z0-9_]|\$)')";
@@ -236,6 +220,7 @@ String buildRobotBringupService({
   required int projectDomainId,
 }) {
   final domain = robot.rosDomainId ?? projectDomainId;
+  final namespace = robot.gzName;
   final workspace = target.workspace.trim().isEmpty
       ? '~/pinky_pro'
       : target.workspace.trim();
@@ -252,7 +237,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 ${user.isEmpty ? '' : 'User=$user\n'}Environment=ROS_DOMAIN_ID=$domain
-ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash; [ -f $workspace/install/setup.bash ] && source $workspace/install/setup.bash; exec ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml namespace:=${robot.gzName}'
+Environment=FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash; [ -f $workspace/install/setup.bash ] && source $workspace/install/setup.bash; exec ros2 launch pinky_bringup bringup_robot_namespaced.launch.xml namespace:=$namespace'
 # 부팅 직후에는 시리얼 장치가 아직 안 올라와 있을 수 있다. 한 번 죽고 끝나면
 # 로봇은 켜졌는데 토픽은 안 오는 상태로 남는다.
 Restart=on-failure

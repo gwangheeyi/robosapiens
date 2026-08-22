@@ -59,10 +59,11 @@ enum InitialPoseReadiness {
 InitialPoseReadiness checkInitialPoseReadiness({
   required RmfProjectRobot robot,
   required bool worldKnown,
+  String? stationName,
 }) {
   if (!robot.dataSource.usesTopics) return InitialPoseReadiness.mockRobot;
   if (!robot.isMobile) return InitialPoseReadiness.notMobile;
-  if ((robot.chargerWaypoint ?? '').trim().isEmpty) {
+  if ((stationName ?? robot.chargerWaypoint ?? '').trim().isEmpty) {
     return InitialPoseReadiness.noStation;
   }
   if (!worldKnown) return InitialPoseReadiness.stationNotOnMap;
@@ -80,10 +81,8 @@ bool canSendInitialPose(InitialPoseReadiness readiness) =>
 String? initialPoseBlockedReason(InitialPoseReadiness readiness) =>
     switch (readiness) {
       InitialPoseReadiness.ready => null,
-      InitialPoseReadiness.mockRobot =>
-        'Mock 로봇은 앱 안에서만 움직입니다. 보낼 상대가 없습니다.',
-      InitialPoseReadiness.notMobile =>
-        '설치 로봇은 스스로 움직이지 않아 AMCL 이 없습니다.',
+      InitialPoseReadiness.mockRobot => 'Mock 로봇은 앱 안에서만 움직입니다. 보낼 상대가 없습니다.',
+      InitialPoseReadiness.notMobile => '설치 로봇은 스스로 움직이지 않아 AMCL 이 없습니다.',
       InitialPoseReadiness.noStation =>
         '자리 Waypoint 를 안 골랐습니다. 로봇 등록에서 자리를 고르면 '
             '그 좌표를 보냅니다.',
